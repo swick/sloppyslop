@@ -35,21 +35,9 @@ def cli():
     default=Path.cwd(),
     help="Project directory (defaults to current directory)",
 )
-@click.option(
-    "--containerfile",
-    type=str,
-    help="Path to Containerfile (relative to project dir). If not specified, uses .llm-sandbox/Containerfile",
-)
-def init(project_dir: Path, containerfile: Optional[str]):
+def init(project_dir: Path):
     """Initialize project configuration."""
     click.echo(f"Initializing LLM Sandbox in: {project_dir}")
-
-    # Determine containerfile path
-    if containerfile:
-        containerfile_rel_path = containerfile
-        click.echo(f"Using custom Containerfile path: {containerfile_rel_path}")
-    else:
-        containerfile_rel_path = ".llm-sandbox/Containerfile"
 
     # Check if already initialized
     config_dir = project_dir / ".llm-sandbox"
@@ -71,65 +59,41 @@ def init(project_dir: Path, containerfile: Optional[str]):
     # Initialize analyzer
     analyzer = ProjectAnalyzer(llm_provider)
 
-    containerfile_content = None
-    containerfile_source = None
+    # Search for existing containerfiles
+    click.echo("\nSearching for existing Containerfile/Dockerfile...")
+    found_containerfiles = analyzer.search_containerfiles(project_dir)
 
-    # Check if user specified a custom containerfile path
-    if containerfile:
-        custom_path = project_dir / containerfile
-        if custom_path.exists() and custom_path.is_file():
-            # Use the specified existing file
-            click.echo(f"\nUsing existing Containerfile: {containerfile}")
-            containerfile_content = custom_path.read_text()
-            containerfile_source = containerfile
-        else:
-            # Will save generated/selected containerfile to this path
-            click.echo(f"\nWill save Containerfile to: {containerfile}")
+    containerfile_path = None
 
-    # Search for existing containerfiles if we don't have one yet
-    if containerfile_content is None:
-        click.echo("\nSearching for existing Containerfile/Dockerfile...")
-        found_containerfiles = analyzer.search_containerfiles(project_dir)
-    else:
-        found_containerfiles = []
+    # Display options and get valid choice
+    while True:
+        click.echo("\nOptions:")
+        click.echo("  1. Generate new Containerfile with LLM")
+        click.echo("  2. Specify custom path")
 
-    if found_containerfiles and containerfile_content is None:
-        click.echo(f"\nFound {len(found_containerfiles)} containerfile(s):")
-        for i, path in enumerate(found_containerfiles, 1):
-            rel_path = path.relative_to(project_dir)
-            click.echo(f"  {i}. {rel_path}")
-
-        click.echo("  0. Generate new Containerfile with LLM")
+        if found_containerfiles:
+            for i, path in enumerate(found_containerfiles, 1):
+                rel_path = path.relative_to(project_dir)
+                click.echo(f"  {i + 2}. {rel_path}")
 
         choice = click.prompt(
-            "Select a containerfile or generate new",
+            "Select an option",
             type=int,
-            default=0,
+            default=1,
         )
 
-        if choice > 0 and choice <= len(found_containerfiles):
-            # Use selected containerfile
-            selected_path = found_containerfiles[choice - 1]
-            containerfile_content = selected_path.read_text()
-            containerfile_source = str(selected_path.relative_to(project_dir))
-            click.echo(f"\nUsing: {containerfile_source}")
-        else:
-            # Generate new
-            choice = 0
+        # Validate choice
+        max_option = 2 + len(found_containerfiles)
+        if choice < 1 or choice > max_option:
+            click.echo(f"Invalid choice. Please select a number between 1 and {max_option}.")
+            continue
 
-    elif containerfile_content is None:
-        click.echo("No existing containerfiles found.")
-        if not click.confirm("\nGenerate Containerfile with LLM?", default=True):
-            click.echo("Initialization cancelled.")
-            sys.exit(0)
-        choice = 0
+        # Process valid choice
+        if choice == 1:
+            # Generate containerfile
+            click.echo("\nGenerating Containerfile...")
 
-    # Generate containerfile if needed
-    if choice == 0 or containerfile_content is None:
-        click.echo("\nGenerating Containerfile...")
-        try:
             containerfile_content = analyzer.generate_containerfile(project_dir)
-            containerfile_source = "generated"
 
             # Show preview
             click.echo("\n" + "=" * 60)
@@ -139,32 +103,36 @@ def init(project_dir: Path, containerfile: Optional[str]):
             click.echo("=" * 60)
 
             if not click.confirm("\nUse this Containerfile?", default=True):
-                click.echo("Initialization cancelled.")
-                sys.exit(0)
+                continue
 
-        except Exception as e:
-            click.echo(f"Error generating Containerfile: {e}", err=True)
-            sys.exit(1)
+            # Save containerfile
+            click.echo("\nSaving configuration...")
+            containerfile_path = project_dir / ".llm-sandbox" / "Containerfile"
+            containerfile_path.parent.mkdir(parents=True, exist_ok=True)
+            containerfile_path.write_text(content)
+        elif choice == 2:
+            # Specify custom path
+            custom_path = click.prompt(
+                "Enter path to Containerfile (relative to project dir)",
+                type=str,
+            )
+            custom_file = project_dir / custom_path
+            if not custom_file.exists() or not custom_file.is_file():
+                click.echo(f"File not found: {custom_path}")
+                continue
+            containerfile_path = custom_file
+            break
+        else:  # choice > 2
+            # Use selected existing containerfile
+            containerfile_path = found_containerfiles[choice - 3]
+            break
 
-    # Save containerfile
-    click.echo("\nSaving configuration...")
-    if containerfile:
-        # Save to custom path
-        containerfile_path = project_dir / containerfile
-        containerfile_path.parent.mkdir(parents=True, exist_ok=True)
-        containerfile_path.write_text(containerfile_content)
-        final_containerfile_rel_path = containerfile
-        click.echo(f"Saved Containerfile to: {final_containerfile_rel_path}")
-    else:
-        # Save to default .llm-sandbox/Containerfile
-        containerfile_path = analyzer.save_containerfile(containerfile_content, project_dir)
-        final_containerfile_rel_path = str(containerfile_path.relative_to(project_dir))
-        click.echo(f"Saved Containerfile to: {final_containerfile_rel_path}")
+    containerfile_path = str(containerfile_path.relative_to(project_dir))
 
     # Create project config
     project_name = project_dir.name
     project_config = ProjectConfig(
-        containerfile=final_containerfile_rel_path,  # Path relative to project dir
+        containerfile=containerfile_path,  # Path relative to project dir
         image_tag=f"llm-sandbox-{project_name}",
     )
 

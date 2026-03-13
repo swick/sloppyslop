@@ -92,13 +92,9 @@ export ANTHROPIC_API_KEY="your-api-key"
 ```bash
 cd /path/to/your/project
 llm-sandbox init
-
-# Or specify a custom Containerfile path
-llm-sandbox init --containerfile docker/Containerfile
-
-# Or use an existing Containerfile
-llm-sandbox init --containerfile Dockerfile
 ```
+
+During initialization, you'll be prompted to select or generate a Containerfile. You can also specify a custom path interactively.
 
 This will:
 - Search for existing Containerfiles or generate one using LLM
@@ -310,9 +306,13 @@ Initialize project configuration.
 
 Options:
 - `--project-dir PATH`: Project directory (default: current directory)
-- `--containerfile PATH`: Path to Containerfile relative to project dir (default: `.llm-sandbox/Containerfile`)
-  - If the path exists, uses that file
-  - If the path doesn't exist, saves generated/selected Containerfile there
+
+The init process will:
+1. Search for existing Containerfiles
+2. Present options:
+   - **Option 1**: Generate new Containerfile with LLM
+   - **Option 2**: Specify custom path (existing or new location)
+   - **Options 3+**: Use found Containerfiles
 
 ### `llm-sandbox run`
 

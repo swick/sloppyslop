@@ -123,22 +123,3 @@ Explore the project thoroughly before generating the Containerfile."""
         )
 
         return result["containerfile"]
-
-    def save_containerfile(self, content: str, project_path: Path) -> Path:
-        """
-        Save Containerfile to project .llm-sandbox directory.
-
-        Args:
-            content: Containerfile content
-            project_path: Project directory
-
-        Returns:
-            Path to saved Containerfile
-        """
-        llm_sandbox_dir = project_path / ".llm-sandbox"
-        llm_sandbox_dir.mkdir(parents=True, exist_ok=True)
-
-        containerfile_path = llm_sandbox_dir / "Containerfile"
-        containerfile_path.write_text(content)
-
-        return containerfile_path
