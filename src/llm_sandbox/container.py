@@ -158,13 +158,13 @@ class ContainerManager:
                     "type": "bind",
                     "source": str(project_mount.absolute()),
                     "destination": "/project",
-                    "options": ["ro"],
+                    "options": ["ro", "z"],
                 },
                 {
                     "type": "bind",
                     "source": str(worktrees_mount.absolute()),
                     "destination": "/worktrees",
-                    "options": ["z"],
+                    "options": ["rw", "z"],
                 },
             ],
             "netns": {

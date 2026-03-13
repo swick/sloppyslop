@@ -1,17 +1,23 @@
-"""Example subcommand: GitHub PR review with interactive suggestions.
+"""Example subcommand: GitHub PR review with instruction-based criteria.
 
-This subcommand demonstrates:
-1. Fetching a PR branch from GitHub
-2. Using the LLM to review changes and suggest improvements
-3. Interactive user approval of suggestions
-4. Posting accepted suggestions as inline GitHub review comments on specific lines
+This subcommand demonstrates a single-agent workflow:
+1. Checks out PR head and base commits
+2. Reads project documentation (AGENTS.md, CLAUDE.md) if available
+3. Uses git history (git rev-list --ancestry-path) to identify commits in the PR
+4. Examines each commit (git show) to understand all changes
+5. Finds review instruction files in review/ and docs/review/ folders
+6. Reads ALL review instruction files and applies criteria to ALL PR changes
+7. Generates suggestions based on all criteria
+8. User approves suggestions and posts to GitHub
 
-The review comments appear directly on the relevant lines in the "Files changed" tab,
-using GitHub's suggestion feature for easy application.
+The review/ and docs/review/ folders contain INSTRUCTIONS on how to review code,
+not the code to review. The actual code to review is identified through git history
+between pr-base and pr-head commits.
+
+If no review instruction files exist, uses general best practices review criteria.
 
 Usage:
     llm-sandbox pr-review --pr 123
-    llm-sandbox pr-review --pr 123 --max-suggestions 5
     llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
 
 Authentication:
@@ -102,10 +108,10 @@ class GitHubClient:
 
 
 class PRReviewSubcommand(Subcommand):
-    """Review GitHub PR and suggest improvements interactively."""
+    """GitHub PR review with instruction-based criteria using a single agent."""
 
     name = "pr-review"
-    help = "Review a GitHub PR and interactively apply LLM-suggested improvements"
+    help = "PR review: single agent reads docs, finds changes, applies review instructions"
 
     def add_arguments(self, command):
         """Add custom arguments."""
@@ -119,14 +125,6 @@ class PRReviewSubcommand(Subcommand):
         )
         command.params.append(
             click.Option(
-                ["--max-suggestions"],
-                type=int,
-                default=10,
-                help="Maximum number of suggestions to generate (default: 10)",
-            )
-        )
-        command.params.append(
-            click.Option(
                 ["--with-token"],
                 type=str,
                 help="GitHub token (defaults to GH_TOKEN environment variable)",
@@ -135,9 +133,8 @@ class PRReviewSubcommand(Subcommand):
         return command
 
     def execute(self, project_dir: Path, run_sandbox, **kwargs):
-        """Execute PR review workflow."""
+        """Execute multi-agent PR review workflow."""
         pr_number = kwargs["pr"]
-        max_suggestions = kwargs.get("max_suggestions", 10)
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
 
         if not token:
@@ -156,7 +153,7 @@ class PRReviewSubcommand(Subcommand):
         self.github = GitHubClient(token)
 
         click.echo(f"\n{'='*60}")
-        click.echo(f"GitHub PR Review: #{pr_number}")
+        click.echo(f"Multi-Agent GitHub PR Review: #{pr_number}")
         click.echo(f"{'='*60}\n")
 
         # Step 1: Get repository info
@@ -181,51 +178,107 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error fetching PR info: {e}", err=True)
             sys.exit(1)
 
-        # Step 3: Define the review prompt and schema
-        review_prompt = f"""Review the changes in PR #{pr_number} and suggest improvements.
+        # Step 3: Single agent does everything
+        click.echo("\nStarting review agent...")
 
-The PR branch is '{pr_info['head_ref']}' (based on '{pr_info['base_ref']}').
+        agent_prompt = f"""You are a code review agent for PR #{pr_number}.
 
-Steps:
-1. Use checkout_commit to create a worktree named 'pr-{pr_number}' from the PR branch '{pr_info['head_ref']}'
-2. Use checkout_commit to create a worktree named 'base' from the base branch '{pr_info['base_ref']}'
-3. Compare the changes between the two branches
-4. Analyze the code quality, potential bugs, and suggest improvements
-5. For each suggestion, provide the file path, line range, current code, suggested code, and reasoning
+PR Information:
+- Title: {pr_info['title']}
+- Head branch: {pr_info['head_ref']}
+- Base branch: {pr_info['base_ref']}
+- Author: {pr_info['author']}
 
-Focus on:
+Your tasks:
+
+1. Check out two worktrees:
+   - checkout_commit(commit="{pr_info['head_ref']}", worktree_name="pr-head")
+   - checkout_commit(commit="{pr_info['base_ref']}", worktree_name="pr-base")
+
+2. Read project documentation from pr-head worktree (if available):
+   - Try to read AGENTS.md (using read_file)
+   - Try to read CLAUDE.md (using read_file)
+   - If these don't exist, that's fine - note that in your summary
+
+3. Identify commits and changes in the PR using git history:
+   - Use execute_command to get commits: cd /worktrees/pr-head && git rev-list --ancestry-path $(cd /worktrees/pr-base && git rev-parse HEAD)..HEAD
+   - For each commit, use git show to examine what changed (files, diffs, commit messages)
+   - Build a summary of all changes across all commits in the PR
+
+4. Find and read review instruction files from pr-head worktree:
+   - Use glob to find files in: review/ directory
+   - Use glob to find files in: docs/review/ directory
+   - Read EACH instruction file using read_file(worktree="pr-head", path="...")
+   - Understand all the review criteria from all instruction files
+   - If no review instruction files exist, use general best practices
+
+5. Review ALL the changes in the PR according to ALL the criteria:
+   - Apply all criteria from all instruction files
+   - Use git commands or file tools to examine the changes
+   - Use read_file to examine specific files from pr-head and pr-base
+   - Focus on the changes between the two worktrees
+   - Generate suggestions for ANY files that violate any criteria
+
+Review criteria to apply:
+- All specific instructions from review instruction files (if any exist)
 - Code quality and best practices
 - Potential bugs or edge cases
 - Performance improvements
 - Security concerns
 - Readability and maintainability
+- Consistency with existing code patterns
+- Alignment with project documentation
 
-Provide up to {max_suggestions} specific, actionable suggestions."""
+For each suggestion, provide:
+- The file path (relative to repository root)
+- Line numbers in the pr-head version
+- Current code and suggested replacement
+- Clear reasoning based on the review criteria and which instruction file it relates to (if applicable)
 
-        suggestion_schema = {
+Return:
+- documentation_summary: Summary of AGENTS.md and CLAUDE.md (or "No project documentation found")
+- commits_summary: Summary of commits and changes found
+- review_instruction_files: List of review instruction file paths found (empty if none)
+- review_criteria_applied: Summary of all review criteria from all instruction files
+- suggestions: All review suggestions across all files"""
+
+        agent_schema = {
             "type": "object",
             "properties": {
-                "summary": {
+                "documentation_summary": {
                     "type": "string",
-                    "description": "Brief summary of the PR review",
+                    "description": "Summary of project documentation (AGENTS.md, CLAUDE.md)",
+                },
+                "commits_summary": {
+                    "type": "string",
+                    "description": "Summary of commits and changes found between pr-base and pr-head",
+                },
+                "review_instruction_files": {
+                    "type": "array",
+                    "description": "List of review instruction file paths from review/ and docs/review/ (empty if none)",
+                    "items": {"type": "string"},
+                },
+                "review_criteria_applied": {
+                    "type": "string",
+                    "description": "Summary of all review criteria applied from all instruction files",
                 },
                 "suggestions": {
                     "type": "array",
-                    "description": "List of improvement suggestions",
+                    "description": "All review suggestions across all files",
                     "items": {
                         "type": "object",
                         "properties": {
                             "file": {
                                 "type": "string",
-                                "description": "File path relative to worktree",
+                                "description": "File path relative to repository root",
                             },
                             "line_start": {
                                 "type": "integer",
-                                "description": "Starting line number",
+                                "description": "Starting line number in pr-head",
                             },
                             "line_end": {
                                 "type": "integer",
-                                "description": "Ending line number",
+                                "description": "Ending line number in pr-head",
                             },
                             "current_code": {
                                 "type": "string",
@@ -237,55 +290,64 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
                             },
                             "reason": {
                                 "type": "string",
-                                "description": "Explanation of why this change is suggested",
+                                "description": "Explanation based on review criteria",
                             },
                             "category": {
                                 "type": "string",
-                                "enum": ["bug", "performance", "security", "style", "refactor"],
+                                "enum": ["bug", "performance", "security", "style", "refactor", "documentation"],
                                 "description": "Category of the suggestion",
                             },
                         },
-                        "required": [
-                            "file",
-                            "line_start",
-                            "line_end",
-                            "current_code",
-                            "suggested_code",
-                            "reason",
-                            "category",
-                        ],
+                        "required": ["file", "line_start", "line_end", "current_code", "suggested_code", "reason", "category"],
                     },
                 },
             },
-            "required": ["summary", "suggestions"],
+            "required": ["documentation_summary", "commits_summary", "review_instruction_files", "review_criteria_applied", "suggestions"],
         }
 
-        # Step 4: Get LLM review
-        click.echo("\nAnalyzing PR with LLM...")
-        review_result = run_sandbox(
-            prompt=review_prompt,
-            output_schema=suggestion_schema,
+        # Run single agent
+        result = run_sandbox(
+            prompt=agent_prompt,
+            output_schema=agent_schema,
         )
 
-        # Step 5: Show summary
+        # Show results
         click.echo(f"\n{'='*60}")
-        click.echo("Review Summary")
+        click.echo("Review Agent Results")
         click.echo(f"{'='*60}")
-        click.echo(review_result["summary"])
-        click.echo(f"\nFound {len(review_result['suggestions'])} suggestions")
+        click.echo(f"\nDocumentation Summary:")
+        click.echo(result["documentation_summary"])
+        click.echo(f"\nCommits Summary:")
+        click.echo(result["commits_summary"])
+        click.echo(f"\nReview Instruction Files: {len(result['review_instruction_files'])}")
+        if result["review_instruction_files"]:
+            for file in result["review_instruction_files"]:
+                click.echo(f"  - {file}")
+        else:
+            click.echo("  (No specific review instruction files found - using general best practices)")
+        click.echo(f"\nCriteria Applied:")
+        click.echo(result['review_criteria_applied'])
+        click.echo(f"\nFound {len(result['suggestions'])} suggestions")
 
-        if not review_result["suggestions"]:
-            click.echo("\nNo suggestions to apply. PR looks good!")
+        all_suggestions = result["suggestions"]
+
+        # Aggregate results
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Review Complete - Total Suggestions: {len(all_suggestions)}")
+        click.echo(f"{'='*60}")
+
+        if not all_suggestions:
+            click.echo("\nNo suggestions generated. All files look good!")
             return
 
-        # Step 6: Interactive approval
+        # Step 5: Interactive approval
         click.echo(f"\n{'='*60}")
         click.echo("Review Suggestions")
         click.echo(f"{'='*60}\n")
 
         accepted_suggestions = []
-        for i, suggestion in enumerate(review_result["suggestions"], 1):
-            click.echo(f"\nSuggestion {i}/{len(review_result['suggestions'])}")
+        for i, suggestion in enumerate(all_suggestions, 1):
+            click.echo(f"\nSuggestion {i}/{len(all_suggestions)}")
             click.echo(f"  File: {suggestion['file']}")
             click.echo(f"  Lines: {suggestion['line_start']}-{suggestion['line_end']}")
             click.echo(f"  Category: {suggestion['category']}")
@@ -306,13 +368,27 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             click.echo("\nNo suggestions accepted. No review to post.")
             return
 
-        # Step 7: Post review to GitHub
+        # Step 6: Post review to GitHub
         click.echo(f"\n{'='*60}")
         click.echo(f"Posting {len(accepted_suggestions)} suggestions to GitHub")
         click.echo(f"{'='*60}\n")
 
         # Post summary comment
-        summary_body = self._format_summary_comment(len(accepted_suggestions), review_result["summary"])
+        summary = f"""Code review completed for PR #{pr_number}.
+
+Documentation reviewed:
+{result['documentation_summary']}
+
+Changes analyzed:
+{result['commits_summary'][:300]}{"..." if len(result['commits_summary']) > 300 else ""}
+
+Review criteria applied:
+{result['review_criteria_applied'][:200]}{"..." if len(result['review_criteria_applied']) > 200 else ""}
+
+Total suggestions: {len(all_suggestions)}
+Accepted suggestions: {len(accepted_suggestions)}"""
+
+        summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
         try:
             self.github.post_issue_comment(repo_name, pr_number, summary_body)
             click.echo(f"✓ Posted review summary")
@@ -341,7 +417,7 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
                 click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
                 failed_suggestions.append(suggestion)
 
-        # Step 8: Show results
+        # Step 7: Show results
         click.echo(f"\n{'='*60}")
         click.echo(f"Posted {success_count}/{len(accepted_suggestions)} inline comments")
         click.echo(f"{'='*60}")
@@ -408,6 +484,7 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             "security": "🔒",
             "style": "💅",
             "refactor": "♻️",
+            "documentation": "📝",
         }.get(suggestion["category"], "💡")
 
         parts = [

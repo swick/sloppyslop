@@ -104,7 +104,7 @@ The LLM operates on git worktrees created dynamically in the container:
 Create custom workflows by defining subcommands. See [examples/subcommands/](examples/subcommands/) for examples.
 
 Example subcommands:
-- `pr-review` - Interactive GitHub PR review that posts LLM suggestions as inline comments on specific code lines
+- `pr-review` - Multi-agent GitHub PR review: coordinator reads docs and review instructions, spawns per-file agents for changed files, posts suggestions as inline comments
 
 ### Available Tools for LLM
 
