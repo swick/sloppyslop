@@ -286,7 +286,7 @@ def register_subcommand_class(subcommand_class):
     )
     @click.option(
         "--pull-branches",
-        help="Comma-separated list of branches to pull from worktree",
+        help="Comma-separated list of worktree names to keep as output branches",
     )
     def subcommand_wrapper(**kwargs):
         pass

@@ -86,7 +86,7 @@ class ContainerManager:
         self,
         image_id: str,
         project_mount: Path,
-        worktree_mount: Path,
+        worktrees_mount: Path,
         network: str = "none",
     ) -> str:
         """
@@ -95,7 +95,7 @@ class ContainerManager:
         Args:
             image_id: Container image ID or tag
             project_mount: Project directory to mount (read-only)
-            worktree_mount: Worktree directory to mount (read-write)
+            worktrees_mount: Worktrees directory to mount (read-write, can be empty)
             network: Network mode ("none" or "bridge")
 
         Returns:
@@ -108,9 +108,9 @@ class ContainerManager:
             "-v",
             f"{project_mount}:/project:ro",  # Read-only project mount
             "-v",
-            f"{worktree_mount}:/workspace:rw",  # Read-write worktree mount
+            f"{worktrees_mount}:/worktrees:rw",  # Read-write worktrees mount
             "-w",
-            "/workspace",  # Set working directory
+            "/worktrees",  # Set working directory
             "--rm",  # Auto-remove on stop
             image_id,
             "sleep",

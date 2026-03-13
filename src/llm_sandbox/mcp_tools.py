@@ -1,5 +1,7 @@
 """Model Context Protocol (MCP) tools - base classes and definitions."""
 
+import re
+import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -106,8 +108,8 @@ class ExecuteCommandTool(MCPTool):
                     },
                     "workdir": {
                         "type": "string",
-                        "description": "Working directory for command (default: /workspace)",
-                        "default": "/workspace",
+                        "description": "Working directory for command (default: /worktrees)",
+                        "default": "/worktrees",
                     },
                 },
                 "required": ["command"],
@@ -119,7 +121,7 @@ class ExecuteCommandTool(MCPTool):
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Execute shell command in container."""
         command = arguments["command"]
-        workdir = arguments.get("workdir", "/workspace")
+        workdir = arguments.get("workdir", "/worktrees")
 
         exit_code, stdout, stderr = self.container_manager.exec_command(
             self.container_id,
@@ -138,24 +140,32 @@ class ExecuteCommandTool(MCPTool):
 class GitCommitTool(MCPTool):
     """Tool for committing files to git worktree."""
 
-    def __init__(self, container_manager, container_id: str):
+    def __init__(
+        self,
+        container_manager,
+        container_id: str,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
         """
         Initialize git commit tool.
 
         Args:
-            container_manager: Container manager instance
-            container_id: Container ID to execute commands in
+            container_manager: Container manager instance (unused, kept for compatibility)
+            container_id: Container ID (unused, kept for compatibility)
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for host git operations
         """
         super().__init__(
             name="git_commit",
-            description="Commit files to the worktree. Stages the specified files and creates a commit.",
+            description="Commit files to a worktree. Stages the specified files and creates a commit. Branch parameter is REQUIRED and must match pattern llm-container/{instance_id}/{worktree_name}",
             parameters={
                 "type": "object",
                 "properties": {
                     "files": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of file paths to commit (relative to /workspace)",
+                        "description": "List of file paths to commit (relative to worktree)",
                     },
                     "message": {
                         "type": "string",
@@ -163,51 +173,197 @@ class GitCommitTool(MCPTool):
                     },
                     "branch": {
                         "type": "string",
-                        "description": "Optional: Create and switch to a new branch before committing",
+                        "description": "Branch name (REQUIRED, must match llm-container/{instance_id}/{worktree_name})",
                     },
                 },
-                "required": ["files", "message"],
+                "required": ["files", "message", "branch"],
             },
         )
-        self.container_manager = container_manager
-        self.container_id = container_id
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def _validate_branch_pattern(self, branch: str) -> bool:
+        """Validate branch matches required pattern."""
+        pattern = rf"^llm-container/{re.escape(self.instance_id)}/[a-zA-Z0-9_-]+$"
+        return bool(re.match(pattern, branch))
+
+    def _derive_worktree_path(self, branch: str) -> str:
+        """Derive worktree path from branch name."""
+        # Extract worktree name from branch: llm-container/{instance_id}/{worktree_name}
+        parts = branch.split("/")
+        if len(parts) >= 3:
+            worktree_name = parts[-1]
+            return f"/worktrees/{worktree_name}"
+        return "/worktrees"
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Commit files with message."""
         files = arguments["files"]
         message = arguments["message"]
-        branch = arguments.get("branch")
+        branch = arguments["branch"]
 
-        commands = []
+        # Validate branch pattern
+        if not self._validate_branch_pattern(branch):
+            return {
+                "success": False,
+                "error": f"Invalid branch name: {branch}. Must match pattern: llm-container/{self.instance_id}/<worktree_name>",
+            }
 
-        # Create branch if specified
-        if branch:
-            commands.append(f'git checkout -b "{branch}"')
+        # Extract worktree name from branch
+        worktree_name = branch.split("/")[-1]
 
-        # Stage files
-        files_str = " ".join(f'"{f}"' for f in files)
-        commands.append(f"git add {files_str}")
+        # Get host worktree path
+        if not self.runner.worktrees_base_dir:
+            return {
+                "success": False,
+                "error": "Worktrees base directory not initialized",
+            }
 
-        # Commit changes
-        # Escape message for shell
-        escaped_message = message.replace('"', '\\"')
-        commands.append(f'git commit -m "{escaped_message}"')
+        host_worktree_path = self.runner.worktrees_base_dir / worktree_name
 
-        # Execute commands
-        command = " && ".join(commands)
+        if not host_worktree_path.exists():
+            return {
+                "success": False,
+                "error": f"Worktree does not exist: {worktree_name}",
+            }
+
+        try:
+            # Use GitOperations to commit files
+            self.runner.git_ops.commit_files(
+                host_worktree_path,
+                files,
+                message,
+            )
+
+            return {
+                "success": True,
+                "branch": branch,
+                "worktree_path": str(host_worktree_path),
+                "message": "Files committed successfully",
+            }
+
+        except RuntimeError as e:
+            # Git command failed
+            error_msg = str(e)
+            return {
+                "success": False,
+                "error": error_msg,
+                "branch": branch,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+            }
+
+
+class CheckoutCommitTool(MCPTool):
+    """Tool for creating new worktrees from commits."""
+
+    def __init__(
+        self,
+        container_manager,
+        container_id: str,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize checkout commit tool.
+
+        Args:
+            container_manager: Container manager instance
+            container_id: Container ID to execute commands in
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for tracking worktrees
+        """
+        super().__init__(
+            name="checkout_commit",
+            description="Create a new worktree from any commit. Creates worktree at /worktrees/{worktree_name} with branch llm-container/{instance_id}/{worktree_name}",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "commit": {
+                        "type": "string",
+                        "description": "Commit hash/branch/tag to checkout",
+                    },
+                    "worktree_name": {
+                        "type": "string",
+                        "description": "Name for worktree (optional, auto-generated if omitted). Must match [a-zA-Z0-9_-]+",
+                    },
+                },
+                "required": ["commit"],
+            },
+        )
+        self.container_manager = container_manager
+        self.container_id = container_id
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def _validate_worktree_name(self, name: str) -> bool:
+        """Validate worktree name matches allowed pattern."""
+        return bool(re.match(r"^[a-zA-Z0-9_-]+$", name))
+
+    def _generate_worktree_name(self) -> str:
+        """Generate a unique worktree name."""
+        short_uuid = str(uuid.uuid4())[:8]
+        return f"wt-{short_uuid}"
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Create worktree from commit."""
+        commit = arguments["commit"]
+        worktree_name = arguments.get("worktree_name")
+
+        # Auto-generate name if not provided
+        if not worktree_name:
+            worktree_name = self._generate_worktree_name()
+
+        # Validate worktree name
+        if not self._validate_worktree_name(worktree_name):
+            return {
+                "success": False,
+                "error": f"Invalid worktree name: {worktree_name}. Must match [a-zA-Z0-9_-]+",
+            }
+
+        # Check for duplicates
+        if worktree_name in self.runner.created_worktrees:
+            return {
+                "success": False,
+                "error": f"Worktree '{worktree_name}' already exists in this session",
+            }
+
+        # Generate branch name
+        branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
+
+        # Execute git worktree add command
+        command = (
+            f'cd /project && '
+            f'git worktree add -b "{branch_name}" '
+            f'"/worktrees/{worktree_name}" "{commit}"'
+        )
 
         exit_code, stdout, stderr = self.container_manager.exec_command(
             self.container_id,
             command,
-            "/workspace",
+            "/project",
         )
 
+        if exit_code != 0:
+            return {
+                "success": False,
+                "exit_code": exit_code,
+                "error": f"Failed to create worktree: {stderr}",
+                "stdout": stdout,
+            }
+
+        # Track created worktree
+        self.runner.created_worktrees.append(worktree_name)
+
         return {
-            "success": exit_code == 0,
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "branch": branch,
+            "success": True,
+            "worktree_name": worktree_name,
+            "worktree_path": f"/worktrees/{worktree_name}",
+            "branch_name": branch_name,
+            "commit": commit,
         }
 
 
@@ -251,6 +407,16 @@ class ReadFileTool(MCPTool):
         max_lines = arguments.get("max_lines", 1000)
 
         try:
+            # This is actually a TOCTOU issue, but we assume that the
+            # project_path doesn't have symlinks pointing outside of it and also
+            # that the container cannot modify them. We have to exclude
+            # ".llm-sandbox" from accepted paths
+            if ".llm-sandbox" in path:
+                return {
+                    "success": False,
+                    "error": "Permission denied",
+                }
+
             file_path = self.project_path / path
 
             # Security check: ensure path is within project directory
@@ -328,6 +494,16 @@ class ListDirectoryTool(MCPTool):
         path = arguments.get("path", ".")
 
         try:
+            # This is actually a TOCTOU issue, but we assume that the
+            # project_path doesn't have symlinks pointing outside of it and also
+            # that the container cannot modify them. We have to exclude
+            # ".llm-sandbox" from accepted paths
+            if ".llm-sandbox" in path:
+                return {
+                    "success": False,
+                    "error": "Permission denied",
+                }
+
             dir_path = self.project_path / path
 
             # Security check: ensure path is within project directory

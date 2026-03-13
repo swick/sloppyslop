@@ -1,7 +1,6 @@
 """Git operations for pulling branches from worktree to main repo."""
 
 import shutil
-import subprocess
 from pathlib import Path
 from typing import List
 
@@ -143,31 +142,14 @@ class GitOperations:
             self.remove_worktree(worktree_dir)
 
         # Create worktree
-        cmd = [
-            "git",
-            "-C",
-            str(self.repo_path),
-            "worktree",
-            "add",
-            "--detach",
-            str(worktree_dir),
-            commit,
-        ]
-
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            self.repo.git.worktree("add", "--detach", str(worktree_dir), commit)
             return worktree_dir
 
-        except subprocess.CalledProcessError as e:
+        except git.GitCommandError as e:
             raise RuntimeError(
                 f"Failed to create worktree: {e.stderr}\n"
-                f"Commit: {commit}\n"
-                f"Command: {' '.join(cmd)}"
+                f"Commit: {commit}"
             ) from e
 
     def remove_worktree(self, worktree_path: Path) -> None:
@@ -181,24 +163,9 @@ class GitOperations:
             return
 
         # First try git worktree remove
-        cmd = [
-            "git",
-            "-C",
-            str(self.repo_path),
-            "worktree",
-            "remove",
-            "--force",
-            str(worktree_path),
-        ]
-
         try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError:
+            self.repo.git.worktree("remove", "--force", str(worktree_path))
+        except git.GitCommandError:
             # If git worktree remove fails, manually delete
             try:
                 shutil.rmtree(worktree_path)
@@ -207,14 +174,7 @@ class GitOperations:
 
         # Clean up any leftover worktree metadata
         try:
-            prune_cmd = [
-                "git",
-                "-C",
-                str(self.repo_path),
-                "worktree",
-                "prune",
-            ]
-            subprocess.run(prune_cmd, capture_output=True, text=True)
+            self.repo.git.worktree("prune")
         except Exception:
             pass
 
@@ -233,3 +193,99 @@ class GitOperations:
             return str(commit_obj.hexsha)
         except git.GitCommandError as e:
             raise ValueError(f"Invalid commit reference: {commit}") from e
+
+    def create_worktree_on_branch(
+        self,
+        commit: str,
+        worktree_dir: Path,
+        branch_name: str,
+    ) -> Path:
+        """
+        Create worktree from commit on a new branch.
+
+        Args:
+            commit: Git commit/branch/tag reference
+            worktree_dir: Directory to create worktree in
+            branch_name: Name of the new branch to create
+
+        Returns:
+            Path to created worktree
+        """
+        # Ensure parent directory exists
+        worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        # Remove existing worktree if present
+        if worktree_dir.exists():
+            self.remove_worktree(worktree_dir)
+
+        # GitPython doesn't have direct worktree support, use git command
+        try:
+            self.repo.git.worktree("add", "-b", branch_name, str(worktree_dir), commit)
+            return worktree_dir
+
+        except git.GitCommandError as e:
+            raise RuntimeError(
+                f"Failed to create worktree on branch: {e.stderr}\n"
+                f"Commit: {commit}\n"
+                f"Branch: {branch_name}"
+            ) from e
+
+    def delete_branch(self, branch_name: str, force: bool = True) -> None:
+        """
+        Delete branch from repository.
+
+        Args:
+            branch_name: Name of branch to delete
+            force: Use force delete (default: True)
+        """
+        try:
+            if force:
+                self.repo.git.branch("-D", branch_name)
+            else:
+                self.repo.git.branch("-d", branch_name)
+        except git.GitCommandError:
+            # Ignore errors for cleanup robustness
+            pass
+
+    def commit_files(
+        self,
+        worktree_path: Path,
+        files: List[str],
+        message: str,
+    ) -> None:
+        """
+        Commit files in a worktree.
+
+        Args:
+            worktree_path: Path to worktree
+            files: List of file paths to commit (relative to worktree)
+            message: Commit message
+
+        Raises:
+            RuntimeError: If git commands fail
+        """
+        if not worktree_path.exists():
+            raise ValueError(f"Worktree does not exist: {worktree_path}")
+
+        try:
+            # Open the worktree as a git repository
+            worktree_repo = git.Repo(worktree_path)
+
+            # Stage files
+            worktree_repo.index.add(files)
+
+            # Commit changes
+            worktree_repo.index.commit(message)
+
+        except git.GitCommandError as e:
+            raise RuntimeError(
+                f"Failed to commit files: {e.stderr}\n"
+                f"Files: {', '.join(files)}\n"
+                f"Worktree: {worktree_path}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to commit files: {str(e)}\n"
+                f"Files: {', '.join(files)}\n"
+                f"Worktree: {worktree_path}"
+            ) from e
