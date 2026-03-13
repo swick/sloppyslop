@@ -35,7 +35,7 @@ class ContainerManager:
         tag: str,
     ) -> str:
         """
-        Build container image with complete isolation.
+        Build container image.
 
         Args:
             containerfile_path: Path to Containerfile
@@ -44,14 +44,10 @@ class ContainerManager:
 
         Returns:
             Image ID
-
-        Note:
-            Uses --network=none for complete isolation during build.
         """
         cmd = [
             "podman",
             "build",
-            "--network=none",  # Complete isolation during build
             "-f",
             str(containerfile_path),
             "-t",
