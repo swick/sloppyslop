@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import List, Optional
 
+from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import LLMProvider
 from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ListDirectoryTool
 
@@ -132,7 +133,7 @@ class ProjectAnalyzer:
 Project path: {project_path}
 
 The Containerfile should:
-1. Use an appropriate base image
+1. Use an appropriate base image (suggested: {Image.DEFAULT_IMAGE})
 2. Install necessary dependencies for the project
 3. Set up the working environment
 4. Be suitable for running code analysis and development tasks"""
