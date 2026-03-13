@@ -8,8 +8,28 @@ from llm_sandbox.config import GlobalConfig, ProjectConfig, get_provider_config
 from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
-from llm_sandbox.mcp_server import MCPServer
+from llm_sandbox.mcp_tools import MCPServer, ExecuteCommandTool, GitCommitTool
 from llm_sandbox.worktree import WorktreeManager
+
+
+class ContainerMCPServer(MCPServer):
+    """MCP server for container and git operations."""
+
+    def __init__(self, container_manager: ContainerManager, container_id: str):
+        """
+        Initialize container MCP server.
+
+        Args:
+            container_manager: Container manager instance
+            container_id: Container ID to execute commands in
+        """
+        super().__init__()
+        execute_command_tool = ExecuteCommandTool(container_manager, container_id)
+        git_commit_tool = GitCommitTool(container_manager, container_id)
+        self.tools = {
+            execute_command_tool.name: execute_command_tool,
+            git_commit_tool.name: git_commit_tool,
+        }
 
 
 class SandboxRunner:
@@ -103,7 +123,7 @@ class SandboxRunner:
             print(f"Container started: {container_id[:12]}")
 
             # Step 4: Initialize MCP server
-            mcp_server = MCPServer(self.container_manager, container_id)
+            mcp_server = ContainerMCPServer(self.container_manager, container_id)
 
             # Step 5: Execute LLM prompt with structured output
             print("Executing LLM prompt...")

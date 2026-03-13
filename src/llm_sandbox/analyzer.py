@@ -4,7 +4,26 @@ from pathlib import Path
 from typing import List, Optional
 
 from llm_sandbox.llm_provider import LLMProvider
-from llm_sandbox.local_tools import LocalToolServer
+from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ListDirectoryTool
+
+
+class LocalMCPServer(MCPServer):
+    """MCP server for local file operations during project analysis."""
+
+    def __init__(self, project_path: Path):
+        """
+        Initialize local MCP server.
+
+        Args:
+            project_path: Path to project directory
+        """
+        super().__init__()
+        read_file_tool = ReadFileTool(project_path)
+        list_directory_tool = ListDirectoryTool(project_path)
+        self.tools = {
+            read_file_tool.name: read_file_tool,
+            list_directory_tool.name: list_directory_tool,
+        }
 
 
 class ProjectAnalyzer:
@@ -75,8 +94,8 @@ class ProjectAnalyzer:
         Returns:
             Generated Containerfile content
         """
-        # Create local tool server for file exploration
-        tool_server = LocalToolServer(project_path)
+        # Create local MCP server for file exploration
+        mcp_server = LocalMCPServer(project_path)
 
         # Define output schema for Containerfile generation
         output_schema = {
@@ -117,7 +136,7 @@ Explore the project thoroughly before generating the Containerfile."""
 
         result = self.llm_provider.generate_structured(
             prompt,
-            tool_server,
+            mcp_server,
             output_schema,
             max_iterations=15,
         )

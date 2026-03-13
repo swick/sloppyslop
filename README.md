@@ -197,10 +197,19 @@ image_tag: llm-sandbox-myproject
 6. **Branch Pulling**: Branches created in the worktree are pulled to main repo
 7. **Cleanup**: Container and worktree are automatically removed
 
-## MCP Tools Available to LLM
+## MCP Tools
+
+The system uses the Model Context Protocol (MCP) to provide tools to the LLM.
+
+### Container MCP Tools (during `run`)
 
 - `execute_command`: Run any shell command in the container
 - `git_commit`: Stage and commit files with a message (optionally creating a branch)
+
+### Local MCP Tools (during `init`)
+
+- `read_file`: Read contents of files in the project directory
+- `list_directory`: List files and directories in a path
 
 ## Subcommands
 

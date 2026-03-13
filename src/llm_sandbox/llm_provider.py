@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from anthropic import Anthropic
 
-from llm_sandbox.mcp_server import MCPServer, MCPTool
+from llm_sandbox.mcp_tools import MCPServer
 
 
 class LLMProvider(ABC):

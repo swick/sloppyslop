@@ -119,7 +119,9 @@ llm-container-sandbox/
 │   ├── container.py         # Podman integration
 │   ├── git_ops.py           # Git operations
 │   ├── llm_provider.py      # Claude API integration
-│   ├── mcp_server.py        # MCP server
+│   ├── mcp_tools.py         # MCP base classes (MCPServer, MCPTool)
+│   ├── mcp_server.py        # Container MCP server implementation
+│   ├── local_tools.py       # Local MCP server implementation
 │   ├── runner.py            # Workflow orchestration
 │   ├── subcommand.py        # Subcommand base class
 │   └── worktree.py          # Git worktree management
