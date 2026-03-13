@@ -171,7 +171,7 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
         containerfile=".llm-sandbox/Containerfile",
         auto_rebuild=True,
     )
-    image_config = ImageConfig(build=build_config)
+    image_config = ImageConfig(image=image_name, build=build_config)
 
     # Update only the image field, preserve other settings
     project_config.image = image_config
@@ -179,6 +179,7 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
     # Save updated config
     save_project_config(project_dir, project_config)
     click.echo(f"✓ Updated configuration: .llm-sandbox/config.yaml")
+    click.echo(f"  Image name: {image_name}")
     click.echo(f"  Build from: .llm-sandbox/Containerfile")
     click.echo(f"  Auto-rebuild: {build_config.auto_rebuild}")
 

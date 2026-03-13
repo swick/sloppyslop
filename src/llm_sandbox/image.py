@@ -76,9 +76,12 @@ class Image:
                 f"Run 'llm-sandbox gen-containerfile <image-name>' to create one."
             )
 
-        # Generate image tag
-        project_name = self.project_path.name
-        image_tag = f"llm-sandbox-{project_name}"
+        # Get image tag from configuration
+        if not self.config.image:
+            raise RuntimeError(
+                "No image name configured. Run 'llm-sandbox gen-containerfile <image-name>' to configure."
+            )
+        image_tag = self.config.image
 
         # Force rebuild
         print(f"Rebuilding image: {image_tag}")
@@ -108,9 +111,12 @@ class Image:
                 f"Run 'llm-sandbox gen-containerfile <image-name>' to set up the project."
             )
 
-        # Generate image tag
-        project_name = self.project_path.name
-        image_tag = f"llm-sandbox-{project_name}"
+        # Get image tag from configuration
+        if not self.config.image:
+            raise RuntimeError(
+                "No image name configured. Run 'llm-sandbox gen-containerfile <image-name>' to configure."
+            )
+        image_tag = self.config.image
 
         # Check if image exists
         image_exists = self.container_manager.image_exists(image_tag)

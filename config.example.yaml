@@ -38,6 +38,7 @@ image:
   # image: registry.fedoraproject.org/fedora-toolbox  # Uncomment to use specific image
 
   # Option 2: Build from Containerfile (uncomment to enable)
+  # image: my-custom-image         # Image name for built image
   # build:
   #   containerfile: Containerfile  # Path to Containerfile (relative to project dir)
   #   auto_rebuild: true           # Rebuild on every run (default: true)
