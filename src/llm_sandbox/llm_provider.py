@@ -132,7 +132,7 @@ class ClaudeProvider(LLMProvider):
 
 The container has two mounts:
 - /project (read-only): The original project code
-- /workspace (read-write): A git worktree where you can make changes
+- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories, using the checkout_commit tool
 
 Your task is to analyze the project and provide the requested information.
 

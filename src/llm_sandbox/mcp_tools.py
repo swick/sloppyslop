@@ -271,10 +271,10 @@ class CheckoutCommitTool(MCPTool):
         Initialize checkout commit tool.
 
         Args:
-            container_manager: Container manager instance
-            container_id: Container ID to execute commands in
+            container_manager: Container manager instance (unused, kept for compatibility)
+            container_id: Container ID (unused, kept for compatibility)
             instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for tracking worktrees
+            runner: Reference to SandboxRunner for git operations and tracking worktrees
         """
         super().__init__(
             name="checkout_commit",
@@ -294,8 +294,6 @@ class CheckoutCommitTool(MCPTool):
                 "required": ["commit"],
             },
         )
-        self.container_manager = container_manager
-        self.container_id = container_id
         self.instance_id = instance_id
         self.runner = runner
 
@@ -331,40 +329,43 @@ class CheckoutCommitTool(MCPTool):
                 "error": f"Worktree '{worktree_name}' already exists in this session",
             }
 
+        # Check that worktrees base directory exists
+        if not self.runner.worktrees_base_dir:
+            return {
+                "success": False,
+                "error": "Worktrees base directory not initialized",
+            }
+
         # Generate branch name
         branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
 
-        # Execute git worktree add command
-        command = (
-            f'cd /project && '
-            f'git worktree add -b "{branch_name}" '
-            f'"/worktrees/{worktree_name}" "{commit}"'
-        )
+        # Get host worktree path
+        host_worktree_path = self.runner.worktrees_base_dir / worktree_name
 
-        exit_code, stdout, stderr = self.container_manager.exec_command(
-            self.container_id,
-            command,
-            "/project",
-        )
+        try:
+            # Use GitOperations to create worktree on host
+            self.runner.git_ops.create_worktree_on_branch(
+                commit,
+                host_worktree_path,
+                branch_name,
+            )
 
-        if exit_code != 0:
+            # Track created worktree
+            self.runner.created_worktrees.append(worktree_name)
+
             return {
-                "success": False,
-                "exit_code": exit_code,
-                "error": f"Failed to create worktree: {stderr}",
-                "stdout": stdout,
+                "success": True,
+                "worktree_name": worktree_name,
+                "worktree_path": f"/worktrees/{worktree_name}",
+                "branch_name": branch_name,
+                "commit": commit,
             }
 
-        # Track created worktree
-        self.runner.created_worktrees.append(worktree_name)
-
-        return {
-            "success": True,
-            "worktree_name": worktree_name,
-            "worktree_path": f"/worktrees/{worktree_name}",
-            "branch_name": branch_name,
-            "commit": commit,
-        }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to create worktree: {str(e)}",
+            }
 
 
 # Local tools

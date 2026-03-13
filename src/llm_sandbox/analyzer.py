@@ -124,12 +124,12 @@ Use the available tools to:
 3. Understand the project type and dependencies
 
 Then generate a Containerfile with these requirements:
-- Use an appropriate base image for the project type
+- The resulting Containerfile will be used by an LLM to inspect, modify, build, run and test the project
+- Use an appropriate base image
 - Install all necessary dependencies
 - Set up the working directory as /workspace
 - Do not include CMD or ENTRYPOINT (container will be used interactively)
-- Keep it minimal and focused on build dependencies
-- Do not expose ports unless absolutely necessary
+- Do not expose ports
 - Use best practices for layer caching
 
 Explore the project thoroughly before generating the Containerfile."""

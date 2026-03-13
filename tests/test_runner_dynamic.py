@@ -96,7 +96,7 @@ class TestCleanupWorktrees:
         sandbox_runner._cleanup_worktrees([])
 
     def test_cleanup_with_output_branches(self, sandbox_runner, test_git_repo):
-        """Test cleanup that preserves output branches."""
+        """Test cleanup that preserves output branches (already in main repo)."""
         # Set up instance
         sandbox_runner.instance_id = "test-instance-123"
         sandbox_runner.worktrees_base_dir = test_git_repo / ".llm-sandbox" / "worktrees" / "test-instance-123"
@@ -114,26 +114,18 @@ class TestCleanupWorktrees:
 
         sandbox_runner.created_worktrees = ["feature-1", "feature-2"]
 
+        # Verify both branches exist in main repo before cleanup
+        assert sandbox_runner.git_ops.branch_exists(branch1)
+        assert sandbox_runner.git_ops.branch_exists(branch2)
+
         # Cleanup, keeping only feature-1
         sandbox_runner._cleanup_worktrees(["feature-1"])
 
-        # Verify feature-1 branch exists in main repo
-        result = subprocess.run(
-            ["git", "branch", "--list", branch1],
-            cwd=test_git_repo,
-            capture_output=True,
-            text=True,
-        )
-        assert branch1 in result.stdout, "Output branch should exist"
+        # Verify feature-1 branch still exists (kept as output branch)
+        assert sandbox_runner.git_ops.branch_exists(branch1), "Output branch should be kept"
 
         # Verify feature-2 branch is deleted
-        result = subprocess.run(
-            ["git", "branch", "--list", branch2],
-            cwd=test_git_repo,
-            capture_output=True,
-            text=True,
-        )
-        assert branch2 not in result.stdout, "Non-output branch should be deleted"
+        assert not sandbox_runner.git_ops.branch_exists(branch2), "Non-output branch should be deleted"
 
         # Verify worktrees are removed
         assert not worktree1.exists()

@@ -31,6 +31,8 @@ class MockRunner:
 
     def __init__(self):
         self.created_worktrees = []
+        self.worktrees_base_dir = None
+        self.git_ops = None
 
 
 @pytest.fixture
@@ -103,29 +105,69 @@ class TestCheckoutCommitTool:
         # Verify uniqueness
         assert len(names) == len(set(names)), "Generated names should be unique"
 
-    def test_execute_with_valid_worktree_name(self, mock_container, mock_runner, instance_id):
+    def test_execute_with_valid_worktree_name(self, mock_container, instance_id):
         """Test executing checkout with explicit worktree name."""
-        tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+        import tempfile
+        from pathlib import Path
+        from llm_sandbox.git_ops import GitOperations
 
-        result = tool.execute({"commit": "main", "worktree_name": "my-feature"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Setup mock runner with git_ops
+            mock_runner = MockRunner()
+            mock_runner.worktrees_base_dir = Path(tmpdir)
 
-        assert result["success"] is True
-        assert result["worktree_name"] == "my-feature"
-        assert result["worktree_path"] == "/worktrees/my-feature"
-        assert result["branch_name"] == f"llm-container/{instance_id}/my-feature"
-        assert result["commit"] == "main"
-        assert "my-feature" in mock_runner.created_worktrees
+            # Create minimal git repo for git_ops
+            subprocess.run(["git", "init"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmpdir, check=True, capture_output=True)
+            test_file = Path(tmpdir) / "test.txt"
+            test_file.write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmpdir, check=True, capture_output=True)
 
-    def test_execute_with_auto_generated_name(self, mock_container, mock_runner, instance_id):
+            mock_runner.git_ops = GitOperations(Path(tmpdir))
+
+            tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+
+            result = tool.execute({"commit": "HEAD", "worktree_name": "my-feature"})
+
+            assert result["success"] is True
+            assert result["worktree_name"] == "my-feature"
+            assert result["worktree_path"] == "/worktrees/my-feature"
+            assert result["branch_name"] == f"llm-container/{instance_id}/my-feature"
+            assert result["commit"] == "HEAD"
+            assert "my-feature" in mock_runner.created_worktrees
+
+    def test_execute_with_auto_generated_name(self, mock_container, instance_id):
         """Test executing checkout with auto-generated worktree name."""
-        tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+        import tempfile
+        from pathlib import Path
+        from llm_sandbox.git_ops import GitOperations
 
-        result = tool.execute({"commit": "main"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Setup mock runner with git_ops
+            mock_runner = MockRunner()
+            mock_runner.worktrees_base_dir = Path(tmpdir)
 
-        assert result["success"] is True
-        assert result["worktree_name"].startswith("wt-")
-        assert result["worktree_path"].startswith("/worktrees/wt-")
-        assert f"llm-container/{instance_id}/wt-" in result["branch_name"]
+            # Create minimal git repo for git_ops
+            subprocess.run(["git", "init"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmpdir, check=True, capture_output=True)
+            test_file = Path(tmpdir) / "test.txt"
+            test_file.write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmpdir, check=True, capture_output=True)
+
+            mock_runner.git_ops = GitOperations(Path(tmpdir))
+
+            tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+
+            result = tool.execute({"commit": "HEAD"})
+
+            assert result["success"] is True
+            assert result["worktree_name"].startswith("wt-")
+            assert result["worktree_path"].startswith("/worktrees/wt-")
+            assert f"llm-container/{instance_id}/wt-" in result["branch_name"]
 
     def test_execute_with_invalid_worktree_name(self, mock_container, mock_runner, instance_id):
         """Test executing checkout with invalid worktree name."""
@@ -149,15 +191,42 @@ class TestCheckoutCommitTool:
         assert result2["success"] is False
         assert "already exists" in result2["error"]
 
-    def test_execute_git_command_failure(self, mock_runner, instance_id):
+    def test_execute_git_command_failure(self, mock_container, instance_id):
         """Test handling git command failure."""
-        failing_container = MockContainerManager(return_code=1, stderr="fatal: invalid commit")
-        tool = CheckoutCommitTool(failing_container, "container-123", instance_id, mock_runner)
+        import tempfile
+        from pathlib import Path
+        from llm_sandbox.git_ops import GitOperations
 
-        result = tool.execute({"commit": "invalid-commit", "worktree_name": "my-feature"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Setup mock runner with git_ops
+            mock_runner = MockRunner()
+            mock_runner.worktrees_base_dir = Path(tmpdir)
+
+            # Create minimal git repo for git_ops
+            subprocess.run(["git", "init"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmpdir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmpdir, check=True, capture_output=True)
+
+            mock_runner.git_ops = GitOperations(Path(tmpdir))
+
+            tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+
+            result = tool.execute({"commit": "invalid-commit", "worktree_name": "my-feature"})
+
+            assert result["success"] is False
+            assert "Failed to create worktree" in result["error"]
+
+    def test_execute_missing_worktrees_base_dir(self, mock_container, instance_id):
+        """Test executing when worktrees base dir is not initialized."""
+        mock_runner = MockRunner()
+        # worktrees_base_dir is None
+
+        tool = CheckoutCommitTool(mock_container, "container-123", instance_id, mock_runner)
+
+        result = tool.execute({"commit": "HEAD", "worktree_name": "my-feature"})
 
         assert result["success"] is False
-        assert "Failed to create worktree" in result["error"]
+        assert "not initialized" in result["error"]
 
     def test_tool_definition(self, mock_container, mock_runner, instance_id):
         """Test tool definition structure."""

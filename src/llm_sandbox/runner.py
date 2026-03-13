@@ -89,12 +89,15 @@ class SandboxRunner:
 
     def _cleanup_worktrees(self, output_branches: List[str]) -> None:
         """
-        Pull output branches and delete others.
+        Remove worktrees and delete non-output branches.
 
         For each worktree created:
-        - If name in output_branches: pull branch to main repo
-        - If not: mark branch for deletion
-        Remove all worktrees, delete non-output branches
+        - If name in output_branches: keep branch (already in main repo)
+        - If not: delete branch
+        Remove all worktrees
+
+        Note: Branches are already in the main repository because
+        create_worktree_on_branch() creates them there. No pulling needed.
 
         Args:
             output_branches: List of worktree names to keep as output branches
@@ -108,22 +111,11 @@ class SandboxRunner:
             branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
             branch_mapping[worktree_name] = branch_name
 
-        # Pull output branches to main repo
+        # Print which branches are being kept
         for worktree_name in output_branches:
             if worktree_name in branch_mapping:
                 branch_name = branch_mapping[worktree_name]
-                worktree_path = self.worktrees_base_dir / worktree_name
-
-                if worktree_path.exists():
-                    try:
-                        print(f"Pulling output branch: {branch_name}")
-                        self.git_ops.pull_branch_to_repo(
-                            worktree_path,
-                            branch_name,
-                            self.project_path,
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to pull branch {branch_name}: {e}")
+                print(f"Keeping output branch: {branch_name}")
 
         # Remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -138,6 +130,7 @@ class SandboxRunner:
         for worktree_name, branch_name in branch_mapping.items():
             if worktree_name not in output_branches:
                 try:
+                    print(f"Deleting temporary branch: {branch_name}")
                     self.git_ops.delete_branch(branch_name)
                 except Exception as e:
                     print(f"Warning: Failed to delete branch {branch_name}: {e}")

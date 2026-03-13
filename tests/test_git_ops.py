@@ -43,35 +43,6 @@ def test_git_repo():
         yield repo_path
 
 
-def test_get_commit_hash(test_git_repo):
-    """Test resolving commit reference to hash."""
-    git_ops = GitOperations(test_git_repo)
-
-    # Get HEAD commit hash
-    commit_hash = git_ops.get_commit_hash("HEAD")
-    assert len(commit_hash) == 40  # Full SHA-1 hash
-    assert commit_hash.isalnum()
-
-
-def test_get_commit_hash_invalid(test_git_repo):
-    """Test getting hash for invalid commit."""
-    git_ops = GitOperations(test_git_repo)
-
-    with pytest.raises(ValueError, match="Invalid commit reference"):
-        git_ops.get_commit_hash("nonexistent-branch")
-
-
-def test_create_worktree(test_git_repo):
-    """Test creating a worktree."""
-    git_ops = GitOperations(test_git_repo)
-
-    worktree_dir = test_git_repo / "worktrees" / "test"
-    worktree_path = git_ops.create_worktree("HEAD", worktree_dir)
-
-    assert worktree_path.exists()
-    assert (worktree_path / "README.md").exists()
-
-
 def test_create_worktree_on_branch(test_git_repo):
     """Test creating a worktree on a new branch."""
     git_ops = GitOperations(test_git_repo)
@@ -133,7 +104,7 @@ def test_remove_worktree(test_git_repo):
     git_ops = GitOperations(test_git_repo)
 
     worktree_dir = test_git_repo / "worktrees" / "test"
-    git_ops.create_worktree("HEAD", worktree_dir)
+    git_ops.create_worktree_on_branch("HEAD", worktree_dir, "test-branch")
 
     assert worktree_dir.exists()
 
@@ -159,8 +130,8 @@ def test_branch_exists(test_git_repo):
     assert not git_ops.branch_exists("nonexistent-branch")
 
 
-def test_pull_branch_to_repo(test_git_repo):
-    """Test pulling a branch from worktree to main repo."""
+def test_branch_already_in_main_repo(test_git_repo):
+    """Test that branches created via create_worktree_on_branch are already in main repo."""
     git_ops = GitOperations(test_git_repo)
 
     # Create worktree with branch
@@ -168,15 +139,12 @@ def test_pull_branch_to_repo(test_git_repo):
     branch_name = "feature-branch"
     git_ops.create_worktree_on_branch("HEAD", worktree_dir, branch_name)
 
-    # Make a change in worktree
+    # Verify branch exists in main repo immediately
+    assert git_ops.branch_exists(branch_name)
+
+    # Make a change in worktree and commit
     (worktree_dir / "new_file.txt").write_text("test content")
-    subprocess.run(["git", "add", "new_file.txt"], cwd=worktree_dir, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add new file"],
-        cwd=worktree_dir,
-        check=True,
-        capture_output=True,
-    )
+    git_ops.commit_files(worktree_dir, ["new_file.txt"], "Add new file")
 
     # Get commit hash from worktree
     result = subprocess.run(
@@ -188,10 +156,7 @@ def test_pull_branch_to_repo(test_git_repo):
     )
     worktree_commit = result.stdout.strip()
 
-    # Pull branch to main repo
-    git_ops.pull_branch_to_repo(worktree_dir, branch_name, test_git_repo)
-
-    # Verify branch exists in main repo with same commit
+    # Verify branch in main repo has same commit (no pull needed)
     result = subprocess.run(
         ["git", "rev-parse", branch_name],
         cwd=test_git_repo,

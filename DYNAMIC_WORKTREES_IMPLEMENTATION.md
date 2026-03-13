@@ -4,18 +4,25 @@
 
 Successfully implemented dynamic, on-demand worktree creation for the LLM Container Sandbox. The LLM can now create multiple worktrees from any commit during execution instead of being limited to a single pre-created worktree.
 
-## Architecture Decision: Host vs Container Execution
+## Architecture Decision: Host Git Operations
 
-**Important:** Git operations are split between container and host:
+**Important:** All git operations execute on the host using GitOperations class:
 
-- **CheckoutCommitTool**: Executes in container (`git worktree add` via container exec)
-  - Container has read-only access to `/project` (main repo)
-  - Creates worktrees that are visible both in container and on host
+- **CheckoutCommitTool**: Executes on host using `runner.git_ops.create_worktree_on_branch()`
+  - Creates worktrees on the host filesystem
+  - Worktrees are then visible in container via `/worktrees` mount
+  - Uses GitPython for consistent git operations
 
-- **GitCommitTool**: Executes on host (direct subprocess calls)
-  - Commits must be made on the host git repository
-  - Worktrees are mounted at `/worktrees` in container but commits happen on host
-  - This ensures commits are properly recorded in the host's git repository
+- **GitCommitTool**: Executes on host using `runner.git_ops.commit_files()`
+  - Commits are made on the host git repository
+  - Worktrees are mounted at `/worktrees` in container (read-write)
+  - Uses GitPython for consistent git operations
+
+**Why host execution?**
+- Container has read-only access to `/project` (main repo)
+- Git operations must modify the host repository
+- Consistent use of GitOperations class (GitPython)
+- Worktrees visible both in container and on host
 
 ## Key Changes
 
@@ -27,7 +34,7 @@ Successfully implemented dynamic, on-demand worktree creation for the LLM Contai
 - `created_worktrees`: List tracking all worktree names created during execution
 - `_generate_instance_id()`: Generates unique instance IDs
 - `_cleanup_worktrees()`: Intelligent cleanup that:
-  - Pulls specified output branches to main repo
+  - Keeps specified output branches (already in main repo)
   - Removes all worktrees
   - Deletes non-output branches
   - Cleans up instance directory
@@ -41,8 +48,18 @@ Successfully implemented dynamic, on-demand worktree creation for the LLM Contai
 
 **Added:**
 - `create_worktree_on_branch()`: Creates worktree from commit on a new branch (uses GitPython)
+  - Branch is created **directly in main repository**
+  - Worktree is a checkout of that branch
 - `delete_branch()`: Deletes branches (uses GitPython, with error suppression for robustness)
 - `commit_files()`: Commits files in a worktree (uses GitPython, used by GitCommitTool)
+  - Commits go directly to the branch in the main repository
+
+**Removed (old architecture):**
+- `pull_branch_to_repo()`: No longer needed - branches already exist in main repo
+- `pull_branches()`: No longer needed - branches already exist in main repo
+- `get_worktree_branches()`: No longer needed - we track worktrees via runner
+- `create_worktree()`: Replaced by `create_worktree_on_branch()`
+- `get_commit_hash()`: No longer used in new architecture
 
 **Refactored:**
 - All git operations now use GitPython module instead of subprocess calls
@@ -51,12 +68,13 @@ Successfully implemented dynamic, on-demand worktree creation for the LLM Contai
 ### 3. MCP Tools (mcp_tools.py)
 
 **New Tool: CheckoutCommitTool**
-- Creates worktrees on-demand from any commit
+- Creates worktrees on-demand from any commit using `GitOperations.create_worktree_on_branch()`
 - Auto-generates worktree names if not specified (format: `wt-{uuid}`)
 - Validates worktree names (pattern: `[a-zA-Z0-9_-]+`)
 - Prevents duplicate worktree names
 - Creates branches with pattern: `llm-container/{instance-id}/{worktree-name}`
 - Returns worktree info including path and branch name
+- Executes on host, worktrees visible in container via `/worktrees` mount
 
 **Modified: GitCommitTool**
 - Branch parameter now **REQUIRED** (breaking change)
@@ -113,7 +131,7 @@ This ensures:
    - Can create multiple worktrees as needed
 
 3. **Cleanup**: Automatic at end of run
-   - Output worktrees: branches pulled to main repo
+   - Output branches: kept in main repo (already there)
    - All worktrees: removed from disk
    - Non-output branches: deleted from repository
    - Instance directory: removed
