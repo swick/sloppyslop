@@ -50,9 +50,12 @@ class Image:
             print(f"Using image: {image}")
             return image
 
-    def rebuild(self) -> str:
+    def build(self, force: bool = False) -> str:
         """
-        Force rebuild of image from Containerfile.
+        Build image from Containerfile.
+
+        Args:
+            force: If True, force rebuild even if image is up-to-date
 
         Returns:
             Image tag
@@ -66,37 +69,14 @@ class Image:
                 f"Run 'llm-sandbox gen-containerfile <image-name>' to set up a Containerfile."
             )
 
-        build_config = self.config.build
-        containerfile_path = self.project_path / build_config.containerfile
+        return self._ensure_built_image(force_rebuild=force)
 
-        # Validate Containerfile exists
-        if not containerfile_path.exists():
-            raise RuntimeError(
-                f"Containerfile not found: {containerfile_path}\n"
-                f"Run 'llm-sandbox gen-containerfile <image-name>' to create one."
-            )
-
-        # Get image tag from configuration
-        if not self.config.image:
-            raise RuntimeError(
-                "No image name configured. Run 'llm-sandbox gen-containerfile <image-name>' to configure."
-            )
-        image_tag = self.config.image
-
-        # Force rebuild
-        print(f"Rebuilding image: {image_tag}")
-        self.container_manager.build_image(
-            containerfile_path,
-            self.project_path,
-            image_tag,
-        )
-        print(f"✓ Image rebuilt: {image_tag}")
-
-        return image_tag
-
-    def _ensure_built_image(self) -> str:
+    def _ensure_built_image(self, force_rebuild: bool = False) -> str:
         """
         Ensure built image exists, building/rebuilding as needed.
+
+        Args:
+            force_rebuild: If True, always rebuild regardless of auto_rebuild setting
 
         Returns:
             Image tag
@@ -118,26 +98,31 @@ class Image:
             )
         image_tag = self.config.image
 
-        # Check if image exists
-        image_exists = self.container_manager.image_exists(image_tag)
-
         # Determine if we should build
         should_build = False
 
-        if not image_exists:
-            # Image doesn't exist, must build
+        if force_rebuild:
+            # Force rebuild requested
             should_build = True
-            reason = "Image does not exist"
-        elif build_config.auto_rebuild:
-            # auto_rebuild is enabled, check if Containerfile is newer
-            if self._is_containerfile_newer(image_tag, containerfile_path):
-                should_build = True
-                reason = "Containerfile is newer than image"
-            else:
-                reason = "Image is up-to-date"
+            reason = "Forced rebuild"
         else:
-            # auto_rebuild is disabled, use existing image
-            reason = "Using cached image (auto_rebuild disabled)"
+            # Check if image exists
+            image_exists = self.container_manager.image_exists(image_tag)
+
+            if not image_exists:
+                # Image doesn't exist, must build
+                should_build = True
+                reason = "Image does not exist"
+            elif build_config.auto_rebuild:
+                # auto_rebuild is enabled, check if Containerfile is newer
+                if self._is_containerfile_newer(image_tag, containerfile_path):
+                    should_build = True
+                    reason = "Containerfile is newer than image"
+                else:
+                    reason = "Image is up-to-date"
+            else:
+                # auto_rebuild is disabled, use existing image
+                reason = "Using cached image (auto_rebuild disabled)"
 
         # Build if needed
         if should_build:

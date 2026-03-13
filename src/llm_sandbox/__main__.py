@@ -184,17 +184,22 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
     click.echo(f"  Auto-rebuild: {build_config.auto_rebuild}")
 
     click.echo(f"\nNext steps:")
-    click.echo(f"  llm-sandbox rebuild           # Rebuild the image")
+    click.echo(f"  llm-sandbox build             # Build the image")
     click.echo(f"  llm-sandbox run --commit HEAD --prompt 'Your prompt' --schema '{{...}}'")
     click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json")
 
 
 @cli.command()
-def rebuild():
-    """Rebuild the container image from Containerfile."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force rebuild even if image is up-to-date",
+)
+def build(force: bool):
+    """Build the container image from Containerfile."""
     project_dir = Path.cwd()
 
-    click.echo(f"Rebuilding container image")
+    click.echo(f"Building container image")
     click.echo(f"Project directory: {project_dir}")
 
     # Load config
@@ -205,10 +210,10 @@ def rebuild():
     image_manager = Image(config.image, project_dir, container_manager)
 
     try:
-        # Force rebuild
-        image_tag = image_manager.rebuild()
+        # Build image
+        image_tag = image_manager.build(force=force)
 
-        click.echo(f"\n✓ Successfully rebuilt image: {image_tag}")
+        click.echo(f"\n✓ Successfully built image: {image_tag}")
         click.echo(f"\nThe image will be used on the next run.")
 
     except RuntimeError as e:
