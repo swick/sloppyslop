@@ -1,6 +1,7 @@
 """LLM provider integration."""
 
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Union
 
@@ -8,6 +9,34 @@ from anthropic import Anthropic, AnthropicVertex
 
 from llm_sandbox.config import AnthropicConfig, VertexAIConfig
 from llm_sandbox.mcp_tools import MCPServer
+
+
+def extract_json_from_text(text: str) -> str:
+    """
+    Extract JSON from text that may contain markdown code blocks or extra content.
+
+    Args:
+        text: Text that may contain JSON
+
+    Returns:
+        Extracted JSON string
+    """
+    # First, try to find JSON in markdown code blocks
+    json_block_pattern = r'```(?:json)?\s*\n(.*?)\n```'
+    match = re.search(json_block_pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Try to find JSON object boundaries
+    # Look for content between first { and last }
+    first_brace = text.find('{')
+    last_brace = text.rfind('}')
+
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return text[first_brace:last_brace + 1]
+
+    # Return as-is if no extraction patterns match
+    return text.strip()
 
 
 class LLMProvider(ABC):
@@ -158,7 +187,7 @@ class ClaudeProvider(LLMProvider):
         prompt: str,
         mcp_server: MCPServer,
         output_schema: Dict[str, Any],
-        max_iterations: int = 25,
+        max_iterations: int = 200,
     ) -> Dict[str, Any]:
         """
         Generate structured output with MCP tool access.
@@ -249,13 +278,37 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 for block in response.content:
                     if block.type == "text":
                         text = block.text.strip()
+
+                        # For Vertex AI, sanitize the response to extract JSON
+                        if self.backend == "vertex-ai":
+                            json_text = extract_json_from_text(text)
+                        else:
+                            # Anthropic API with output_config guarantees valid JSON
+                            json_text = text
+
                         try:
-                            # Parse JSON directly (Claude guarantees valid JSON with json_schema)
-                            result = json.loads(text)
+                            result = json.loads(json_text)
                             return result
                         except json.JSONDecodeError as e:
-                            # This shouldn't happen with json_schema format, but handle it
-                            raise RuntimeError(f"Failed to parse JSON from response: {e}")
+                            # Print detailed error for debugging
+                            print(f"\n{'='*60}")
+                            print(f"ERROR: Failed to parse JSON from LLM response")
+                            print(f"{'='*60}")
+                            print(f"Error: {e}")
+                            print(f"\nAttempted to parse:")
+                            print(f"{'-'*60}")
+                            print(json_text)
+                            print(f"{'-'*60}")
+                            if self.backend == "vertex-ai" and json_text != text:
+                                print(f"\nOriginal response:")
+                                print(f"{'-'*60}")
+                                print(text)
+                                print(f"{'-'*60}")
+                            print()
+                            raise RuntimeError(
+                                f"Failed to parse JSON from LLM response. "
+                                f"See output above for details."
+                            )
 
                 # If we get here without valid JSON, something is wrong
                 raise RuntimeError("Response ended without valid JSON output")
