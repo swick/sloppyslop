@@ -1,32 +1,57 @@
-"""Podman container management."""
+"""Podman container management via REST API."""
 
+import io
 import json
-import subprocess
+import os
+import sys
+import tarfile
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
+
+import requests_unixsocket
 
 
 class ContainerManager:
-    """Manages podman containers for isolated execution."""
+    """Manages podman containers for isolated execution via REST API."""
 
     def __init__(self):
         """Initialize container manager."""
+        self.session = requests_unixsocket.Session()
+        self.socket_path = self._get_podman_socket_path()
+        self.base_url = f"http+unix://{self.socket_path.replace('/', '%2F')}"
         self._check_podman()
 
+    def _get_podman_socket_path(self) -> str:
+        """Get the podman socket path (rootless only)."""
+        uid = os.getuid()
+        return f"/run/user/{uid}/podman/podman.sock"
+
     def _check_podman(self) -> None:
-        """Check if podman is available."""
+        """Check if podman API is available."""
         try:
-            subprocess.run(
-                ["podman", "--version"],
-                check=True,
-                capture_output=True,
-                text=True,
+            response = self.session.get(f"{self.base_url}/v4.0.0/libpod/version")
+            response.raise_for_status()
+        except Exception as e:
+            print(
+                f"Error: Cannot connect to podman API.\n"
+                f"\n"
+                f"Socket location: {self.socket_path}\n"
+                f"Error details: {e}\n"
+                f"\n"
+                f"Podman rootless service is required for llm-sandbox.\n"
+                f"\n"
+                f"To enable and start the service:\n"
+                f"  systemctl --user enable --now podman.socket\n"
+                f"\n"
+                f"To check status:\n"
+                f"  systemctl --user status podman.socket\n"
+                f"\n"
+                f"To verify socket exists:\n"
+                f"  ls -l {self.socket_path}",
+                file=sys.stderr
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            raise RuntimeError(
-                "podman is not installed or not available. "
-                "Please install podman: https://podman.io/getting-started/installation"
-            ) from e
+            sys.exit(1)
 
     def build_image(
         self,
@@ -45,42 +70,64 @@ class ContainerManager:
         Returns:
             Image ID
         """
-        cmd = [
-            "podman",
-            "build",
-            "-f",
-            str(containerfile_path),
-            "-t",
-            tag,
-            str(context_path),
-        ]
+        # Create tar archive of build context
+        tar_buffer = io.BytesIO()
+        with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
+            tar.add(context_path, arcname='.')
+
+        tar_buffer.seek(0)
+
+        # Build image via API
+        containerfile_relative = containerfile_path.relative_to(context_path)
+        params = {
+            't': tag,
+            'dockerfile': str(containerfile_relative),
+        }
 
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/build",
+                params=params,
+                data=tar_buffer,
+                headers={'Content-Type': 'application/x-tar'},
+                stream=True,
             )
+            response.raise_for_status()
 
-            # Get image ID
-            image_id = self._get_image_id(tag)
+            # Parse build output to get image ID
+            image_id = None
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if 'stream' in data:
+                            # Print build output
+                            print(data['stream'], end='')
+                        if 'aux' in data and 'ID' in data['aux']:
+                            image_id = data['aux']['ID']
+                    except json.JSONDecodeError:
+                        continue
+
+            if not image_id:
+                # Fallback: get image ID from tag
+                image_id = self._get_image_id(tag)
+
             return image_id
 
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to build image: {e.stderr}\n"
-                f"Command: {' '.join(cmd)}"
-            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to build image: {e}") from e
 
     def _get_image_id(self, tag: str) -> str:
         """Get image ID from tag."""
-        cmd = ["podman", "images", "-q", tag]
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        image_id = result.stdout.strip()
-        if not image_id:
-            raise RuntimeError(f"Image not found: {tag}")
-        return image_id
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v4.0.0/libpod/images/{tag}/json"
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data['Id']
+        except Exception as e:
+            raise RuntimeError(f"Image not found: {tag}") from e
 
     def create_container(
         self,
@@ -101,46 +148,51 @@ class ContainerManager:
         Returns:
             Container ID
         """
-        cmd = [
-            "podman",
-            "create",
-            f"--network={network}",
-            "-v",
-            f"{project_mount}:/project:ro",  # Read-only project mount
-            "-v",
-            f"{worktrees_mount}:/worktrees:z",  # Read-write worktrees mount
-            "-w",
-            "/worktrees",  # Set working directory
-            "--rm",  # Auto-remove on stop
-            image_id,
-            "sleep",
-            "infinity",  # Keep container running
-        ]
+        config = {
+            "image": image_id,
+            "command": ["sleep", "infinity"],
+            "work_dir": "/worktrees",
+            "mounts": [
+                {
+                    "type": "bind",
+                    "source": str(project_mount.absolute()),
+                    "destination": "/project",
+                    "options": ["ro"],
+                },
+                {
+                    "type": "bind",
+                    "source": str(worktrees_mount.absolute()),
+                    "destination": "/worktrees",
+                    "options": ["z"],
+                },
+            ],
+            "netns": {
+                "nsmode": network,
+            },
+            "remove": True,  # Auto-remove on stop
+        }
 
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/containers/create",
+                json=config,
             )
-            container_id = result.stdout.strip()
-            return container_id
+            response.raise_for_status()
+            data = response.json()
+            return data['Id']
 
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to create container: {e.stderr}\n"
-                f"Command: {' '.join(cmd)}"
-            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to create container: {e}") from e
 
     def start_container(self, container_id: str) -> None:
         """Start container."""
-        cmd = ["podman", "start", container_id]
-
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to start container: {e.stderr}") from e
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}/start"
+            )
+            response.raise_for_status()
+        except Exception as e:
+            raise RuntimeError(f"Failed to start container: {e}") from e
 
     def exec_command(
         self,
@@ -159,43 +211,100 @@ class ContainerManager:
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
-        cmd = [
-            "podman",
-            "exec",
-            "-w",
-            workdir,
-            container_id,
-            "sh",
-            "-c",
-            command,
-        ]
+        # Step 1: Create exec instance
+        exec_config = {
+            "AttachStdout": True,
+            "AttachStderr": True,
+            "Cmd": ["sh", "-c", command],
+            "WorkingDir": workdir,
+        }
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}/exec",
+                json=exec_config,
+            )
+            response.raise_for_status()
+            exec_id = response.json()['Id']
 
-        return result.returncode, result.stdout, result.stderr
+            # Step 2: Start exec instance and get output
+            start_config = {
+                "Detach": False,
+                "Tty": False,
+            }
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/start",
+                json=start_config,
+                stream=True,
+            )
+            response.raise_for_status()
+
+            # Collect output
+            stdout_data = []
+            stderr_data = []
+
+            for chunk in response.iter_content(chunk_size=1024):
+                if not chunk:
+                    continue
+
+                # Podman uses Docker's stream format:
+                # [8]byte header: 1 byte stream type, 3 bytes padding, 4 bytes size
+                # followed by payload
+                i = 0
+                while i < len(chunk):
+                    if i + 8 > len(chunk):
+                        break
+
+                    stream_type = chunk[i]
+                    size = int.from_bytes(chunk[i+4:i+8], 'big')
+
+                    if i + 8 + size > len(chunk):
+                        break
+
+                    payload = chunk[i+8:i+8+size]
+
+                    if stream_type == 1:  # stdout
+                        stdout_data.append(payload)
+                    elif stream_type == 2:  # stderr
+                        stderr_data.append(payload)
+
+                    i += 8 + size
+
+            stdout = b''.join(stdout_data).decode('utf-8', errors='replace')
+            stderr = b''.join(stderr_data).decode('utf-8', errors='replace')
+
+            # Step 3: Get exit code
+            inspect_response = self.session.get(
+                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/json"
+            )
+            inspect_response.raise_for_status()
+            exit_code = inspect_response.json().get('ExitCode', 0)
+
+            return exit_code, stdout, stderr
+
+        except Exception as e:
+            return 1, "", f"Failed to execute command: {e}"
 
     def stop_container(self, container_id: str) -> None:
         """Stop container."""
-        cmd = ["podman", "stop", container_id, "-t", "10"]
-
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            # Continue even if stop fails
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}/stop",
+                params={'t': 10},
+            )
+            # Don't raise on error, continue cleanup
+        except Exception:
             pass
 
     def remove_container(self, container_id: str) -> None:
         """Remove container."""
-        cmd = ["podman", "rm", "-f", container_id]
-
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            # Continue even if remove fails
+            response = self.session.delete(
+                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}",
+                params={'force': True},
+            )
+            # Don't raise on error, continue cleanup
+        except Exception:
             pass
 
     def cleanup(self, container_id: str) -> None:
@@ -210,9 +319,13 @@ class ContainerManager:
 
     def image_exists(self, tag: str) -> bool:
         """Check if image exists."""
-        cmd = ["podman", "images", "-q", tag]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return bool(result.stdout.strip())
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v4.0.0/libpod/images/{tag}/exists"
+            )
+            return response.status_code == 204
+        except Exception:
+            return False
 
     def get_image_created_time(self, tag: str) -> float:
         """
@@ -227,30 +340,19 @@ class ContainerManager:
         Raises:
             RuntimeError: If cannot get image info
         """
-        cmd = ["podman", "image", "inspect", tag]
-
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
+            response = self.session.get(
+                f"{self.base_url}/v4.0.0/libpod/images/{tag}/json"
             )
-
-            inspect_data = json.loads(result.stdout)
-            if not inspect_data:
-                raise RuntimeError(f"No inspect data for image: {tag}")
+            response.raise_for_status()
+            data = response.json()
 
             # Get Created timestamp (RFC3339 format)
-            created_str = inspect_data[0]["Created"]
+            created_str = data['Created']
 
             # Parse RFC3339 timestamp to Unix timestamp
-            # Format: "2024-01-15T10:30:45.123456789Z"
-            from datetime import datetime
             created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
             return created_dt.timestamp()
 
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to inspect image: {e.stderr}") from e
-        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
-            raise RuntimeError(f"Failed to parse image info: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to get image info: {e}") from e
