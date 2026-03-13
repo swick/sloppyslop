@@ -50,6 +50,47 @@ class Image:
             print(f"Using image: {image}")
             return image
 
+    def rebuild(self) -> str:
+        """
+        Force rebuild of image from Containerfile.
+
+        Returns:
+            Image tag
+
+        Raises:
+            RuntimeError: If no build configuration or build fails
+        """
+        if self.config.build is None:
+            raise RuntimeError(
+                "No build configuration found. Project is configured to use a pre-built image.\n"
+                f"Run 'llm-sandbox gen-containerfile <image-name>' to set up a Containerfile."
+            )
+
+        build_config = self.config.build
+        containerfile_path = self.project_path / build_config.containerfile
+
+        # Validate Containerfile exists
+        if not containerfile_path.exists():
+            raise RuntimeError(
+                f"Containerfile not found: {containerfile_path}\n"
+                f"Run 'llm-sandbox gen-containerfile <image-name>' to create one."
+            )
+
+        # Generate image tag
+        project_name = self.project_path.name
+        image_tag = f"llm-sandbox-{project_name}"
+
+        # Force rebuild
+        print(f"Rebuilding image: {image_tag}")
+        self.container_manager.build_image(
+            containerfile_path,
+            self.project_path,
+            image_tag,
+        )
+        print(f"✓ Image rebuilt: {image_tag}")
+
+        return image_tag
+
     def _ensure_built_image(self) -> str:
         """
         Ensure built image exists, building/rebuilding as needed.

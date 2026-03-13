@@ -20,6 +20,8 @@ from llm_sandbox.config import (
     load_project_config,
     save_project_config,
 )
+from llm_sandbox.container import ContainerManager
+from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import create_llm_provider
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import discover_subcommands
@@ -181,8 +183,36 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
     click.echo(f"  Auto-rebuild: {build_config.auto_rebuild}")
 
     click.echo(f"\nNext steps:")
+    click.echo(f"  llm-sandbox rebuild           # Rebuild the image")
     click.echo(f"  llm-sandbox run --commit HEAD --prompt 'Your prompt' --schema '{{...}}'")
     click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json")
+
+
+@cli.command()
+def rebuild():
+    """Rebuild the container image from Containerfile."""
+    project_dir = Path.cwd()
+
+    click.echo(f"Rebuilding container image")
+    click.echo(f"Project directory: {project_dir}")
+
+    # Load config
+    config = load_config(project_dir)
+
+    # Create container manager and image manager
+    container_manager = ContainerManager()
+    image_manager = Image(config.image, project_dir, container_manager)
+
+    try:
+        # Force rebuild
+        image_tag = image_manager.rebuild()
+
+        click.echo(f"\n✓ Successfully rebuilt image: {image_tag}")
+        click.echo(f"\nThe image will be used on the next run.")
+
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 def create_run_sandbox_function(
