@@ -1,0 +1,159 @@
+"""Base class for custom subcommands."""
+
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
+import click
+
+
+class Subcommand(ABC):
+    """
+    Base class for custom subcommands.
+
+    Subcommand modules should define a class that inherits from this
+    and implements the required methods.
+
+    Example:
+        class MySubcommand(Subcommand):
+            name = "analyze"
+            help = "Analyze the project"
+
+            def add_arguments(self, command):
+                # Add custom options (common options are automatic)
+                command.params.append(
+                    click.Option(["--depth"], type=int, default=3, help="Analysis depth")
+                )
+                return command
+
+            def execute(self, project_dir, run_sandbox, **kwargs):
+                # Common options available in kwargs:
+                # - commit: from --commit (already configured in run_sandbox)
+                # - network: from --network (already configured in run_sandbox)
+                # - pull_branches: from --pull-branches (already configured in run_sandbox)
+
+                depth = kwargs.get("depth", 3)
+
+                # run_sandbox is pre-configured with commit, network, branches
+                result = run_sandbox(
+                    prompt=f"Analyze this project with depth {depth}",
+                    output_schema={"type": "object", ...},
+                )
+                print(f"Analysis complete: {result}")
+    """
+
+    name: str = None  # Subcommand name (e.g., "analyze")
+    help: str = None  # Help text for the subcommand
+
+    @abstractmethod
+    def add_arguments(self, command: click.Command) -> click.Command:
+        """
+        Add custom arguments to the command.
+
+        Args:
+            command: Click command object to modify
+
+        Returns:
+            Modified command object
+        """
+        pass
+
+    @abstractmethod
+    def execute(
+        self,
+        project_dir: Path,
+        run_sandbox: Callable,
+        **kwargs
+    ) -> Any:
+        """
+        Execute the subcommand.
+
+        Args:
+            project_dir: Project directory path
+            run_sandbox: Function to run the sandbox, pre-configured with common options.
+                Signature: run_sandbox(prompt: str, output_schema: dict) -> dict
+                The commit, network, and branches_to_pull are already configured.
+            **kwargs: Arguments from CLI including:
+                - commit: Git commit/branch/tag from --commit (also configured in run_sandbox)
+                - network: Network mode from --network (also configured in run_sandbox)
+                - pull_branches: Branch list from --pull-branches (also configured in run_sandbox)
+                - Any custom arguments added by add_arguments()
+
+        Returns:
+            Any value (typically None or a result dict)
+        """
+        pass
+
+
+def discover_subcommands(project_dir: Optional[Path] = None) -> Dict[str, type]:
+    """
+    Discover subcommand modules from config directories.
+
+    Searches in order:
+    1. Project-level: {project_dir}/.llm-sandbox/subcommands/*.py
+    2. Global: $XDG_CONFIG_HOME/llm-sandbox/subcommands/*.py
+
+    Args:
+        project_dir: Project directory (optional)
+
+    Returns:
+        Dict mapping subcommand names to their classes
+    """
+    import importlib.util
+    import os
+    import sys
+
+    subcommands = {}
+    search_paths = []
+
+    # Add global config subcommands directory
+    xdg_config = os.getenv("XDG_CONFIG_HOME")
+    if xdg_config:
+        global_dir = Path(xdg_config) / "llm-sandbox" / "subcommands"
+    else:
+        global_dir = Path.home() / ".config" / "llm-sandbox" / "subcommands"
+
+    if global_dir.exists():
+        search_paths.append(global_dir)
+
+    # Add project-level subcommands directory
+    if project_dir:
+        project_subcommands_dir = project_dir / ".llm-sandbox" / "subcommands"
+        if project_subcommands_dir.exists():
+            search_paths.append(project_subcommands_dir)
+
+    # Load subcommand modules
+    for search_path in search_paths:
+        for file_path in search_path.glob("*.py"):
+            if file_path.name.startswith("_"):
+                continue
+
+            module_name = f"llm_sandbox_subcommand_{file_path.stem}"
+
+            try:
+                # Load module
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+
+                    # Find Subcommand classes in module
+                    for attr_name in dir(module):
+                        attr = getattr(module, attr_name)
+                        if (
+                            isinstance(attr, type)
+                            and issubclass(attr, Subcommand)
+                            and attr is not Subcommand
+                            and hasattr(attr, "name")
+                            and attr.name
+                        ):
+                            subcommands[attr.name] = attr
+
+            except Exception as e:
+                click.echo(
+                    f"Warning: Failed to load subcommand from {file_path}: {e}",
+                    err=True,
+                )
+
+    return subcommands
