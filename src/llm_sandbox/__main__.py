@@ -170,6 +170,13 @@ def create_run_sandbox_function(
     if pull_branches:
         branches_to_pull = [b.strip() for b in pull_branches.split(",")]
 
+    # Load configurations
+    global_config = load_global_config()
+    project_config = load_project_config(project_dir)
+
+    # Initialize runner
+    runner = SandboxRunner(project_dir, global_config, project_config)
+
     def run_sandbox(
         prompt: str,
         output_schema: dict,
@@ -188,23 +195,15 @@ def create_run_sandbox_function(
             The commit, network, and branches_to_pull are already configured
             from command line options.
         """
-        # Load configurations
-        global_config = load_global_config()
-        project_config = load_project_config(project_dir)
-
-        # Initialize runner
-        runner = SandboxRunner(project_dir, global_config, project_config)
 
         # Run prompt
-        result = runner.run_prompt(
+        return = runner.run_prompt(
             commit,
             prompt,
             output_schema,
             branches_to_pull,
             network,
         )
-
-        return result
 
     return run_sandbox
 
@@ -297,35 +296,18 @@ def register_builtin_subcommands():
     register_subcommand_class(RunSubcommand)
 
 
-def register_custom_subcommands(project_dir: Optional[Path] = None):
+def register_custom_subcommands():
     """
     Discover and register custom subcommands from config directories.
-
-    Args:
-        project_dir: Project directory (defaults to current directory)
     """
-    if project_dir is None:
-        project_dir = Path.cwd()
-
-    subcommands = discover_subcommands(project_dir)
+    subcommands = discover_subcommands(Path.cwd())
 
     for name, subcommand_class in subcommands.items():
         register_subcommand_class(subcommand_class)
 
 
-# Register built-in subcommands (always available)
 register_builtin_subcommands()
-
-# Register custom subcommands
-# Try to register from current directory, but don't fail if not a project
-try:
-    register_custom_subcommands(Path.cwd())
-except Exception:
-    # If current directory is not a project, only load global subcommands
-    try:
-        register_custom_subcommands(None)
-    except Exception:
-        pass
+register_custom_subcommands()
 
 
 if __name__ == "__main__":
