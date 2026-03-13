@@ -86,35 +86,40 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
-    def _cleanup_worktrees(self, output_branches: List[str]) -> None:
+    def _cleanup_worktrees(self, keep_branches: List[str]) -> None:
         """
-        Remove worktrees and delete non-output branches.
+        Remove worktrees and cleanup branches.
 
-        For each worktree created:
-        - If name in output_branches: keep branch (already in main repo)
-        - If not: delete branch
-        Remove all worktrees
-
-        Note: Branches are already in the main repository because
-        create_worktree_on_branch() creates them there. No pulling needed.
+        For branches to keep: rename from llm-container/{instance_id}/{name} to {name}
+        All remaining llm-container/{instance_id}/* branches are deleted
+        All worktrees are removed
 
         Args:
-            output_branches: List of worktree names to keep as output branches
+            keep_branches: List of branch names to keep (without llm-container prefix)
         """
         if not self.worktrees_base_dir or not self.instance_id:
             return
 
-        # Build branch mapping: worktree_name -> branch_name
+        # Build branch mapping: branch_name -> full_branch_name
         branch_mapping = {}
         for worktree_name in self.created_worktrees:
             branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
             branch_mapping[worktree_name] = branch_name
 
-        # Print which branches are being kept
-        for worktree_name in output_branches:
-            if worktree_name in branch_mapping:
-                branch_name = branch_mapping[worktree_name]
-                print(f"Keeping output branch: {branch_name}")
+        # Rename kept branches (remove llm-container/{instance_id}/ prefix)
+        for branch_name in keep_branches:
+            full_branch_name = f"llm-container/{self.instance_id}/{branch_name}"
+            if branch_name in self.created_worktrees:
+                try:
+                    print(f"Keeping branch: {full_branch_name} → {branch_name}")
+                    # Rename branch by creating new branch at same commit and deleting old one
+                    # Use -f to force overwrite if target branch already exists
+                    self.git_ops.repo.git.branch("-f", branch_name, full_branch_name)
+                    self.git_ops.delete_branch(full_branch_name)
+                except Exception as e:
+                    print(f"Warning: Failed to rename branch {full_branch_name}: {e}")
+            else:
+                print(f"Warning: Branch {branch_name} was not created in this session")
 
         # Remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -125,14 +130,22 @@ class SandboxRunner:
                 except Exception as e:
                     print(f"Warning: Failed to remove worktree {worktree_name}: {e}")
 
-        # Delete non-output branches
-        for worktree_name, branch_name in branch_mapping.items():
-            if worktree_name not in output_branches:
+        # Delete ALL remaining llm-container/{instance_id}/* branches
+        instance_prefix = f"llm-container/{self.instance_id}/"
+        try:
+            remaining_branches = [
+                ref.name
+                for ref in self.git_ops.repo.refs
+                if ref.name.startswith(instance_prefix)
+            ]
+            for branch_name in remaining_branches:
                 try:
                     print(f"Deleting temporary branch: {branch_name}")
                     self.git_ops.delete_branch(branch_name)
                 except Exception as e:
                     print(f"Warning: Failed to delete branch {branch_name}: {e}")
+        except Exception as e:
+            print(f"Warning: Failed to list remaining branches: {e}")
 
         # Remove instance directory
         if self.worktrees_base_dir.exists():
@@ -146,7 +159,7 @@ class SandboxRunner:
         commit: str,
         prompt: str,
         output_schema: Dict[str, Any],
-        branches_to_pull: Optional[List[str]] = None,
+        keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
         verbose: bool = False,
     ) -> Dict[str, Any]:
@@ -157,15 +170,15 @@ class SandboxRunner:
             commit: Git commit/branch/tag to use as base (deprecated, not used in new architecture)
             prompt: User prompt for LLM
             output_schema: JSON schema for structured output
-            branches_to_pull: List of worktree names to keep as output branches (optional)
+            keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional)
             verbose: Enable verbose output (optional)
 
         Returns:
             Structured output from LLM
         """
-        if branches_to_pull is None:
-            branches_to_pull = []
+        if keep_branches is None:
+            keep_branches = []
 
         # Use network from config if not specified
         if network is None:
@@ -233,4 +246,4 @@ class SandboxRunner:
                 self.container_manager.cleanup(container_id)
 
             print("Cleaning up worktrees...")
-            self._cleanup_worktrees(branches_to_pull)
+            self._cleanup_worktrees(keep_branches)

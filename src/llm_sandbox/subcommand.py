@@ -30,11 +30,11 @@ class Subcommand(ABC):
                 # Common options available in kwargs:
                 # - commit: from --commit (already configured in run_sandbox)
                 # - network: from --network (already configured in run_sandbox)
-                # - pull_branches: from --pull-branches (already configured in run_sandbox)
+                # - keep_branch: from --keep-branch (already configured in run_sandbox)
 
                 depth = kwargs.get("depth", 3)
 
-                # run_sandbox is pre-configured with commit, network, branches
+                # run_sandbox is pre-configured with commit, network, keep_branches
                 result = run_sandbox(
                     prompt=f"Analyze this project with depth {depth}",
                     output_schema={"type": "object", ...},
@@ -72,11 +72,11 @@ class Subcommand(ABC):
             project_dir: Project directory path
             run_sandbox: Function to run the sandbox, pre-configured with common options.
                 Signature: run_sandbox(prompt: str, output_schema: dict) -> dict
-                The commit, network, and branches_to_pull are already configured.
+                The commit, network, and keep_branches are already configured.
             **kwargs: Arguments from CLI including:
                 - commit: Git commit/branch/tag from --commit (also configured in run_sandbox)
                 - network: Network mode from --network (also configured in run_sandbox)
-                - pull_branches: Branch list from --pull-branches (also configured in run_sandbox)
+                - keep_branch: Branch tuple from --keep-branch (also configured in run_sandbox)
                 - Any custom arguments added by add_arguments()
 
         Returns:

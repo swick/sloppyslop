@@ -185,8 +185,8 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
 
     click.echo(f"\nNext steps:")
     click.echo(f"  llm-sandbox build             # Build the image")
-    click.echo(f"  llm-sandbox run --commit HEAD --prompt 'Your prompt' --schema '{{...}}'")
-    click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json")
+    click.echo(f"  llm-sandbox run --prompt 'Your prompt' --schema '{{...}}'")
+    click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json --keep-branch feature/foo")
 
 
 @cli.command()
@@ -300,7 +300,7 @@ def create_run_sandbox_function(
     project_dir: Path,
     commit: str,
     network: Optional[str],
-    pull_branches: Optional[str],
+    keep_branch: tuple,
     verbose: bool,
 ):
     """
@@ -312,16 +312,14 @@ def create_run_sandbox_function(
         project_dir: Project directory
         commit: Git commit/branch/tag to use
         network: Network mode override
-        pull_branches: Comma-separated list of branches to pull
+        keep_branch: Tuple of branch names to keep
         verbose: Enable verbose output
 
     Returns:
         Function that can run the sandbox
     """
-    # Parse branches to pull
-    branches_to_pull = []
-    if pull_branches:
-        branches_to_pull = [b.strip() for b in pull_branches.split(",")]
+    # Convert tuple to list
+    keep_branches = list(keep_branch) if keep_branch else []
 
     # Load configuration (project overrides global)
     config = load_config(project_dir)
@@ -344,7 +342,7 @@ def create_run_sandbox_function(
             Structured output from LLM
 
         Note:
-            The commit, network, branches_to_pull, and verbose are already configured
+            The commit, network, keep_branches, and verbose are already configured
             from command line options.
         """
 
@@ -353,7 +351,7 @@ def create_run_sandbox_function(
             commit,
             prompt,
             output_schema,
-            branches_to_pull,
+            keep_branches,
             network,
             verbose,
         )
@@ -371,13 +369,13 @@ def make_subcommand_callback(subcommand_instance):
     Returns:
         Click callback function
     """
-    def callback(project_dir, commit, network, pull_branches, verbose, **kwargs):
+    def callback(project_dir, commit, network, keep_branch, verbose, **kwargs):
         # Create run_sandbox function pre-configured with common options
         run_sandbox = create_run_sandbox_function(
             project_dir,
             commit,
             network,
-            pull_branches,
+            keep_branch,
             verbose,
         )
 
@@ -388,7 +386,7 @@ def make_subcommand_callback(subcommand_instance):
                 run_sandbox=run_sandbox,
                 commit=commit,
                 network=network,
-                pull_branches=pull_branches,
+                keep_branch=keep_branch,
                 verbose=verbose,
                 **kwargs
             )
@@ -430,8 +428,9 @@ def register_subcommand_class(subcommand_class):
         help="Network access mode (default: from config)",
     )
     @click.option(
-        "--pull-branches",
-        help="Comma-separated list of worktree names to keep as output branches",
+        "--keep-branch",
+        multiple=True,
+        help="Branch name to keep as output (can be specified multiple times). Branch will be renamed from llm-container/{instance_id}/{name} to {name}",
     )
     @click.option(
         "--verbose",

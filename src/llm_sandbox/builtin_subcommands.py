@@ -52,7 +52,7 @@ class RunSubcommand(Subcommand):
         """
         Execute the run command.
 
-        Note: commit, network, and pull_branches are provided as kwargs
+        Note: commit, network, and keep_branch are provided as kwargs
         but are already configured in run_sandbox function.
         """
         prompt = kwargs.get("prompt")
@@ -93,7 +93,7 @@ class RunSubcommand(Subcommand):
             with open(schema_file) as f:
                 output_schema = json.load(f)
 
-        # Run the sandbox (commit, network, and pull_branches already configured)
+        # Run the sandbox (commit, network, and keep_branch already configured)
         result = run_sandbox(
             prompt=prompt,
             output_schema=output_schema,
