@@ -158,7 +158,7 @@ class GitCommitTool(MCPTool):
         """
         super().__init__(
             name="git_commit",
-            description="Commit files to a worktree. Stages the specified files and creates a commit. Branch parameter is REQUIRED and must match pattern llm-container/{instance_id}/{worktree_name}",
+            description="Commit files to a worktree. Stages the specified files and creates a commit. Branch parameter is REQUIRED and must match pattern llm-container/{instance_id}/{worktree_name} (worktree_name can contain slashes)",
             parameters={
                 "type": "object",
                 "properties": {
@@ -173,7 +173,7 @@ class GitCommitTool(MCPTool):
                     },
                     "branch": {
                         "type": "string",
-                        "description": "Branch name (REQUIRED, must match llm-container/{instance_id}/{worktree_name})",
+                        "description": "Branch name (REQUIRED, must match llm-container/{instance_id}/{worktree_name}, where worktree_name can contain slashes)",
                     },
                 },
                 "required": ["files", "message", "branch"],
@@ -184,15 +184,16 @@ class GitCommitTool(MCPTool):
 
     def _validate_branch_pattern(self, branch: str) -> bool:
         """Validate branch matches required pattern."""
-        pattern = rf"^llm-container/{re.escape(self.instance_id)}/[a-zA-Z0-9_-]+$"
+        pattern = rf"^llm-container/{re.escape(self.instance_id)}/[a-zA-Z0-9_/-]+$"
         return bool(re.match(pattern, branch))
 
     def _derive_worktree_path(self, branch: str) -> str:
         """Derive worktree path from branch name."""
         # Extract worktree name from branch: llm-container/{instance_id}/{worktree_name}
-        parts = branch.split("/")
-        if len(parts) >= 3:
-            worktree_name = parts[-1]
+        # worktree_name can contain slashes (e.g., foo/bar)
+        prefix = f"llm-container/{self.instance_id}/"
+        if branch.startswith(prefix):
+            worktree_name = branch[len(prefix):]
             return f"/worktrees/{worktree_name}"
         return "/worktrees"
 
@@ -210,7 +211,14 @@ class GitCommitTool(MCPTool):
             }
 
         # Extract worktree name from branch
-        worktree_name = branch.split("/")[-1]
+        # worktree_name can contain slashes (e.g., foo/bar)
+        prefix = f"llm-container/{self.instance_id}/"
+        if not branch.startswith(prefix):
+            return {
+                "success": False,
+                "error": f"Branch does not match expected prefix: {prefix}",
+            }
+        worktree_name = branch[len(prefix):]
 
         # Get host worktree path
         if not self.runner.worktrees_base_dir:
@@ -278,7 +286,7 @@ class CheckoutCommitTool(MCPTool):
         """
         super().__init__(
             name="checkout_commit",
-            description="Create a new worktree from any commit. Creates worktree at /worktrees/{worktree_name} with branch llm-container/{instance_id}/{worktree_name}",
+            description="Create a new worktree from any commit. Creates worktree at /worktrees/{worktree_name} with branch llm-container/{instance_id}/{worktree_name}. Worktree names can contain slashes for hierarchy (e.g., 'feature/foo')",
             parameters={
                 "type": "object",
                 "properties": {
@@ -288,7 +296,7 @@ class CheckoutCommitTool(MCPTool):
                     },
                     "worktree_name": {
                         "type": "string",
-                        "description": "Name for worktree (optional, auto-generated if omitted). Must match [a-zA-Z0-9_-]+",
+                        "description": "Name for worktree (optional, auto-generated if omitted). Can contain slashes for hierarchy (e.g., 'feature/foo'). Must match [a-zA-Z0-9_/-]+",
                     },
                 },
                 "required": ["commit"],
@@ -299,7 +307,7 @@ class CheckoutCommitTool(MCPTool):
 
     def _validate_worktree_name(self, name: str) -> bool:
         """Validate worktree name matches allowed pattern."""
-        return bool(re.match(r"^[a-zA-Z0-9_-]+$", name))
+        return bool(re.match(r"^[a-zA-Z0-9_/-]+$", name))
 
     def _generate_worktree_name(self) -> str:
         """Generate a unique worktree name."""
@@ -319,7 +327,7 @@ class CheckoutCommitTool(MCPTool):
         if not self._validate_worktree_name(worktree_name):
             return {
                 "success": False,
-                "error": f"Invalid worktree name: {worktree_name}. Must match [a-zA-Z0-9_-]+",
+                "error": f"Invalid worktree name: {worktree_name}. Must match [a-zA-Z0-9_/-]+ (can contain slashes for hierarchy)",
             }
 
         # Check for duplicates

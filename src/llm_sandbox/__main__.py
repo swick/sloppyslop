@@ -249,14 +249,17 @@ def cleanup():
             if instance_dir.is_dir():
                 click.echo(f"  Instance: {instance_dir.name}")
 
-                # Remove each worktree in this instance
-                for worktree_path in instance_dir.iterdir():
-                    if worktree_path.is_dir():
+                # Find all worktree directories recursively (they might be nested)
+                # A directory is a worktree if it has a .git file
+                for worktree_path in instance_dir.rglob("*"):
+                    if worktree_path.is_dir() and (worktree_path / ".git").exists():
                         try:
-                            click.echo(f"    Removing worktree: {worktree_path.name}")
+                            # Get relative path from instance dir for display
+                            rel_path = worktree_path.relative_to(instance_dir)
+                            click.echo(f"    Removing worktree: {rel_path}")
                             git_ops.remove_worktree(worktree_path)
                         except Exception as e:
-                            click.echo(f"    Warning: Failed to remove {worktree_path.name}: {e}", err=True)
+                            click.echo(f"    Warning: Failed to remove {rel_path}: {e}", err=True)
 
         # Remove the entire worktrees directory
         try:
