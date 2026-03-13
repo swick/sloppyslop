@@ -29,12 +29,12 @@ class AnalyzerMCPServer(MCPServer):
 class ProjectAnalyzer:
     """Analyzes projects and manages Containerfiles."""
 
-    def __init__(self, llm_provider: LLMProvider):
+    def __init__(self, llm_provider: Optional[LLMProvider] = None):
         """
         Initialize project analyzer.
 
         Args:
-            llm_provider: LLM provider instance for generation
+            llm_provider: LLM provider instance for generation (optional, required only for generate_containerfile)
         """
         self.llm_provider = llm_provider
 
@@ -93,7 +93,13 @@ class ProjectAnalyzer:
 
         Returns:
             Generated Containerfile content
+
+        Raises:
+            ValueError: If llm_provider is not configured
         """
+        if self.llm_provider is None:
+            raise ValueError("LLM provider is required for Containerfile generation")
+
         # Create local MCP server for file exploration
         mcp_server = AnalyzerMCPServer(project_path)
 

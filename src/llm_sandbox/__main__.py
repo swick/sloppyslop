@@ -100,64 +100,97 @@ def check(provider: Optional[str]):
     default=Path.cwd(),
     help="Project directory (defaults to current directory)",
 )
-def init(project_dir: Path):
-    """Initialize project configuration."""
-    click.echo(f"Initializing LLM Sandbox in: {project_dir}")
+@click.option(
+    "--generate",
+    is_flag=True,
+    help="Generate Containerfile using LLM (requires configured provider)",
+)
+def containerfile(project_dir: Path, generate: bool):
+    """Set up Containerfile for the project (find existing or generate new)."""
+    click.echo(f"Setting up Containerfile for: {project_dir}")
 
     # Check if already initialized
     config_dir = project_dir / ".llm-sandbox"
     if config_dir.exists() and (config_dir / "config.yaml").exists():
         click.echo("Project already initialized!")
-        if not click.confirm("Reinitialize?"):
+        if not click.confirm("Reconfigure?"):
             return
 
-    # Load global config for API key
-    global_config = load_global_config()
-
-    try:
-        provider_name, provider_config = get_provider_config(global_config)
-        llm_provider = create_llm_provider(provider_name, provider_config)
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
-    # Initialize analyzer
-    analyzer = ProjectAnalyzer(llm_provider)
-
-    # Search for existing containerfiles
+    # Search for existing containerfiles (without LLM)
     click.echo("\nSearching for existing Containerfile/Dockerfile...")
+    analyzer = ProjectAnalyzer(None)  # Search without LLM
     found_containerfiles = analyzer.search_containerfiles(project_dir)
 
     containerfile_path = None
+    llm_provider = None
 
-    # Display options and get valid choice
-    while True:
+    # Build options list
+    options = []
+    if generate or not found_containerfiles:
+        # Check if we can generate
+        try:
+            global_config = load_global_config()
+            provider_name, provider_config = get_provider_config(global_config)
+            llm_provider = create_llm_provider(provider_name, provider_config)
+            options.append(("generate", "Generate new Containerfile with LLM"))
+        except Exception as e:
+            if generate:
+                click.echo(f"Error: Cannot generate - LLM provider not configured: {e}", err=True)
+                sys.exit(1)
+
+    options.append(("custom", "Specify custom path"))
+
+    for containerfile in found_containerfiles:
+        rel_path = containerfile.relative_to(project_dir)
+        options.append(("existing", f"Use existing: {rel_path}", containerfile))
+
+    # If only one existing file found and not forcing generation, use it
+    if len(found_containerfiles) == 1 and not generate:
+        containerfile_path = found_containerfiles[0]
+        rel_path = containerfile_path.relative_to(project_dir)
+        click.echo(f"\nFound Containerfile: {rel_path}")
+        if click.confirm("Use this Containerfile?", default=True):
+            pass  # Use it
+        else:
+            containerfile_path = None
+
+    # Interactive selection if not already decided
+    while containerfile_path is None:
         click.echo("\nOptions:")
-        click.echo("  1. Generate new Containerfile with LLM")
-        click.echo("  2. Specify custom path")
+        for i, opt in enumerate(options, 1):
+            if opt[0] == "existing":
+                click.echo(f"  {i}. {opt[1]}")
+            else:
+                click.echo(f"  {i}. {opt[1]}")
 
-        if found_containerfiles:
-            for i, path in enumerate(found_containerfiles, 1):
-                rel_path = path.relative_to(project_dir)
-                click.echo(f"  {i + 2}. {rel_path}")
+        # Auto-select if --generate flag and generation is option 1
+        if generate and options[0][0] == "generate":
+            choice = 1
+            click.echo(f"\nUsing option {choice} (--generate flag)")
+        else:
+            # Default to first existing file if available, otherwise custom path
+            default_choice = next(
+                (i + 1 for i, opt in enumerate(options) if opt[0] == "existing"),
+                next((i + 1 for i, opt in enumerate(options) if opt[0] == "custom"), 1)
+            )
 
-        choice = click.prompt(
-            "Select an option",
-            type=int,
-            default=1,
-        )
+            choice = click.prompt(
+                "Select an option",
+                type=int,
+                default=default_choice,
+            )
 
         # Validate choice
-        max_option = 2 + len(found_containerfiles)
-        if choice < 1 or choice > max_option:
-            click.echo(f"Invalid choice. Please select a number between 1 and {max_option}.")
+        if choice < 1 or choice > len(options):
+            click.echo(f"Invalid choice. Please select a number between 1 and {len(options)}.")
             continue
 
-        # Process valid choice
-        if choice == 1:
+        selected_option = options[choice - 1]
+
+        if selected_option[0] == "generate":
             # Generate containerfile
             click.echo("\nGenerating Containerfile...")
-
+            analyzer = ProjectAnalyzer(llm_provider)
             containerfile_content = analyzer.generate_containerfile(project_dir)
 
             # Show preview
@@ -171,11 +204,12 @@ def init(project_dir: Path):
                 continue
 
             # Save containerfile
-            click.echo("\nSaving configuration...")
             containerfile_path = project_dir / ".llm-sandbox" / "Containerfile"
             containerfile_path.parent.mkdir(parents=True, exist_ok=True)
             containerfile_path.write_text(containerfile_content)
-        elif choice == 2:
+            click.echo(f"Saved to: {containerfile_path.relative_to(project_dir)}")
+
+        elif selected_option[0] == "custom":
             # Specify custom path
             custom_path = click.prompt(
                 "Enter path to Containerfile (relative to project dir)",
@@ -186,25 +220,25 @@ def init(project_dir: Path):
                 click.echo(f"File not found: {custom_path}")
                 continue
             containerfile_path = custom_file
-            break
-        else:  # choice > 2
-            # Use selected existing containerfile
-            containerfile_path = found_containerfiles[choice - 3]
-            break
 
-    containerfile_path = str(containerfile_path.relative_to(project_dir))
+        else:  # existing
+            containerfile_path = selected_option[2]
+
+    # Get relative path
+    rel_containerfile_path = str(containerfile_path.relative_to(project_dir))
 
     # Create project config
     project_name = project_dir.name
     project_config = ProjectConfig(
-        containerfile=containerfile_path,  # Path relative to project dir
+        containerfile=rel_containerfile_path,
         image_tag=f"llm-sandbox-{project_name}",
     )
 
     save_project_config(project_dir, project_config)
-    click.echo(f"Saved config to: .llm-sandbox/config.yaml")
+    click.echo(f"\n✓ Configuration saved to: .llm-sandbox/config.yaml")
+    click.echo(f"  Containerfile: {rel_containerfile_path}")
+    click.echo(f"  Image tag: {project_config.image_tag}")
 
-    click.echo("\n✓ Initialization complete!")
     click.echo(f"\nNext steps:")
     click.echo(f"  llm-sandbox run --commit HEAD --prompt 'Your prompt' --schema '{{...}}'")
     click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json")
@@ -284,16 +318,6 @@ def make_subcommand_callback(subcommand_instance):
         Click callback function
     """
     def callback(project_dir, commit, network, pull_branches, **kwargs):
-        # Check if project is initialized
-        config_file = project_dir / ".llm-sandbox" / "config.yaml"
-        if not config_file.exists():
-            click.echo(
-                f"Error: Project not initialized in {project_dir}\n"
-                f"Run 'llm-sandbox init' first.",
-                err=True
-            )
-            sys.exit(1)
-
         # Create run_sandbox function pre-configured with common options
         run_sandbox = create_run_sandbox_function(
             project_dir,

@@ -113,13 +113,18 @@ def load_global_config() -> GlobalConfig:
 
 
 def load_project_config(project_path: Path) -> ProjectConfig:
-    """Load project configuration from .llm-sandbox/config.yaml."""
+    """Load project configuration from .llm-sandbox/config.yaml.
+
+    If the config file doesn't exist, returns a default configuration.
+    """
     config_path = project_path / ".llm-sandbox" / "config.yaml"
 
     if not config_path.exists():
-        raise FileNotFoundError(
-            f"Project not initialized. Run 'llm-sandbox init' first. "
-            f"Missing: {config_path}"
+        # Return default configuration
+        project_name = project_path.name
+        return ProjectConfig(
+            containerfile="Containerfile",
+            image_tag=f"llm-sandbox-{project_name}",
         )
 
     with open(config_path) as f:
