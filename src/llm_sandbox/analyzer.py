@@ -7,7 +7,7 @@ from llm_sandbox.llm_provider import LLMProvider
 from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ListDirectoryTool
 
 
-class LocalMCPServer(MCPServer):
+class AnalyzerMCPServer(MCPServer):
     """MCP server for local file operations during project analysis."""
 
     def __init__(self, project_path: Path):
@@ -95,7 +95,7 @@ class ProjectAnalyzer:
             Generated Containerfile content
         """
         # Create local MCP server for file exploration
-        mcp_server = LocalMCPServer(project_path)
+        mcp_server = AnalyzerMCPServer(project_path)
 
         # Define output schema for Containerfile generation
         output_schema = {
