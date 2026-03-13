@@ -11,12 +11,14 @@ from llm_sandbox.analyzer import ProjectAnalyzer
 from llm_sandbox.builtin_subcommands import RunSubcommand
 from llm_sandbox.config import (
     AnthropicConfig,
-    GlobalConfig,
-    ProjectConfig,
+    BuildConfig,
+    Config,
+    ImageConfig,
     VertexAIConfig,
     get_provider_config,
     load_global_config,
     load_project_config,
+    merge_configs,
     save_project_config,
 )
 from llm_sandbox.llm_provider import create_llm_provider
@@ -227,17 +229,18 @@ def containerfile(project_dir: Path, generate: bool):
     # Get relative path
     rel_containerfile_path = str(containerfile_path.relative_to(project_dir))
 
-    # Create project config
-    project_name = project_dir.name
-    project_config = ProjectConfig(
+    # Create project config with build configuration
+    build_config = BuildConfig(
         containerfile=rel_containerfile_path,
-        image_tag=f"llm-sandbox-{project_name}",
+        auto_rebuild=True,
     )
+    image_config = ImageConfig(build=build_config)
+    project_config = Config(image=image_config)
 
     save_project_config(project_dir, project_config)
     click.echo(f"\n✓ Configuration saved to: .llm-sandbox/config.yaml")
     click.echo(f"  Containerfile: {rel_containerfile_path}")
-    click.echo(f"  Image tag: {project_config.image_tag}")
+    click.echo(f"  Auto-rebuild: {build_config.auto_rebuild}")
 
     click.echo(f"\nNext steps:")
     click.echo(f"  llm-sandbox run --commit HEAD --prompt 'Your prompt' --schema '{{...}}'")
@@ -269,12 +272,13 @@ def create_run_sandbox_function(
     if pull_branches:
         branches_to_pull = [b.strip() for b in pull_branches.split(",")]
 
-    # Load configurations
+    # Load and merge configurations (project overrides global)
     global_config = load_global_config()
     project_config = load_project_config(project_dir)
+    merged_config = merge_configs(global_config, project_config)
 
     # Initialize runner
-    runner = SandboxRunner(project_dir, global_config, project_config)
+    runner = SandboxRunner(project_dir, merged_config)
 
     def run_sandbox(
         prompt: str,

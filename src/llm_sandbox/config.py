@@ -68,24 +68,39 @@ class LLMConfig(BaseModel):
                 object.__setattr__(self, "default_provider", "anthropic")
 
 
+class BuildConfig(BaseModel):
+    """Container image build configuration."""
+
+    containerfile: str  # Path to Containerfile (required if building)
+    auto_rebuild: bool = True  # Automatically rebuild if Containerfile changes
+
+
+class ImageConfig(BaseModel):
+    """Container image configuration."""
+
+    image: Optional[str] = None  # Image to use (default determined by Image class)
+    build: Optional[BuildConfig] = None  # Build from Containerfile (overrides image)
+
+
 class ContainerConfig(BaseModel):
     """Container runtime configuration."""
 
     network: str = "isolated"  # isolated or enabled
 
 
-class GlobalConfig(BaseModel):
-    """Global configuration."""
+class Config(BaseModel):
+    """Configuration for LLM Sandbox.
 
+    Used for both global config (~/.config/llm-sandbox/config.yaml)
+    and project config (.llm-sandbox/config.yaml).
+
+    Project configs can override global settings.
+    """
+
+    # LLM and container settings (present in both global and project configs)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     container: ContainerConfig = Field(default_factory=ContainerConfig)
-
-
-class ProjectConfig(BaseModel):
-    """Project-specific configuration (from .llm-sandbox/config.yaml)."""
-
-    containerfile: str = "Containerfile"
-    image_tag: str
+    image: ImageConfig = Field(default_factory=ImageConfig)
 
 
 def get_config_dir() -> Path:
@@ -100,40 +115,37 @@ def get_config_dir() -> Path:
     return config_dir
 
 
-def load_global_config() -> GlobalConfig:
+def load_global_config() -> Config:
     """Load global configuration from XDG_CONFIG_HOME/llm-sandbox/config.yaml."""
     config_path = get_config_dir() / "config.yaml"
 
     if config_path.exists():
         with open(config_path) as f:
             data = yaml.safe_load(f) or {}
-        return GlobalConfig(**data)
+        return Config(**data)
 
-    return GlobalConfig()
+    return Config()
 
 
-def load_project_config(project_path: Path) -> ProjectConfig:
+def load_project_config(project_path: Path) -> Config:
     """Load project configuration from .llm-sandbox/config.yaml.
 
-    If the config file doesn't exist, returns a default configuration.
+    If the config file doesn't exist, returns a minimal default configuration
+    using the default fedora-toolbox image.
     """
     config_path = project_path / ".llm-sandbox" / "config.yaml"
 
     if not config_path.exists():
-        # Return default configuration
-        project_name = project_path.name
-        return ProjectConfig(
-            containerfile="Containerfile",
-            image_tag=f"llm-sandbox-{project_name}",
-        )
+        # Return minimal default configuration (uses default fedora-toolbox image)
+        return Config()
 
     with open(config_path) as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
 
-    return ProjectConfig(**data)
+    return Config(**data)
 
 
-def save_project_config(project_path: Path, config: ProjectConfig) -> None:
+def save_project_config(project_path: Path, config: Config) -> None:
     """Save project configuration to .llm-sandbox/config.yaml."""
     config_dir = project_path / ".llm-sandbox"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -144,12 +156,49 @@ def save_project_config(project_path: Path, config: ProjectConfig) -> None:
         yaml.safe_dump(config.model_dump(), f, default_flow_style=False)
 
 
-def get_provider_config(config: GlobalConfig, provider: Optional[str] = None) -> tuple[str, Union[AnthropicConfig, VertexAIConfig]]:
+def merge_configs(global_config: Config, project_config: Config) -> Config:
+    """
+    Merge project config into global config, with project taking priority.
+
+    Args:
+        global_config: Global configuration
+        project_config: Project configuration (overrides)
+
+    Returns:
+        Merged configuration with project settings overriding global
+    """
+    # Start with global config
+    merged_data = global_config.model_dump()
+
+    # Get project data
+    project_data = project_config.model_dump()
+
+    # Override LLM default_provider if specified
+    if project_data["llm"].get("default_provider") is not None:
+        merged_data["llm"]["default_provider"] = project_data["llm"]["default_provider"]
+
+    # Merge providers (project providers override/extend global)
+    if project_data["llm"].get("providers"):
+        merged_data["llm"]["providers"].update(project_data["llm"]["providers"])
+
+    # Override container settings if specified
+    if project_data["container"].get("network") is not None:
+        merged_data["container"]["network"] = project_data["container"]["network"]
+
+    # Override image settings if specified (project image config takes precedence)
+    if project_data["image"] != ImageConfig().model_dump():
+        # Project has custom image config, use it
+        merged_data["image"] = project_data["image"]
+
+    return Config(**merged_data)
+
+
+def get_provider_config(config: Config, provider: Optional[str] = None) -> tuple[str, Union[AnthropicConfig, VertexAIConfig]]:
     """
     Get provider name and configuration.
 
     Args:
-        config: Global configuration
+        config: Configuration (global or merged)
         provider: Optional provider name (defaults to default_provider)
 
     Returns:

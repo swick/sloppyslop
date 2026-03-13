@@ -213,3 +213,44 @@ class ContainerManager:
         cmd = ["podman", "images", "-q", tag]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return bool(result.stdout.strip())
+
+    def get_image_created_time(self, tag: str) -> float:
+        """
+        Get image creation timestamp.
+
+        Args:
+            tag: Image tag
+
+        Returns:
+            Unix timestamp of image creation
+
+        Raises:
+            RuntimeError: If cannot get image info
+        """
+        cmd = ["podman", "image", "inspect", tag]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            inspect_data = json.loads(result.stdout)
+            if not inspect_data:
+                raise RuntimeError(f"No inspect data for image: {tag}")
+
+            # Get Created timestamp (RFC3339 format)
+            created_str = inspect_data[0]["Created"]
+
+            # Parse RFC3339 timestamp to Unix timestamp
+            # Format: "2024-01-15T10:30:45.123456789Z"
+            from datetime import datetime
+            created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            return created_dt.timestamp()
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to inspect image: {e.stderr}") from e
+        except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
+            raise RuntimeError(f"Failed to parse image info: {e}") from e

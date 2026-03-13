@@ -7,9 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_sandbox.config import GlobalConfig, ProjectConfig, get_provider_config
+from llm_sandbox.config import Config, get_provider_config
 from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
+from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
 from llm_sandbox.mcp_tools import MCPServer, ExecuteCommandTool, GitCommitTool, CheckoutCommitTool
 
@@ -51,25 +52,23 @@ class ContainerMCPServer(MCPServer):
 class SandboxRunner:
     """Orchestrates one-shot LLM prompt execution in sandbox."""
 
-    def __init__(self, project_path: Path, global_config: GlobalConfig, project_config: ProjectConfig):
+    def __init__(self, project_path: Path, config: Config):
         """
         Initialize sandbox runner.
 
         Args:
             project_path: Path to project directory
-            global_config: Global configuration
-            project_config: Project configuration
+            config: Merged configuration (global + project overrides)
         """
         self.project_path = project_path
-        self.global_config = global_config
-        self.project_config = project_config
+        self.config = config
 
         # Initialize components
         self.container_manager = ContainerManager()
         self.git_ops = GitOperations(project_path)
 
         # Get provider config
-        self.provider_name, self.provider_config = get_provider_config(global_config)
+        self.provider_name, self.provider_config = get_provider_config(config)
 
         # Instance tracking for dynamic worktrees
         self.instance_id: Optional[str] = None
@@ -168,7 +167,7 @@ class SandboxRunner:
 
         # Use network from config if not specified
         if network is None:
-            network = self.global_config.container.network
+            network = self.config.container.network
 
         # Convert network setting to podman format
         network_mode = "none" if network == "isolated" else "bridge"
@@ -184,20 +183,13 @@ class SandboxRunner:
             self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
             print(f"Instance ID: {self.instance_id}")
 
-            # Step 2: Build/use cached container image
-            image_tag = self.project_config.image_tag
-            # Containerfile path is relative to project directory
-            containerfile_path = self.project_path / self.project_config.containerfile
-
-            if not self.container_manager.image_exists(image_tag):
-                print(f"Building container image: {image_tag}")
-                self.container_manager.build_image(
-                    containerfile_path,
-                    self.project_path,
-                    image_tag,
-                )
-            else:
-                print(f"Using cached image: {image_tag}")
+            # Step 2: Get container image (build if necessary)
+            image_manager = Image(
+                self.config.image,
+                self.project_path,
+                self.container_manager,
+            )
+            image_tag = image_manager.get_image()
 
             # Step 3: Create and start container
             container_id = self.container_manager.create_container(

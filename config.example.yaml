@@ -1,5 +1,9 @@
 # Example configuration file for llm-sandbox
-# Save this as ~/.config/llm-sandbox/config.yaml (or $XDG_CONFIG_HOME/llm-sandbox/config.yaml)
+#
+# GLOBAL CONFIG: ~/.config/llm-sandbox/config.yaml (or $XDG_CONFIG_HOME/llm-sandbox/config.yaml)
+# PROJECT CONFIG: .llm-sandbox/config.yaml (in your project directory)
+#
+# Both use the same structure. Project config overrides global config.
 
 llm:
   # Which provider to use by default (auto-detected if not set)
@@ -28,7 +32,26 @@ container:
   # Network access mode for containers
   network: isolated  # Options: isolated (no network) or enabled (network access)
 
+image:
+  # Container image configuration
+  # Option 1: Use pre-built image (default: registry.fedoraproject.org/fedora-toolbox)
+  # image: registry.fedoraproject.org/fedora-toolbox  # Uncomment to use specific image
+
+  # Option 2: Build from Containerfile (uncomment to enable)
+  # build:
+  #   containerfile: Containerfile  # Path to Containerfile (relative to project dir)
+  #   auto_rebuild: true           # Rebuild on every run (default: true)
+
 # Usage examples:
+#
+# GLOBAL CONFIG (~/.config/llm-sandbox/config.yaml):
+# - Configure LLM providers and default container settings
+# - Used as defaults for all projects
+#
+# PROJECT CONFIG (.llm-sandbox/config.yaml):
+# - Override global settings (e.g., use different provider for this project)
+# - Specify project-specific fields (containerfile, image_tag)
+# - Create with: llm-sandbox containerfile
 #
 # 1. Using direct Anthropic API (default):
 #    - Set ANTHROPIC_API_KEY environment variable
@@ -42,8 +65,10 @@ container:
 #    - Run: llm-sandbox run ...
 #    - No config file needed!
 #
-# 3. Using Google Cloud Vertex AI (explicit):
-#    - Set default_provider: vertex-ai in this file
-#    - Configure project_id above
-#    - Authenticate: gcloud auth application-default login
-#    - Run: llm-sandbox run ...
+# 3. Project overrides (in .llm-sandbox/config.yaml):
+#    llm:
+#      default_provider: vertex-ai  # This project uses Vertex AI
+#    image:
+#      build:
+#        containerfile: docker/Containerfile  # Custom location
+#        auto_rebuild: false  # Only rebuild when image doesn't exist
