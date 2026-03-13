@@ -108,7 +108,7 @@ class ContainerManager:
             "-v",
             f"{project_mount}:/project:ro",  # Read-only project mount
             "-v",
-            f"{worktrees_mount}:/worktrees:rw",  # Read-write worktrees mount
+            f"{worktrees_mount}:/worktrees:z",  # Read-write worktrees mount
             "-w",
             "/worktrees",  # Set working directory
             "--rm",  # Auto-remove on stop

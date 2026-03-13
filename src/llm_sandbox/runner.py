@@ -148,6 +148,7 @@ class SandboxRunner:
         output_schema: Dict[str, Any],
         branches_to_pull: Optional[List[str]] = None,
         network: Optional[str] = None,
+        verbose: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute one-shot LLM prompt with structured output.
@@ -158,6 +159,7 @@ class SandboxRunner:
             output_schema: JSON schema for structured output
             branches_to_pull: List of worktree names to keep as output branches (optional)
             network: Network mode override (optional)
+            verbose: Enable verbose output (optional)
 
         Returns:
             Structured output from LLM
@@ -219,6 +221,7 @@ class SandboxRunner:
                 prompt,
                 mcp_server,
                 output_schema,
+                verbose=verbose,
             )
 
             return result

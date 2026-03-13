@@ -226,6 +226,7 @@ def create_run_sandbox_function(
     commit: str,
     network: Optional[str],
     pull_branches: Optional[str],
+    verbose: bool,
 ):
     """
     Create a run_sandbox function for use by subcommands.
@@ -237,6 +238,7 @@ def create_run_sandbox_function(
         commit: Git commit/branch/tag to use
         network: Network mode override
         pull_branches: Comma-separated list of branches to pull
+        verbose: Enable verbose output
 
     Returns:
         Function that can run the sandbox
@@ -267,7 +269,7 @@ def create_run_sandbox_function(
             Structured output from LLM
 
         Note:
-            The commit, network, and branches_to_pull are already configured
+            The commit, network, branches_to_pull, and verbose are already configured
             from command line options.
         """
 
@@ -278,6 +280,7 @@ def create_run_sandbox_function(
             output_schema,
             branches_to_pull,
             network,
+            verbose,
         )
 
     return run_sandbox
@@ -293,13 +296,14 @@ def make_subcommand_callback(subcommand_instance):
     Returns:
         Click callback function
     """
-    def callback(project_dir, commit, network, pull_branches, **kwargs):
+    def callback(project_dir, commit, network, pull_branches, verbose, **kwargs):
         # Create run_sandbox function pre-configured with common options
         run_sandbox = create_run_sandbox_function(
             project_dir,
             commit,
             network,
             pull_branches,
+            verbose,
         )
 
         # Execute the subcommand
@@ -310,6 +314,7 @@ def make_subcommand_callback(subcommand_instance):
                 commit=commit,
                 network=network,
                 pull_branches=pull_branches,
+                verbose=verbose,
                 **kwargs
             )
         except Exception as e:
@@ -352,6 +357,11 @@ def register_subcommand_class(subcommand_class):
     @click.option(
         "--pull-branches",
         help="Comma-separated list of worktree names to keep as output branches",
+    )
+    @click.option(
+        "--verbose",
+        is_flag=True,
+        help="Enable verbose output (show tool usage and LLM messages)",
     )
     def subcommand_wrapper(**kwargs):
         pass

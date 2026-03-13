@@ -63,6 +63,7 @@ class LLMProvider(ABC):
         mcp_server: MCPServer,
         output_schema: Dict[str, Any],
         max_iterations: int = 25,
+        verbose: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate structured output with MCP tool access.
@@ -72,6 +73,7 @@ class LLMProvider(ABC):
             mcp_server: MCP server instance for tool execution
             output_schema: JSON schema for structured output
             max_iterations: Maximum tool use iterations
+            verbose: Enable verbose output
 
         Returns:
             Structured output matching schema
@@ -188,6 +190,7 @@ class ClaudeProvider(LLMProvider):
         mcp_server: MCPServer,
         output_schema: Dict[str, Any],
         max_iterations: int = 200,
+        verbose: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate structured output with MCP tool access.
@@ -199,6 +202,7 @@ class ClaudeProvider(LLMProvider):
             mcp_server: MCP server instance for tool execution
             output_schema: JSON schema for structured output
             max_iterations: Maximum tool use iterations
+            verbose: Enable verbose output (tool calls and messages)
 
         Returns:
             Structured output matching schema
@@ -235,9 +239,26 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
         messages = [{"role": "user", "content": prompt}]
 
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"Initial user prompt:")
+            print(f"{'='*60}")
+            # Truncate if very long
+            if len(prompt) > 500:
+                print(f"{prompt[:500]}...")
+                print(f"[{len(prompt)} characters total]")
+            else:
+                print(prompt)
+            print(f"{'='*60}")
+
         iteration = 0
         while iteration < max_iterations:
             iteration += 1
+
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"Iteration {iteration}/{max_iterations}")
+                print(f"{'='*60}")
 
             # Make API call
             if self.backend == "vertex-ai":
@@ -272,12 +293,48 @@ When you're done analyzing, provide your final answer in the structured JSON for
             }
             messages.append(assistant_message)
 
+            if verbose:
+                print(f"\nResponse stop reason: {response.stop_reason}")
+                # Count content blocks by type
+                text_blocks = sum(1 for b in response.content if b.type == "text")
+                tool_blocks = sum(1 for b in response.content if b.type == "tool_use")
+                print(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
+                print(f"\n→ Assistant message:")
+                print(f"{'-'*60}")
+                # Print each content block
+                for block in response.content:
+                    if block.type == "text":
+                        print(f"[Text block]")
+                        if len(block.text) > 500:
+                            print(f"{block.text[:500]}...")
+                            print(f"[{len(block.text)} characters total]")
+                        else:
+                            print(block.text)
+                    elif block.type == "tool_use":
+                        print(f"[Tool use: {block.name}]")
+                        print(f"ID: {block.id}")
+                        print(f"Input: {json.dumps(block.input, indent=2)}")
+                    print()
+                print(f"{'-'*60}")
+                print(f"Total messages in conversation: {len(messages)}")
+
             # Check if we have a final answer (text response with JSON)
             if response.stop_reason == "end_turn":
                 # Extract JSON from response
                 for block in response.content:
                     if block.type == "text":
                         text = block.text.strip()
+
+                        if verbose:
+                            print(f"\nAssistant response (text):")
+                            print(f"{'-'*60}")
+                            # Truncate if very long
+                            if len(text) > 500:
+                                print(f"{text[:500]}...")
+                                print(f"[{len(text)} characters total]")
+                            else:
+                                print(text)
+                            print(f"{'-'*60}")
 
                         # For Vertex AI, sanitize the response to extract JSON
                         if self.backend == "vertex-ai":
@@ -288,6 +345,8 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                         try:
                             result = json.loads(json_text)
+                            if verbose:
+                                print(f"\n✓ Successfully parsed JSON output")
                             return result
                         except json.JSONDecodeError as e:
                             # Print detailed error for debugging
@@ -320,11 +379,25 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                 for block in response.content:
                     if block.type == "tool_use":
+                        if verbose:
+                            print(f"\n→ Tool call: {block.name}")
+                            print(f"  Input: {json.dumps(block.input, indent=2)}")
+
                         # Execute tool
                         result = mcp_server.execute_tool(
                             block.name,
                             block.input,
                         )
+
+                        if verbose:
+                            print(f"← Tool result:")
+                            result_str = json.dumps(result, indent=2)
+                            # Truncate if very long
+                            if len(result_str) > 500:
+                                print(f"  {result_str[:500]}...")
+                                print(f"  [{len(result_str)} characters total]")
+                            else:
+                                print(f"  {result_str}")
 
                         # Add result
                         tool_results.append({
@@ -334,10 +407,27 @@ When you're done analyzing, provide your final answer in the structured JSON for
                         })
 
                 # Add tool results to messages
-                messages.append({
+                tool_results_message = {
                     "role": "user",
                     "content": tool_results,
-                })
+                }
+                messages.append(tool_results_message)
+
+                if verbose:
+                    print(f"\n→ Tool results message:")
+                    print(f"{'-'*60}")
+                    for tr in tool_results:
+                        print(f"[Tool result for: {tr['tool_use_id']}]")
+                        content = tr['content']
+                        if len(content) > 500:
+                            print(f"{content[:500]}...")
+                            print(f"[{len(content)} characters total]")
+                        else:
+                            print(content)
+                        print()
+                    print(f"{'-'*60}")
+                    print(f"Total messages in conversation: {len(messages)}")
+
                 continue
 
             # If we get here, something unexpected happened
