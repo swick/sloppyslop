@@ -2,10 +2,11 @@
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from anthropic import Anthropic, AnthropicVertex
 
+from llm_sandbox.config import AnthropicConfig, VertexAIConfig
 from llm_sandbox.mcp_tools import MCPServer
 
 
@@ -48,6 +49,28 @@ class LLMProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    def validate(self) -> Dict[str, Any]:
+        """
+        Validate that the provider is configured correctly and can connect.
+
+        Makes a minimal API call to verify:
+        - Credentials are valid
+        - API endpoint is reachable
+        - Model is accessible
+
+        Returns:
+            Dictionary with validation results:
+            {
+                "success": bool,
+                "message": str,
+                "details": dict (optional error details)
+            }
+
+        Note: This method should not raise exceptions, but return error info in the dict.
+        """
+        pass
+
 
 class ClaudeProvider(LLMProvider):
     """Claude API provider with MCP tool support and structured output.
@@ -55,12 +78,12 @@ class ClaudeProvider(LLMProvider):
     Supports both Anthropic's direct API and Google Cloud Vertex AI.
     """
 
-    def __init__(self, provider_config):
+    def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig]):
         """
         Initialize Claude provider.
 
         Args:
-            provider_config: Provider configuration with backend, model, and credentials
+            provider_config: Provider configuration (AnthropicConfig or VertexAIConfig)
 
         Raises:
             ValueError: If required configuration is missing
@@ -69,10 +92,11 @@ class ClaudeProvider(LLMProvider):
 
         self.model = provider_config.model
         self.provider_config = provider_config
-        self.backend = provider_config.backend
 
-        if provider_config.backend == "vertex-ai":
+        if isinstance(provider_config, VertexAIConfig):
             # Vertex AI backend
+            self.backend = "vertex-ai"
+
             if not provider_config.region:
                 raise ValueError(
                     "Vertex AI backend requires 'region' configuration (e.g., 'us-east5')"
@@ -87,8 +111,10 @@ class ClaudeProvider(LLMProvider):
                 project_id=provider_config.project_id,
             )
 
-        else:
+        elif isinstance(provider_config, AnthropicConfig):
             # Direct Anthropic API backend
+            self.backend = "anthropic"
+
             api_key = os.getenv(provider_config.api_key_env)
             if not api_key:
                 raise ValueError(
@@ -97,6 +123,9 @@ class ClaudeProvider(LLMProvider):
 
             self.api_key = api_key
             self.client = Anthropic(api_key=api_key)
+
+        else:
+            raise ValueError(f"Unknown provider config type: {type(provider_config)}")
 
     def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
         """
@@ -238,12 +267,77 @@ When you're done analyzing, provide your final answer in the structured JSON for
             f"Failed to generate structured output after {max_iterations} iterations"
         )
 
+    def validate(self) -> Dict[str, Any]:
+        """
+        Validate that the provider is configured correctly and can connect.
 
-def create_llm_provider(provider_name: str, provider_config) -> LLMProvider:
-    if provider_name == "anthropic":
+        Makes a minimal API call to verify credentials and connectivity.
+
+        Returns:
+            Dictionary with validation results
+        """
+        try:
+            # Make a minimal API call to test connectivity
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=1,  # Minimal token usage
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "test",
+                    }
+                ],
+            )
+
+            # If we get here, the API call succeeded
+            return {
+                "success": True,
+                "message": f"Successfully connected to {self.backend} backend",
+                "details": {
+                    "backend": self.backend,
+                    "model": self.model,
+                    "response_id": response.id,
+                },
+            }
+
+        except Exception as e:
+            # Categorize the error
+            error_type = type(e).__name__
+            error_message = str(e)
+
+            details = {
+                "backend": self.backend,
+                "model": self.model,
+                "error_type": error_type,
+                "error_message": error_message,
+            }
+
+            # Add specific guidance based on error type
+            if "authentication" in error_message.lower() or "api key" in error_message.lower():
+                guidance = "Check your API key or authentication credentials"
+            elif "not found" in error_message.lower() or "404" in error_message:
+                guidance = "Model may not be available or incorrectly specified"
+            elif "permission" in error_message.lower() or "403" in error_message:
+                guidance = "Check your permissions or project access"
+            elif "network" in error_message.lower() or "connection" in error_message.lower():
+                guidance = "Check your network connection"
+            else:
+                guidance = "See error details for more information"
+
+            details["guidance"] = guidance
+
+            return {
+                "success": False,
+                "message": f"Failed to connect to {self.backend} backend: {error_type}",
+                "details": details,
+            }
+
+
+def create_llm_provider(provider_name: str, provider_config: Union[AnthropicConfig, VertexAIConfig]) -> LLMProvider:
+    if provider_name in ("anthropic", "vertex-ai"):
         return ClaudeProvider(provider_config)
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider_name}. "
-            f"Supported providers: anthropic"
+            f"Supported providers: anthropic, vertex-ai"
         )

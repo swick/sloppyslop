@@ -10,8 +10,10 @@ import click
 from llm_sandbox.analyzer import ProjectAnalyzer
 from llm_sandbox.builtin_subcommands import RunSubcommand
 from llm_sandbox.config import (
+    AnthropicConfig,
     GlobalConfig,
     ProjectConfig,
+    VertexAIConfig,
     get_provider_config,
     load_global_config,
     load_project_config,
@@ -26,6 +28,71 @@ from llm_sandbox.subcommand import discover_subcommands
 def cli():
     """LLM Container Sandbox - Safe isolated execution environment for LLM code analysis."""
     pass
+
+
+@cli.command()
+@click.option(
+    "--provider",
+    type=str,
+    help="Provider to test (defaults to default_provider from config)",
+)
+def check(provider: Optional[str]):
+    """Check LLM provider configuration and connectivity."""
+    import sys
+
+    click.echo("Checking LLM provider configuration...\n")
+
+    # Load global config
+    global_config = load_global_config()
+
+    try:
+        # Get provider config
+        provider_name, provider_config = get_provider_config(global_config, provider)
+
+        click.echo(f"Provider: {provider_name}")
+        click.echo(f"Model: {provider_config.model}")
+
+        if isinstance(provider_config, VertexAIConfig):
+            click.echo(f"Backend: vertex-ai")
+            click.echo(f"Region: {provider_config.region}")
+            click.echo(f"Project ID: {provider_config.project_id}")
+        elif isinstance(provider_config, AnthropicConfig):
+            click.echo(f"Backend: anthropic")
+            click.echo(f"API Key Env: {provider_config.api_key_env}")
+        else:
+            raise ValueError(f"Unknown provider config type: {type(provider_config)}")
+
+        click.echo("\nValidating provider...")
+
+        # Create provider
+        llm_provider = create_llm_provider(provider_name, provider_config)
+
+        # Validate
+        result = llm_provider.validate()
+
+        if result["success"]:
+            click.echo(f"✓ {result['message']}")
+            if "details" in result and "response_id" in result["details"]:
+                click.echo(f"  Response ID: {result['details']['response_id']}")
+            sys.exit(0)
+        else:
+            click.echo(f"✗ {result['message']}", err=True)
+            if "details" in result:
+                details = result["details"]
+                if "error_type" in details:
+                    click.echo(f"  Error Type: {details['error_type']}", err=True)
+                if "error_message" in details:
+                    click.echo(f"  Error: {details['error_message']}", err=True)
+                if "guidance" in details:
+                    click.echo(f"  Suggestion: {details['guidance']}", err=True)
+            sys.exit(1)
+
+    except ValueError as e:
+        click.echo(f"✗ Configuration error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"✗ Unexpected error: {e}", err=True)
+        sys.exit(1)
 
 
 @cli.command()

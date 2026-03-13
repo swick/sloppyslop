@@ -2,24 +2,27 @@
 # Save this as ~/.config/llm-sandbox/config.yaml (or $XDG_CONFIG_HOME/llm-sandbox/config.yaml)
 
 llm:
-  # Which provider to use by default
-  default_provider: anthropic  # or vertex-ai
+  # Which provider to use by default (auto-detected if not set)
+  # Auto-detection: uses "vertex-ai" if CLAUDE_CODE_USE_VERTEX is set, otherwise "anthropic"
+  # default_provider: anthropic  # Uncomment to override auto-detection
 
   # Provider configurations
   providers:
     # Direct Anthropic API
+    # Minimal config - uses all defaults:
+    # anthropic: {}
     anthropic:
-      api_key_env: ANTHROPIC_API_KEY  # Environment variable containing API key
-      model: claude-sonnet-4-5        # Model to use
-      backend: anthropic              # Use direct Anthropic API
+      model: claude-sonnet-4-5        # Model name (default)
+      api_key_env: ANTHROPIC_API_KEY  # API key environment variable (default)
 
-    # Google Cloud Vertex AI (alternative)
+    # Google Cloud Vertex AI
+    # Minimal config - only project_id required:
+    # vertex-ai:
+    #   project_id: my-gcp-project
     vertex-ai:
-      api_key_env: ANTHROPIC_API_KEY  # Not used for Vertex AI, but required field
-      model: claude-sonnet-4-5        # Model to use
-      backend: vertex-ai              # Use Vertex AI backend
-      region: us-east5                # GCP region where Vertex AI is enabled
-      project_id: my-gcp-project      # Your GCP project ID
+      model: claude-sonnet-4-5       # Model name (default)
+      region: us-east5               # GCP region (default, or set CLOUD_ML_REGION env var)
+      project_id: my-gcp-project     # GCP project ID (required, or set ANTHROPIC_VERTEX_PROJECT_ID env var)
 
 container:
   # Network access mode for containers
@@ -29,13 +32,18 @@ container:
 #
 # 1. Using direct Anthropic API (default):
 #    - Set ANTHROPIC_API_KEY environment variable
-#    - Use default configuration above
+#    - Run: llm-sandbox run ...
 #
-# 2. Using Google Cloud Vertex AI:
-#    - Ensure you're authenticated with GCP (gcloud auth application-default login)
-#    - Set default_provider to "vertex-ai" or use --provider vertex-ai flag
-#    - Configure your GCP project_id and region
+# 2. Using Google Cloud Vertex AI (auto-detection):
+#    - Set CLAUDE_CODE_USE_VERTEX=1 (auto-selects vertex-ai provider)
+#    - Set ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+#    - Optionally set CLOUD_ML_REGION=us-east5 (defaults to us-east5 if not set)
+#    - Authenticate: gcloud auth application-default login
+#    - Run: llm-sandbox run ...
+#    - No config file needed!
 #
-# 3. Switching providers:
-#    - Change default_provider in this file
-#    - Or use CLI flag: llm-sandbox run --provider vertex-ai ...
+# 3. Using Google Cloud Vertex AI (explicit):
+#    - Set default_provider: vertex-ai in this file
+#    - Configure project_id above
+#    - Authenticate: gcloud auth application-default login
+#    - Run: llm-sandbox run ...

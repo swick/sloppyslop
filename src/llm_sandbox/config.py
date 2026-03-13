@@ -2,35 +2,70 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
 
 
-class ProviderConfig(BaseModel):
-    """Individual provider configuration."""
+class BaseProviderConfig(BaseModel):
+    """Base provider configuration."""
 
-    api_key_env: str
-    model: str
-    backend: str = "anthropic"  # "anthropic" or "vertex-ai"
-    # Vertex AI specific fields
-    region: Optional[str] = None  # e.g., "us-east5"
-    project_id: Optional[str] = None  # GCP project ID
+    model: str = "claude-sonnet-4-5"  # Model name
+
+
+class AnthropicConfig(BaseProviderConfig):
+    """Anthropic API provider configuration."""
+
+    api_key_env: str = "ANTHROPIC_API_KEY"  # Environment variable for API key
+
+
+class VertexAIConfig(BaseProviderConfig):
+    """Google Cloud Vertex AI provider configuration.
+
+    Environment variables:
+    - CLOUD_ML_REGION: Fallback for region
+    - ANTHROPIC_VERTEX_PROJECT_ID: Fallback for project_id
+    """
+
+    region: str = "us-east5"  # GCP region, or set CLOUD_ML_REGION
+    project_id: Optional[str] = None  # GCP project ID, or set ANTHROPIC_VERTEX_PROJECT_ID
+
+    def model_post_init(self, __context):
+        """Post-initialization to populate from environment variables."""
+        # Populate region from environment if set (overrides default)
+        env_region = os.getenv("CLOUD_ML_REGION")
+        if env_region:
+            object.__setattr__(self, "region", env_region)
+
+        # Populate project_id from environment if not set
+        if self.project_id is None:
+            env_project_id = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+            if env_project_id:
+                object.__setattr__(self, "project_id", env_project_id)
 
 
 class LLMConfig(BaseModel):
-    """LLM configuration with multiple providers."""
+    """LLM configuration with multiple providers.
 
-    default_provider: str = "anthropic"
-    providers: dict[str, ProviderConfig] = Field(
+    Auto-detects default_provider based on CLAUDE_CODE_USE_VERTEX environment variable.
+    """
+
+    default_provider: Optional[str] = None
+    providers: dict[str, Union[AnthropicConfig, VertexAIConfig]] = Field(
         default_factory=lambda: {
-            "anthropic": ProviderConfig(
-                api_key_env="ANTHROPIC_API_KEY",
-                model="claude-sonnet-4-5",
-            )
+            "anthropic": AnthropicConfig(),
+            "vertex-ai": VertexAIConfig(),
         }
     )
+
+    def model_post_init(self, __context):
+        """Auto-detect default_provider if not set."""
+        if self.default_provider is None:
+            if os.getenv("CLAUDE_CODE_USE_VERTEX"):
+                object.__setattr__(self, "default_provider", "vertex-ai")
+            else:
+                object.__setattr__(self, "default_provider", "anthropic")
 
 
 class ContainerConfig(BaseModel):
@@ -104,7 +139,7 @@ def save_project_config(project_path: Path, config: ProjectConfig) -> None:
         yaml.safe_dump(config.model_dump(), f, default_flow_style=False)
 
 
-def get_provider_config(config: GlobalConfig, provider: Optional[str] = None) -> tuple[str, ProviderConfig]:
+def get_provider_config(config: GlobalConfig, provider: Optional[str] = None) -> tuple[str, Union[AnthropicConfig, VertexAIConfig]]:
     """
     Get provider name and configuration.
 
@@ -122,3 +157,4 @@ def get_provider_config(config: GlobalConfig, provider: Optional[str] = None) ->
         raise ValueError(f"Provider '{provider}' not found in configuration")
 
     return provider, config.llm.providers[provider]
+
