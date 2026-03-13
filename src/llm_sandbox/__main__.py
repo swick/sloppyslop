@@ -219,6 +219,16 @@ def make_subcommand_callback(subcommand_instance):
         Click callback function
     """
     def callback(project_dir, commit, network, pull_branches, **kwargs):
+        # Check if project is initialized
+        config_file = project_dir / ".llm-sandbox" / "config.yaml"
+        if not config_file.exists():
+            click.echo(
+                f"Error: Project not initialized in {project_dir}\n"
+                f"Run 'llm-sandbox init' first.",
+                err=True
+            )
+            sys.exit(1)
+
         # Create run_sandbox function pre-configured with common options
         run_sandbox = create_run_sandbox_function(
             project_dir,

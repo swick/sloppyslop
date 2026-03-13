@@ -60,56 +60,47 @@ class RunSubcommand(Subcommand):
         schema = kwargs.get("schema")
         schema_file = kwargs.get("schema_file")
 
-        try:
-            # Validate prompt input
-            if not prompt and not prompt_file:
-                click.echo("Error: Either --prompt or --prompt-file must be provided", err=True)
-                sys.exit(1)
-
-            if prompt and prompt_file:
-                click.echo("Error: Cannot use both --prompt and --prompt-file", err=True)
-                sys.exit(1)
-
-            # Load prompt from file if specified
-            if prompt_file:
-                prompt = prompt_file.read_text()
-
-            # Validate schema input
-            if not schema and not schema_file:
-                click.echo("Error: Either --schema or --schema-file must be provided", err=True)
-                sys.exit(1)
-
-            if schema and schema_file:
-                click.echo("Error: Cannot use both --schema and --schema-file", err=True)
-                sys.exit(1)
-
-            # Load output schema
-            if schema:
-                try:
-                    output_schema = json.loads(schema)
-                except json.JSONDecodeError as e:
-                    click.echo(f"Error: Invalid JSON schema: {e}", err=True)
-                    sys.exit(1)
-            else:
-                with open(schema_file) as f:
-                    output_schema = json.load(f)
-
-            # Run the sandbox (commit, network, and pull_branches already configured)
-            result = run_sandbox(
-                prompt=prompt,
-                output_schema=output_schema,
-            )
-
-            # Output result as JSON
-            click.echo("\n" + "=" * 60)
-            click.echo("Result:")
-            click.echo("=" * 60)
-            click.echo(json.dumps(result, indent=2))
-
-        except FileNotFoundError as e:
-            click.echo(f"Error: {e}", err=True)
-            click.echo("\nRun 'llm-sandbox init' first to initialize the project.", err=True)
+        # Validate prompt input
+        if not prompt and not prompt_file:
+            click.echo("Error: Either --prompt or --prompt-file must be provided", err=True)
             sys.exit(1)
-        except Exception as e:
-            click.echo(f"Error: {e}", err=True)
+
+        if prompt and prompt_file:
+            click.echo("Error: Cannot use both --prompt and --prompt-file", err=True)
             sys.exit(1)
+
+        # Load prompt from file if specified
+        if prompt_file:
+            prompt = prompt_file.read_text()
+
+        # Validate schema input
+        if not schema and not schema_file:
+            click.echo("Error: Either --schema or --schema-file must be provided", err=True)
+            sys.exit(1)
+
+        if schema and schema_file:
+            click.echo("Error: Cannot use both --schema and --schema-file", err=True)
+            sys.exit(1)
+
+        # Load output schema
+        if schema:
+            try:
+                output_schema = json.loads(schema)
+            except json.JSONDecodeError as e:
+                click.echo(f"Error: Invalid JSON schema: {e}", err=True)
+                sys.exit(1)
+        else:
+            with open(schema_file) as f:
+                output_schema = json.load(f)
+
+        # Run the sandbox (commit, network, and pull_branches already configured)
+        result = run_sandbox(
+            prompt=prompt,
+            output_schema=output_schema,
+        )
+
+        # Output result as JSON
+        click.echo("\n" + "=" * 60)
+        click.echo("Result:")
+        click.echo("=" * 60)
+        click.echo(json.dumps(result, indent=2))

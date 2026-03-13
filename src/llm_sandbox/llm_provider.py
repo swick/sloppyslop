@@ -218,19 +218,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
 
 def create_llm_provider(provider_name: str, provider_config) -> LLMProvider:
-    """
-    Factory function to create the appropriate LLM provider.
-
-    Args:
-        provider_name: Provider name (e.g., "anthropic")
-        provider_config: Provider configuration with api_key_env and model
-
-    Returns:
-        LLMProvider instance
-
-    Raises:
-        ValueError: If provider is not supported or API key not found
-    """
     if provider_name == "anthropic":
         return ClaudeProvider(provider_config)
     else:
