@@ -156,6 +156,23 @@ def save_project_config(project_path: Path, config: Config) -> None:
         yaml.safe_dump(config.model_dump(), f, default_flow_style=False)
 
 
+def load_config(project_path: Path) -> Config:
+    """
+    Load and merge global and project configurations.
+
+    Project settings override global settings.
+
+    Args:
+        project_path: Path to project directory
+
+    Returns:
+        Merged configuration with project settings taking priority
+    """
+    global_config = load_global_config()
+    project_config = load_project_config(project_path)
+    return merge_configs(global_config, project_config)
+
+
 def merge_configs(global_config: Config, project_config: Config) -> Config:
     """
     Merge project config into global config, with project taking priority.

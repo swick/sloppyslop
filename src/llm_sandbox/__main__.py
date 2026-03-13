@@ -16,9 +16,8 @@ from llm_sandbox.config import (
     ImageConfig,
     VertexAIConfig,
     get_provider_config,
-    load_global_config,
+    load_config,
     load_project_config,
-    merge_configs,
     save_project_config,
 )
 from llm_sandbox.llm_provider import create_llm_provider
@@ -44,12 +43,12 @@ def check(provider: Optional[str]):
 
     click.echo("Checking LLM provider configuration...\n")
 
-    # Load global config
-    global_config = load_global_config()
+    # Load config (merged global + project)
+    config = load_config(Path.cwd())
 
     try:
         # Get provider config
-        provider_name, provider_config = get_provider_config(global_config, provider)
+        provider_name, provider_config = get_provider_config(config, provider)
 
         click.echo(f"Provider: {provider_name}")
         click.echo(f"Model: {provider_config.model}")
@@ -95,25 +94,41 @@ def check(provider: Optional[str]):
         sys.exit(1)
 
 
-@cli.command()
+@cli.command(name="gen-containerfile")
 @click.argument("image_name", required=True)
 @click.option(
     "--extra-prompt",
     type=str,
     help="Additional instructions to add to the generation prompt",
 )
-def containerfile(image_name: str, extra_prompt: Optional[str]):
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing Containerfile configuration",
+)
+def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool):
     """Generate a Containerfile for the specified image environment."""
     project_dir = Path.cwd()
 
     click.echo(f"Generating Containerfile for: {image_name}")
     click.echo(f"Project directory: {project_dir}")
 
-    # Load global config and create LLM provider
-    global_config = load_global_config()
+    # Check if project already has a Containerfile configuration
+    existing_project_config = load_project_config(project_dir)
+    if existing_project_config.image.build is not None and not force:
+        click.echo(
+            f"Error: Project already has a Containerfile configuration:\n"
+            f"  Containerfile: {existing_project_config.image.build.containerfile}\n"
+            f"\nUse --force to overwrite the existing configuration.",
+            err=True
+        )
+        sys.exit(1)
+
+    # Load config (merged global + project) and create LLM provider
+    config = load_config(project_dir)
 
     try:
-        provider_name, provider_config = get_provider_config(global_config)
+        provider_name, provider_config = get_provider_config(config)
         llm_provider = create_llm_provider(provider_name, provider_config)
     except Exception as e:
         click.echo(f"Error: LLM provider not configured: {e}", err=True)
@@ -195,13 +210,11 @@ def create_run_sandbox_function(
     if pull_branches:
         branches_to_pull = [b.strip() for b in pull_branches.split(",")]
 
-    # Load and merge configurations (project overrides global)
-    global_config = load_global_config()
-    project_config = load_project_config(project_dir)
-    merged_config = merge_configs(global_config, project_config)
+    # Load configuration (project overrides global)
+    config = load_config(project_dir)
 
     # Initialize runner
-    runner = SandboxRunner(project_dir, merged_config)
+    runner = SandboxRunner(project_dir, config)
 
     def run_sandbox(
         prompt: str,

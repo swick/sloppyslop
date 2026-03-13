@@ -64,7 +64,7 @@ class Image:
         if not containerfile_path.exists():
             raise RuntimeError(
                 f"Containerfile not found: {containerfile_path}\n"
-                f"Run 'llm-sandbox containerfile' to set up the project."
+                f"Run 'llm-sandbox gen-containerfile <image-name>' to set up the project."
             )
 
         # Generate image tag

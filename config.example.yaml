@@ -51,7 +51,7 @@ image:
 # PROJECT CONFIG (.llm-sandbox/config.yaml):
 # - Override global settings (e.g., use different provider for this project)
 # - Specify project-specific fields (containerfile, image_tag)
-# - Create with: llm-sandbox containerfile
+# - Create with: llm-sandbox gen-containerfile <image-name>
 #
 # 1. Using direct Anthropic API (default):
 #    - Set ANTHROPIC_API_KEY environment variable
