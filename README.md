@@ -65,6 +65,28 @@ This creates:
 - `.llm-sandbox/Containerfile` - Generated containerfile
 - `.llm-sandbox/config.yaml` - Project configuration
 
+**Why this is needed:** The Containerfile defines the isolated environment where the LLM operates. It should include all tools and dependencies that the LLM might need to analyze or modify your project.
+
+**Important:** You can and should edit the generated Containerfile to customize it for your project:
+
+- **Pre-install tools**: Add any tools the LLM should use (e.g., `jq`, `ripgrep`, language-specific linters, build tools). While the LLM can install tools during execution, it's much faster and more reliable if they're already in the image.
+
+- **Add project dependencies**: Include compilers, interpreters, package managers, or other tools specific to your project's language/framework.
+
+- **Update as your project evolves**: When your project's dependencies change, update the Containerfile and rebuild with `llm-sandbox build --force`.
+
+Example additions to a Containerfile:
+```dockerfile
+# Add Python tools for a Python project
+RUN pip install ruff black mypy pytest
+
+# Add Node.js tools for a JS project
+RUN npm install -g eslint prettier typescript
+
+# Add general development tools
+RUN dnf install -y ripgrep fd-find jq
+```
+
 ### Build the Container Image
 
 ```bash
