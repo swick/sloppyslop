@@ -221,6 +221,78 @@ def build(force: bool):
         sys.exit(1)
 
 
+@cli.command()
+def cleanup():
+    """Clean up all llm-sandbox worktrees and llm-container branches."""
+    import shutil
+    from llm_sandbox.git_ops import GitOperations
+
+    project_dir = Path.cwd()
+
+    click.echo("Cleaning up llm-sandbox worktrees and branches")
+    click.echo(f"Project directory: {project_dir}")
+
+    try:
+        git_ops = GitOperations(project_dir)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Find all worktrees under .llm-sandbox/worktrees/
+    worktrees_base = project_dir / ".llm-sandbox" / "worktrees"
+
+    if worktrees_base.exists():
+        click.echo(f"\nRemoving worktrees from: {worktrees_base}")
+
+        # Iterate through instance directories
+        for instance_dir in worktrees_base.iterdir():
+            if instance_dir.is_dir():
+                click.echo(f"  Instance: {instance_dir.name}")
+
+                # Remove each worktree in this instance
+                for worktree_path in instance_dir.iterdir():
+                    if worktree_path.is_dir():
+                        try:
+                            click.echo(f"    Removing worktree: {worktree_path.name}")
+                            git_ops.remove_worktree(worktree_path)
+                        except Exception as e:
+                            click.echo(f"    Warning: Failed to remove {worktree_path.name}: {e}", err=True)
+
+        # Remove the entire worktrees directory
+        try:
+            shutil.rmtree(worktrees_base)
+            click.echo(f"✓ Removed worktrees directory")
+        except Exception as e:
+            click.echo(f"Warning: Failed to remove worktrees directory: {e}", err=True)
+    else:
+        click.echo("\nNo worktrees directory found")
+
+    # Find and delete all llm-container/* branches
+    click.echo("\nDeleting llm-container branches")
+
+    try:
+        # Get all branches
+        branches = [ref.name for ref in git_ops.repo.refs if ref.name.startswith("llm-container/")]
+
+        if branches:
+            for branch_name in branches:
+                try:
+                    click.echo(f"  Deleting branch: {branch_name}")
+                    git_ops.delete_branch(branch_name)
+                except Exception as e:
+                    click.echo(f"  Warning: Failed to delete {branch_name}: {e}", err=True)
+
+            click.echo(f"✓ Deleted {len(branches)} branch(es)")
+        else:
+            click.echo("  No llm-container branches found")
+
+    except Exception as e:
+        click.echo(f"Error listing branches: {e}", err=True)
+        sys.exit(1)
+
+    click.echo("\n✓ Cleanup complete")
+
+
 def create_run_sandbox_function(
     project_dir: Path,
     commit: str,
