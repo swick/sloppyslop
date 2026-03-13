@@ -14,7 +14,19 @@ from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
 from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
-from llm_sandbox.mcp_tools import MCPServer, ExecuteCommandTool, GitCommitTool, CheckoutCommitTool
+from llm_sandbox.mcp_tools import (
+    MCPServer,
+    ExecuteCommandTool,
+    GitCommitTool,
+    CheckoutCommitTool,
+    ReadFileTool,
+    WriteFileTool,
+    EditFileTool,
+    GlobTool,
+    GrepTool,
+    ReadProjectFileTool,
+    ListProjectDirectoryTool,
+)
 
 
 class ContainerMCPServer(MCPServer):
@@ -26,6 +38,7 @@ class ContainerMCPServer(MCPServer):
         container_id: str,
         instance_id: str,
         runner: "SandboxRunner",
+        project_path: Path,
     ):
         """
         Initialize container MCP server.
@@ -35,6 +48,7 @@ class ContainerMCPServer(MCPServer):
             container_id: Container ID to execute commands in
             instance_id: Unique instance ID for this run
             runner: Reference to SandboxRunner for tracking worktrees
+            project_path: Path to project directory for read-only access
         """
         super().__init__()
         execute_command_tool = ExecuteCommandTool(container_manager, container_id)
@@ -44,10 +58,25 @@ class ContainerMCPServer(MCPServer):
         git_commit_tool = GitCommitTool(
             container_manager, container_id, instance_id, runner
         )
+        read_file_tool = ReadFileTool(instance_id, runner)
+        write_file_tool = WriteFileTool(instance_id, runner)
+        edit_file_tool = EditFileTool(instance_id, runner)
+        glob_tool = GlobTool(instance_id, runner)
+        grep_tool = GrepTool(instance_id, runner)
+        read_project_file_tool = ReadProjectFileTool(project_path)
+        list_project_directory_tool = ListProjectDirectoryTool(project_path)
+
         self.tools = {
             execute_command_tool.name: execute_command_tool,
             checkout_commit_tool.name: checkout_commit_tool,
             git_commit_tool.name: git_commit_tool,
+            read_file_tool.name: read_file_tool,
+            write_file_tool.name: write_file_tool,
+            edit_file_tool.name: edit_file_tool,
+            glob_tool.name: glob_tool,
+            grep_tool.name: grep_tool,
+            read_project_file_tool.name: read_project_file_tool,
+            list_project_directory_tool.name: list_project_directory_tool,
         }
 
 
@@ -219,7 +248,7 @@ class SandboxRunner:
 
             # Step 4: Initialize MCP server
             mcp_server = ContainerMCPServer(
-                self.container_manager, container_id, self.instance_id, self
+                self.container_manager, container_id, self.instance_id, self, self.project_path
             )
 
             # Step 5: Execute LLM prompt with structured output

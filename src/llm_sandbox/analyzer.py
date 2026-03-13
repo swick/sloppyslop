@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import LLMProvider
-from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ListDirectoryTool
+from llm_sandbox.mcp_tools import MCPServer, ReadProjectFileTool, ListProjectDirectoryTool
 
 
 class AnalyzerMCPServer(MCPServer):
@@ -19,8 +19,8 @@ class AnalyzerMCPServer(MCPServer):
             project_path: Path to project directory
         """
         super().__init__()
-        read_file_tool = ReadFileTool(project_path)
-        list_directory_tool = ListDirectoryTool(project_path)
+        read_file_tool = ReadProjectFileTool(project_path)
+        list_directory_tool = ListProjectDirectoryTool(project_path)
         self.tools = {
             read_file_tool.name: read_file_tool,
             list_directory_tool.name: list_directory_tool,

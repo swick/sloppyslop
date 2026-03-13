@@ -213,11 +213,44 @@ class ClaudeProvider(LLMProvider):
         tool_defs = [tool.to_dict() for tool in tools]
 
         # Build system prompt
-        base_system_prompt = """You are working in an isolated container environment. You have access to tools for executing commands and git operations.
+        base_system_prompt = """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
 
 The container has two mounts:
 - /project (read-only): The original project code
-- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories, using the checkout_commit tool
+- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
+
+Available tools:
+
+Project exploration (read-only /project):
+- read_project_file: Read files from /project to explore the original code
+- list_project_directory: List directories in /project to understand structure
+
+Worktree operations:
+- checkout_commit: Create a worktree from any commit/branch (e.g., checkout_commit(commit="main", worktree_name="my-work"))
+- read_file: Read files from a worktree (requires worktree parameter)
+- write_file: Create/overwrite files in a worktree (requires worktree parameter)
+- edit_file: Replace line ranges in a worktree file (requires worktree parameter)
+- glob: Find files matching pattern in a worktree (requires worktree parameter)
+- grep: Search file contents in a worktree (requires worktree parameter)
+- git_commit: Commit changes in a worktree
+
+Shell commands:
+- execute_command: Run any shell command when file tools are insufficient
+
+Workflow:
+1. Use read_project_file/list_project_directory to explore the original project
+2. Use checkout_commit to create a worktree from any commit/branch
+3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
+4. Use glob and grep to search for files and content IN THE WORKTREE
+5. Use git_commit to commit changes to the worktree's branch
+
+File editing:
+- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
+- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
+- Line numbers are 1-indexed, ranges are inclusive
+
+Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
+To modify files, you must first create a worktree with checkout_commit.
 
 Your task is to analyze the project and provide the requested information.
 

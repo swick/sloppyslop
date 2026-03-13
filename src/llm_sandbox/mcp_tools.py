@@ -1,10 +1,13 @@
 """Model Context Protocol (MCP) tools - base classes and definitions."""
 
+import glob
+import json
 import re
+import subprocess
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class MCPTool(ABC):
@@ -376,22 +379,620 @@ class CheckoutCommitTool(MCPTool):
             }
 
 
-# Local tools
-
-
 class ReadFileTool(MCPTool):
-    """Tool for reading files from the project directory."""
+    """Tool for reading files from a worktree."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize read file tool.
+
+        Args:
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for worktree access
+        """
+        super().__init__(
+            name="read_file",
+            description="Read the content of a file in a worktree. Only works within checked-out worktrees, not in the read-only /project directory.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "worktree": {
+                        "type": "string",
+                        "description": "Worktree name (must be already created with checkout_commit)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to worktree root",
+                    },
+                },
+                "required": ["worktree", "path"],
+            },
+        )
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
+        """
+        Validate worktree and resolve file path.
+
+        Returns:
+            Tuple of (success, error_message, resolved_path)
+        """
+        if not self.runner.worktrees_base_dir:
+            return False, "Worktrees base directory not initialized", Path()
+
+        # Check worktree exists
+        if worktree not in self.runner.created_worktrees:
+            return False, f"Worktree '{worktree}' does not exist. Use checkout_commit first.", Path()
+
+        worktree_path = self.runner.worktrees_base_dir / worktree
+        if not worktree_path.exists():
+            return False, f"Worktree directory does not exist: {worktree}", Path()
+
+        # Resolve path and check it's within worktree
+        try:
+            file_path = (worktree_path / path).resolve()
+            worktree_path_resolved = worktree_path.resolve()
+
+            # Security check: ensure path is within worktree
+            if not str(file_path).startswith(str(worktree_path_resolved)):
+                return False, "Path escapes worktree directory", Path()
+
+            return True, "", file_path
+        except Exception as e:
+            return False, f"Invalid path: {str(e)}", Path()
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Read file from worktree."""
+        worktree = arguments["worktree"]
+        path = arguments["path"]
+
+        # Validate and resolve path
+        success, error, file_path = self._validate_and_resolve_path(worktree, path)
+        if not success:
+            return {"success": False, "error": error}
+
+        # Check file exists
+        if not file_path.exists():
+            return {"success": False, "error": f"File not found: {path}"}
+
+        if not file_path.is_file():
+            return {"success": False, "error": f"Path is not a file: {path}"}
+
+        # Read file
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            return {
+                "success": True,
+                "content": content,
+                "path": path,
+                "size": len(content),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to read file: {str(e)}"}
+
+
+class WriteFileTool(MCPTool):
+    """Tool for writing files to a worktree."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize write file tool.
+
+        Args:
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for worktree access
+        """
+        super().__init__(
+            name="write_file",
+            description="Create or overwrite a file in a worktree. Only works within checked-out worktrees.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "worktree": {
+                        "type": "string",
+                        "description": "Worktree name (must be already created with checkout_commit)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to worktree root",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content to write",
+                    },
+                },
+                "required": ["worktree", "path", "content"],
+            },
+        )
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
+        """Validate worktree and resolve file path."""
+        if not self.runner.worktrees_base_dir:
+            return False, "Worktrees base directory not initialized", Path()
+
+        if worktree not in self.runner.created_worktrees:
+            return False, f"Worktree '{worktree}' does not exist. Use checkout_commit first.", Path()
+
+        worktree_path = self.runner.worktrees_base_dir / worktree
+        if not worktree_path.exists():
+            return False, f"Worktree directory does not exist: {worktree}", Path()
+
+        try:
+            file_path = (worktree_path / path).resolve()
+            worktree_path_resolved = worktree_path.resolve()
+
+            if not str(file_path).startswith(str(worktree_path_resolved)):
+                return False, "Path escapes worktree directory", Path()
+
+            return True, "", file_path
+        except Exception as e:
+            return False, f"Invalid path: {str(e)}", Path()
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Write file to worktree."""
+        worktree = arguments["worktree"]
+        path = arguments["path"]
+        content = arguments["content"]
+
+        # Validate and resolve path
+        success, error, file_path = self._validate_and_resolve_path(worktree, path)
+        if not success:
+            return {"success": False, "error": error}
+
+        # Create parent directories if needed
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return {"success": False, "error": f"Failed to create directory: {str(e)}"}
+
+        # Write file
+        try:
+            file_path.write_text(content, encoding="utf-8")
+            return {
+                "success": True,
+                "path": path,
+                "size": len(content),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+
+
+class EditFileTool(MCPTool):
+    """Tool for editing files in a worktree by replacing line ranges."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize edit file tool.
+
+        Args:
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for worktree access
+        """
+        super().__init__(
+            name="edit_file",
+            description="Make targeted edits to a file in a worktree by replacing line ranges. Can edit multiple ranges in one operation. Only works within checked-out worktrees.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "worktree": {
+                        "type": "string",
+                        "description": "Worktree name (must be already created with checkout_commit)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to worktree root",
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "List of edits to apply. Applied from bottom to top to maintain line numbers.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "Starting line number (1-indexed, inclusive)",
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "description": "Ending line number (1-indexed, inclusive). Use same as start_line for single line.",
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "description": "New text to replace the line range. Can be empty to delete lines, can contain newlines for multiple lines.",
+                                },
+                            },
+                            "required": ["start_line", "end_line", "new_text"],
+                        },
+                    },
+                },
+                "required": ["worktree", "path", "edits"],
+            },
+        )
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
+        """Validate worktree and resolve file path."""
+        if not self.runner.worktrees_base_dir:
+            return False, "Worktrees base directory not initialized", Path()
+
+        if worktree not in self.runner.created_worktrees:
+            return False, f"Worktree '{worktree}' does not exist. Use checkout_commit first.", Path()
+
+        worktree_path = self.runner.worktrees_base_dir / worktree
+        if not worktree_path.exists():
+            return False, f"Worktree directory does not exist: {worktree}", Path()
+
+        try:
+            file_path = (worktree_path / path).resolve()
+            worktree_path_resolved = worktree_path.resolve()
+
+            if not str(file_path).startswith(str(worktree_path_resolved)):
+                return False, "Path escapes worktree directory", Path()
+
+            return True, "", file_path
+        except Exception as e:
+            return False, f"Invalid path: {str(e)}", Path()
+
+    def _validate_edits(self, edits: List[Dict[str, Any]], total_lines: int) -> Tuple[bool, str]:
+        """
+        Validate edits don't overlap and are within file bounds.
+
+        Returns:
+            Tuple of (success, error_message)
+        """
+        if not edits:
+            return False, "No edits provided"
+
+        # Validate each edit
+        for i, edit in enumerate(edits):
+            start = edit["start_line"]
+            end = edit["end_line"]
+
+            if start < 1:
+                return False, f"Edit {i+1}: start_line must be >= 1"
+
+            if end < start:
+                return False, f"Edit {i+1}: end_line ({end}) must be >= start_line ({start})"
+
+            if start > total_lines:
+                return False, f"Edit {i+1}: start_line ({start}) exceeds file length ({total_lines} lines)"
+
+            if end > total_lines:
+                return False, f"Edit {i+1}: end_line ({end}) exceeds file length ({total_lines} lines)"
+
+        # Check for overlaps
+        ranges = [(edit["start_line"], edit["end_line"]) for edit in edits]
+        ranges_sorted = sorted(ranges)
+
+        for i in range(len(ranges_sorted) - 1):
+            if ranges_sorted[i][1] >= ranges_sorted[i + 1][0]:
+                return False, f"Overlapping edits detected: lines {ranges_sorted[i]} and {ranges_sorted[i+1]}"
+
+        return True, ""
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Edit file in worktree by replacing line ranges."""
+        worktree = arguments["worktree"]
+        path = arguments["path"]
+        edits = arguments["edits"]
+
+        # Validate and resolve path
+        success, error, file_path = self._validate_and_resolve_path(worktree, path)
+        if not success:
+            return {"success": False, "error": error}
+
+        # Check file exists
+        if not file_path.exists():
+            return {"success": False, "error": f"File not found: {path}"}
+
+        if not file_path.is_file():
+            return {"success": False, "error": f"Path is not a file: {path}"}
+
+        # Read file
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            lines = content.split("\n")
+        except Exception as e:
+            return {"success": False, "error": f"Failed to read file: {str(e)}"}
+
+        # Validate edits
+        valid, error = self._validate_edits(edits, len(lines))
+        if not valid:
+            return {"success": False, "error": error}
+
+        # Sort edits by start_line in descending order (apply from bottom to top)
+        # This ensures line numbers remain valid as we edit
+        sorted_edits = sorted(edits, key=lambda e: e["start_line"], reverse=True)
+
+        # Apply edits
+        for edit in sorted_edits:
+            start_idx = edit["start_line"] - 1  # Convert to 0-indexed
+            end_idx = edit["end_line"]  # This is exclusive for slicing
+
+            new_text = edit["new_text"]
+            new_lines = new_text.split("\n") if new_text else []
+
+            # Replace the line range with new lines
+            lines[start_idx:end_idx] = new_lines
+
+        # Reconstruct content
+        new_content = "\n".join(lines)
+
+        # Write back
+        try:
+            file_path.write_text(new_content, encoding="utf-8")
+            return {
+                "success": True,
+                "path": path,
+                "edits_applied": len(edits),
+                "old_lines": len(content.split("\n")),
+                "new_lines": len(lines),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to write file: {str(e)}"}
+
+
+class GlobTool(MCPTool):
+    """Tool for finding files matching a glob pattern in a worktree."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize glob tool.
+
+        Args:
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for worktree access
+        """
+        super().__init__(
+            name="glob",
+            description="Find files matching a glob pattern in a worktree. Only works within checked-out worktrees. Examples: '*.py', '**/*.js', 'src/**/*.ts'",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "worktree": {
+                        "type": "string",
+                        "description": "Worktree name (must be already created with checkout_commit)",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g., '*.py', '**/*.js')",
+                    },
+                },
+                "required": ["worktree", "pattern"],
+            },
+        )
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Find files matching pattern in worktree."""
+        worktree = arguments["worktree"]
+        pattern = arguments["pattern"]
+
+        if not self.runner.worktrees_base_dir:
+            return {"success": False, "error": "Worktrees base directory not initialized"}
+
+        if worktree not in self.runner.created_worktrees:
+            return {"success": False, "error": f"Worktree '{worktree}' does not exist. Use checkout_commit first."}
+
+        worktree_path = self.runner.worktrees_base_dir / worktree
+        if not worktree_path.exists():
+            return {"success": False, "error": f"Worktree directory does not exist: {worktree}"}
+
+        # Find matching files
+        try:
+            matches = []
+            worktree_path_resolved = worktree_path.resolve()
+
+            # Use glob with recursive support
+            for file_path in worktree_path.glob(pattern):
+                # Security check
+                if not str(file_path.resolve()).startswith(str(worktree_path_resolved)):
+                    continue
+
+                # Get relative path
+                rel_path = file_path.relative_to(worktree_path)
+                matches.append({
+                    "path": str(rel_path),
+                    "type": "directory" if file_path.is_dir() else "file",
+                })
+
+            return {
+                "success": True,
+                "matches": matches,
+                "count": len(matches),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to search files: {str(e)}"}
+
+
+class GrepTool(MCPTool):
+    """Tool for searching file contents using regex in a worktree."""
+
+    def __init__(
+        self,
+        instance_id: str,
+        runner: "SandboxRunner",
+    ):
+        """
+        Initialize grep tool.
+
+        Args:
+            instance_id: Unique instance ID for this run
+            runner: Reference to SandboxRunner for worktree access
+        """
+        super().__init__(
+            name="grep",
+            description="Search file contents using regex in a worktree. Only works within checked-out worktrees. Uses ripgrep for fast searching.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "worktree": {
+                        "type": "string",
+                        "description": "Worktree name (must be already created with checkout_commit)",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for",
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "Optional glob pattern to limit files searched (e.g., '*.py')",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Case-sensitive search (default: true)",
+                        "default": True,
+                    },
+                },
+                "required": ["worktree", "pattern"],
+            },
+        )
+        self.instance_id = instance_id
+        self.runner = runner
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Search file contents in worktree."""
+        worktree = arguments["worktree"]
+        pattern = arguments["pattern"]
+        file_pattern = arguments.get("file_pattern")
+        case_sensitive = arguments.get("case_sensitive", True)
+
+        if not self.runner.worktrees_base_dir:
+            return {"success": False, "error": "Worktrees base directory not initialized"}
+
+        if worktree not in self.runner.created_worktrees:
+            return {"success": False, "error": f"Worktree '{worktree}' does not exist. Use checkout_commit first."}
+
+        worktree_path = self.runner.worktrees_base_dir / worktree
+        if not worktree_path.exists():
+            return {"success": False, "error": f"Worktree directory does not exist: {worktree}"}
+
+        # Build ripgrep command
+        try:
+            cmd = ["rg", "--json", pattern]
+
+            if not case_sensitive:
+                cmd.append("-i")
+
+            if file_pattern:
+                cmd.extend(["-g", file_pattern])
+
+            # Run ripgrep
+            result = subprocess.run(
+                cmd,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+            )
+
+            # Parse JSON output
+            matches = []
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("type") == "match":
+                        match_data = data["data"]
+                        matches.append({
+                            "file": match_data["path"]["text"],
+                            "line_number": match_data["line_number"],
+                            "line": match_data["lines"]["text"].rstrip(),
+                        })
+                except Exception:
+                    continue
+
+            return {
+                "success": True,
+                "matches": matches,
+                "count": len(matches),
+            }
+
+        except FileNotFoundError:
+            # ripgrep not installed, fallback to Python regex
+            return self._fallback_grep(worktree_path, pattern, file_pattern, case_sensitive)
+        except Exception as e:
+            return {"success": False, "error": f"Failed to search: {str(e)}"}
+
+    def _fallback_grep(
+        self,
+        worktree_path: Path,
+        pattern: str,
+        file_pattern: Optional[str],
+        case_sensitive: bool,
+    ) -> Dict[str, Any]:
+        """Fallback grep using Python when ripgrep is not available."""
+        try:
+            import re as regex_module
+
+            flags = 0 if case_sensitive else regex_module.IGNORECASE
+            compiled_pattern = regex_module.compile(pattern, flags)
+
+            matches = []
+            glob_pattern = file_pattern if file_pattern else "**/*"
+
+            for file_path in worktree_path.glob(glob_pattern):
+                if not file_path.is_file():
+                    continue
+
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    for line_num, line in enumerate(content.split("\n"), 1):
+                        if compiled_pattern.search(line):
+                            matches.append({
+                                "file": str(file_path.relative_to(worktree_path)),
+                                "line_number": line_num,
+                                "line": line.rstrip(),
+                            })
+                except Exception:
+                    continue
+
+            return {
+                "success": True,
+                "matches": matches,
+                "count": len(matches),
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to search: {str(e)}"}
+
+
+# Project-level tools (work on /project directory, used before worktrees exist)
+
+
+class ReadProjectFileTool(MCPTool):
+    """Tool for reading files from the read-only project directory."""
 
     def __init__(self, project_path: Path):
         """
-        Initialize read file tool.
+        Initialize read project file tool.
 
         Args:
             project_path: Path to project directory
         """
         super().__init__(
-            name="read_file",
-            description="Read contents of a file in the project directory",
+            name="read_project_file",
+            description="Read contents of a file from the read-only /project directory. Use this to explore the original project before creating worktrees.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -416,10 +1017,7 @@ class ReadFileTool(MCPTool):
         max_lines = arguments.get("max_lines", 1000)
 
         try:
-            # This is actually a TOCTOU issue, but we assume that the
-            # project_path doesn't have symlinks pointing outside of it and also
-            # that the container cannot modify them. We have to exclude
-            # ".llm-sandbox" from accepted paths
+            # Security: exclude .llm-sandbox directory
             if ".llm-sandbox" in path:
                 return {
                     "success": False,
@@ -472,19 +1070,19 @@ class ReadFileTool(MCPTool):
             }
 
 
-class ListDirectoryTool(MCPTool):
-    """Tool for listing directory contents."""
+class ListProjectDirectoryTool(MCPTool):
+    """Tool for listing directory contents in the project."""
 
     def __init__(self, project_path: Path):
         """
-        Initialize list directory tool.
+        Initialize list project directory tool.
 
         Args:
             project_path: Path to project directory
         """
         super().__init__(
-            name="list_directory",
-            description="List files and directories in a path",
+            name="list_project_directory",
+            description="List files and directories in the read-only /project directory. Use this to explore the project structure before creating worktrees.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -503,10 +1101,7 @@ class ListDirectoryTool(MCPTool):
         path = arguments.get("path", ".")
 
         try:
-            # This is actually a TOCTOU issue, but we assume that the
-            # project_path doesn't have symlinks pointing outside of it and also
-            # that the container cannot modify them. We have to exclude
-            # ".llm-sandbox" from accepted paths
+            # Security: exclude .llm-sandbox directory
             if ".llm-sandbox" in path:
                 return {
                     "success": False,
@@ -556,3 +1151,5 @@ class ListDirectoryTool(MCPTool):
                 "success": False,
                 "error": str(e),
             }
+
+

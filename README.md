@@ -106,6 +106,38 @@ Create custom workflows by defining subcommands. See [examples/subcommands/](exa
 Example subcommands:
 - `pr-review` - Interactive GitHub PR review that posts LLM suggestions as inline comments on specific code lines
 
+### Available Tools for LLM
+
+The LLM has access to the following tools when executing in the sandbox:
+
+**Project Exploration (read-only /project):**
+- `read_project_file` - Read files from the original project
+- `list_project_directory` - List directory contents to explore structure
+
+**Git Operations:**
+- `checkout_commit` - Create a worktree from any commit/branch
+- `git_commit` - Commit changes to a worktree's branch
+
+**File Operations (worktree-only):**
+- `read_file` - Read file content from a worktree
+- `write_file` - Create or overwrite a file in a worktree
+- `edit_file` - Replace multiple line ranges in a file (can edit several locations in one operation)
+
+**Search Tools (worktree-only):**
+- `glob` - Find files matching a pattern (e.g., `*.py`, `**/*.js`)
+- `grep` - Search file contents using regex (uses ripgrep when available)
+
+**Shell:**
+- `execute_command` - Run any shell command in the container
+
+**Tool Usage Pattern:**
+1. Use `read_project_file`/`list_project_directory` to explore the original project
+2. Use `checkout_commit` to create a worktree when you need to modify files
+3. Use worktree file tools (`read_file`, `write_file`, `edit_file`, `glob`, `grep`) for file operations
+4. Use `git_commit` to commit changes
+
+**Important:** Worktree file operation and search tools only work within checked-out worktrees. To modify files, you must first create a worktree with `checkout_commit`.
+
 ## Examples
 
 See the [examples/](examples/) directory for:
@@ -197,10 +229,12 @@ image:
        │                    │
        ▼                    ▼
 ┌──────────────────────────────────────────┐
-│ MCP Tools (in container)                │
-│ - execute_command                       │
-│ - checkout_commit (create worktrees)    │
-│ - git_commit                            │
+│ MCP Tools                               │
+│ Project: read_project_file, list_dir    │
+│ Git: checkout_commit, git_commit        │
+│ Worktree Files: read, write, edit      │
+│ Worktree Search: glob, grep             │
+│ Shell: execute_command                  │
 └──────────────┬──────────────────────────┘
                │
                ▼
