@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Tuple
 
+import click
 import requests_unixsocket
 
 
@@ -33,7 +34,7 @@ class ContainerManager:
             response = self.session.get(f"{self.base_url}/v4.0.0/libpod/version")
             response.raise_for_status()
         except Exception as e:
-            print(
+            click.echo(
                 f"Error: Cannot connect to podman API.\n"
                 f"\n"
                 f"Socket location: {self.socket_path}\n"
@@ -49,7 +50,7 @@ class ContainerManager:
                 f"\n"
                 f"To verify socket exists:\n"
                 f"  ls -l {self.socket_path}",
-                file=sys.stderr
+                err=True
             )
             sys.exit(1)
 
@@ -102,7 +103,7 @@ class ContainerManager:
                         data = json.loads(line)
                         if 'stream' in data:
                             # Print build output
-                            print(data['stream'], end='')
+                            click.echo(data['stream'], nl=False)
                         if 'aux' in data and 'ID' in data['aux']:
                             image_id = data['aux']['ID']
                     except json.JSONDecodeError:

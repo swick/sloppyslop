@@ -298,9 +298,7 @@ def cleanup():
 
 def create_run_sandbox_function(
     project_dir: Path,
-    commit: str,
     network: Optional[str],
-    keep_branch: tuple,
     verbose: bool,
 ):
     """
@@ -310,17 +308,12 @@ def create_run_sandbox_function(
 
     Args:
         project_dir: Project directory
-        commit: Git commit/branch/tag to use
         network: Network mode override
-        keep_branch: Tuple of branch names to keep
         verbose: Enable verbose output
 
     Returns:
         Function that can run the sandbox
     """
-    # Convert tuple to list
-    keep_branches = list(keep_branch) if keep_branch else []
-
     # Load configuration (project overrides global)
     config = load_config(project_dir)
 
@@ -330,6 +323,7 @@ def create_run_sandbox_function(
     def run_sandbox(
         prompt: str,
         output_schema: dict,
+        keep_branches: Optional[list] = None,
     ) -> dict:
         """
         Run the sandbox and return structured output.
@@ -337,18 +331,18 @@ def create_run_sandbox_function(
         Args:
             prompt: User prompt for LLM
             output_schema: JSON schema for structured output
+            keep_branches: List of branch names to keep (default: [])
 
         Returns:
             Structured output from LLM
 
         Note:
-            The commit, network, keep_branches, and verbose are already configured
-            from command line options.
+            The network and verbose are already configured from command line options.
+            The keep_branches can be specified by subcommands.
         """
 
         # Run prompt
         return runner.run_prompt(
-            commit,
             prompt,
             output_schema,
             keep_branches,
@@ -369,13 +363,11 @@ def make_subcommand_callback(subcommand_instance):
     Returns:
         Click callback function
     """
-    def callback(project_dir, commit, network, keep_branch, verbose, **kwargs):
+    def callback(project_dir, network, verbose, **kwargs):
         # Create run_sandbox function pre-configured with common options
         run_sandbox = create_run_sandbox_function(
             project_dir,
-            commit,
             network,
-            keep_branch,
             verbose,
         )
 
@@ -384,9 +376,7 @@ def make_subcommand_callback(subcommand_instance):
             subcommand_instance.execute(
                 project_dir=project_dir,
                 run_sandbox=run_sandbox,
-                commit=commit,
                 network=network,
-                keep_branch=keep_branch,
                 verbose=verbose,
                 **kwargs
             )
@@ -417,20 +407,9 @@ def register_subcommand_class(subcommand_class):
         help="Project directory (defaults to current directory)",
     )
     @click.option(
-        "--commit",
-        type=str,
-        default="HEAD",
-        help="Git commit/branch/tag to use (default: HEAD)",
-    )
-    @click.option(
         "--network",
         type=click.Choice(["isolated", "enabled"]),
         help="Network access mode (default: from config)",
-    )
-    @click.option(
-        "--keep-branch",
-        multiple=True,
-        help="Branch name to keep as output (can be specified multiple times). Branch will be renamed from llm-container/{instance_id}/{name} to {name}",
     )
     @click.option(
         "--verbose",

@@ -5,6 +5,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Union
 
+import click
 from anthropic import Anthropic, AnthropicVertex
 
 from llm_sandbox.config import AnthropicConfig, VertexAIConfig
@@ -240,25 +241,25 @@ When you're done analyzing, provide your final answer in the structured JSON for
         messages = [{"role": "user", "content": prompt}]
 
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"Initial user prompt:")
-            print(f"{'='*60}")
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Initial user prompt:")
+            click.echo(f"{'='*60}")
             # Truncate if very long
             if len(prompt) > 500:
-                print(f"{prompt[:500]}...")
-                print(f"[{len(prompt)} characters total]")
+                click.echo(f"{prompt[:500]}...")
+                click.echo(f"[{len(prompt)} characters total]")
             else:
-                print(prompt)
-            print(f"{'='*60}")
+                click.echo(prompt)
+            click.echo(f"{'='*60}")
 
         iteration = 0
         while iteration < max_iterations:
             iteration += 1
 
             if verbose:
-                print(f"\n{'='*60}")
-                print(f"Iteration {iteration}/{max_iterations}")
-                print(f"{'='*60}")
+                click.echo(f"\n{'='*60}")
+                click.echo(f"Iteration {iteration}/{max_iterations}")
+                click.echo(f"{'='*60}")
 
             # Make API call
             if self.backend == "vertex-ai":
@@ -294,29 +295,29 @@ When you're done analyzing, provide your final answer in the structured JSON for
             messages.append(assistant_message)
 
             if verbose:
-                print(f"\nResponse stop reason: {response.stop_reason}")
+                click.echo(f"\nResponse stop reason: {response.stop_reason}")
                 # Count content blocks by type
                 text_blocks = sum(1 for b in response.content if b.type == "text")
                 tool_blocks = sum(1 for b in response.content if b.type == "tool_use")
-                print(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
-                print(f"\n→ Assistant message:")
-                print(f"{'-'*60}")
+                click.echo(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
+                click.echo(f"\n→ Assistant message:")
+                click.echo(f"{'-'*60}")
                 # Print each content block
                 for block in response.content:
                     if block.type == "text":
-                        print(f"[Text block]")
+                        click.echo(f"[Text block]")
                         if len(block.text) > 500:
-                            print(f"{block.text[:500]}...")
-                            print(f"[{len(block.text)} characters total]")
+                            click.echo(f"{block.text[:500]}...")
+                            click.echo(f"[{len(block.text)} characters total]")
                         else:
-                            print(block.text)
+                            click.echo(block.text)
                     elif block.type == "tool_use":
-                        print(f"[Tool use: {block.name}]")
-                        print(f"ID: {block.id}")
-                        print(f"Input: {json.dumps(block.input, indent=2)}")
-                    print()
-                print(f"{'-'*60}")
-                print(f"Total messages in conversation: {len(messages)}")
+                        click.echo(f"[Tool use: {block.name}]")
+                        click.echo(f"ID: {block.id}")
+                        click.echo(f"Input: {json.dumps(block.input, indent=2)}")
+                    click.echo()
+                click.echo(f"{'-'*60}")
+                click.echo(f"Total messages in conversation: {len(messages)}")
 
             # Check if we have a final answer (text response with JSON)
             if response.stop_reason == "end_turn":
@@ -326,15 +327,15 @@ When you're done analyzing, provide your final answer in the structured JSON for
                         text = block.text.strip()
 
                         if verbose:
-                            print(f"\nAssistant response (text):")
-                            print(f"{'-'*60}")
+                            click.echo(f"\nAssistant response (text):")
+                            click.echo(f"{'-'*60}")
                             # Truncate if very long
                             if len(text) > 500:
-                                print(f"{text[:500]}...")
-                                print(f"[{len(text)} characters total]")
+                                click.echo(f"{text[:500]}...")
+                                click.echo(f"[{len(text)} characters total]")
                             else:
-                                print(text)
-                            print(f"{'-'*60}")
+                                click.echo(text)
+                            click.echo(f"{'-'*60}")
 
                         # For Vertex AI, sanitize the response to extract JSON
                         if self.backend == "vertex-ai":
@@ -346,24 +347,24 @@ When you're done analyzing, provide your final answer in the structured JSON for
                         try:
                             result = json.loads(json_text)
                             if verbose:
-                                print(f"\n✓ Successfully parsed JSON output")
+                                click.echo(f"\n✓ Successfully parsed JSON output")
                             return result
                         except json.JSONDecodeError as e:
                             # Print detailed error for debugging
-                            print(f"\n{'='*60}")
-                            print(f"ERROR: Failed to parse JSON from LLM response")
-                            print(f"{'='*60}")
-                            print(f"Error: {e}")
-                            print(f"\nAttempted to parse:")
-                            print(f"{'-'*60}")
-                            print(json_text)
-                            print(f"{'-'*60}")
+                            click.echo(f"\n{'='*60}")
+                            click.echo(f"ERROR: Failed to parse JSON from LLM response")
+                            click.echo(f"{'='*60}")
+                            click.echo(f"Error: {e}")
+                            click.echo(f"\nAttempted to parse:")
+                            click.echo(f"{'-'*60}")
+                            click.echo(json_text)
+                            click.echo(f"{'-'*60}")
                             if self.backend == "vertex-ai" and json_text != text:
-                                print(f"\nOriginal response:")
-                                print(f"{'-'*60}")
-                                print(text)
-                                print(f"{'-'*60}")
-                            print()
+                                click.echo(f"\nOriginal response:")
+                                click.echo(f"{'-'*60}")
+                                click.echo(text)
+                                click.echo(f"{'-'*60}")
+                            click.echo()
                             raise RuntimeError(
                                 f"Failed to parse JSON from LLM response. "
                                 f"See output above for details."
@@ -380,8 +381,8 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 for block in response.content:
                     if block.type == "tool_use":
                         if verbose:
-                            print(f"\n→ Tool call: {block.name}")
-                            print(f"  Input: {json.dumps(block.input, indent=2)}")
+                            click.echo(f"\n→ Tool call: {block.name}")
+                            click.echo(f"  Input: {json.dumps(block.input, indent=2)}")
 
                         # Execute tool
                         result = mcp_server.execute_tool(
@@ -390,14 +391,14 @@ When you're done analyzing, provide your final answer in the structured JSON for
                         )
 
                         if verbose:
-                            print(f"← Tool result:")
+                            click.echo(f"← Tool result:")
                             result_str = json.dumps(result, indent=2)
                             # Truncate if very long
                             if len(result_str) > 500:
-                                print(f"  {result_str[:500]}...")
-                                print(f"  [{len(result_str)} characters total]")
+                                click.echo(f"  {result_str[:500]}...")
+                                click.echo(f"  [{len(result_str)} characters total]")
                             else:
-                                print(f"  {result_str}")
+                                click.echo(f"  {result_str}")
 
                         # Add result
                         tool_results.append({
@@ -414,19 +415,19 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 messages.append(tool_results_message)
 
                 if verbose:
-                    print(f"\n→ Tool results message:")
-                    print(f"{'-'*60}")
+                    click.echo(f"\n→ Tool results message:")
+                    click.echo(f"{'-'*60}")
                     for tr in tool_results:
-                        print(f"[Tool result for: {tr['tool_use_id']}]")
+                        click.echo(f"[Tool result for: {tr['tool_use_id']}]")
                         content = tr['content']
                         if len(content) > 500:
-                            print(f"{content[:500]}...")
-                            print(f"[{len(content)} characters total]")
+                            click.echo(f"{content[:500]}...")
+                            click.echo(f"[{len(content)} characters total]")
                         else:
-                            print(content)
-                        print()
-                    print(f"{'-'*60}")
-                    print(f"Total messages in conversation: {len(messages)}")
+                            click.echo(content)
+                        click.echo()
+                    click.echo(f"{'-'*60}")
+                    click.echo(f"Total messages in conversation: {len(messages)}")
 
                 continue
 

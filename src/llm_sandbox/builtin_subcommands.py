@@ -20,6 +20,13 @@ class RunSubcommand(Subcommand):
         """Add arguments for run command."""
         command.params.append(
             click.Option(
+                ["--keep-branch"],
+                multiple=True,
+                help="Branch name to keep as output (can be specified multiple times). Branch will be renamed from llm-container/{instance_id}/{name} to {name}",
+            )
+        )
+        command.params.append(
+            click.Option(
                 ["--prompt"],
                 type=str,
                 help="Prompt text (use --prompt-file for file input)",
@@ -51,10 +58,8 @@ class RunSubcommand(Subcommand):
     def execute(self, project_dir: Path, run_sandbox, **kwargs):
         """
         Execute the run command.
-
-        Note: commit, network, and keep_branch are provided as kwargs
-        but are already configured in run_sandbox function.
         """
+        keep_branch = kwargs.get("keep_branch", ())
         prompt = kwargs.get("prompt")
         prompt_file = kwargs.get("prompt_file")
         schema = kwargs.get("schema")
@@ -93,10 +98,11 @@ class RunSubcommand(Subcommand):
             with open(schema_file) as f:
                 output_schema = json.load(f)
 
-        # Run the sandbox (commit, network, and keep_branch already configured)
+        # Run the sandbox
         result = run_sandbox(
             prompt=prompt,
             output_schema=output_schema,
+            keep_branches=list(keep_branch) if keep_branch else [],
         )
 
         # Output result as JSON

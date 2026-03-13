@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import click
+
 from llm_sandbox.config import Config, get_provider_config
 from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
@@ -111,15 +113,15 @@ class SandboxRunner:
             full_branch_name = f"llm-container/{self.instance_id}/{branch_name}"
             if branch_name in self.created_worktrees:
                 try:
-                    print(f"Keeping branch: {full_branch_name} → {branch_name}")
+                    click.echo(f"Keeping branch: {full_branch_name} → {branch_name}")
                     # Rename branch by creating new branch at same commit and deleting old one
                     # Use -f to force overwrite if target branch already exists
                     self.git_ops.repo.git.branch("-f", branch_name, full_branch_name)
                     self.git_ops.delete_branch(full_branch_name)
                 except Exception as e:
-                    print(f"Warning: Failed to rename branch {full_branch_name}: {e}")
+                    click.echo(f"Warning: Failed to rename branch {full_branch_name}: {e}")
             else:
-                print(f"Warning: Branch {branch_name} was not created in this session")
+                click.echo(f"Warning: Branch {branch_name} was not created in this session")
 
         # Remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -128,7 +130,7 @@ class SandboxRunner:
                 try:
                     self.git_ops.remove_worktree(worktree_path)
                 except Exception as e:
-                    print(f"Warning: Failed to remove worktree {worktree_name}: {e}")
+                    click.echo(f"Warning: Failed to remove worktree {worktree_name}: {e}")
 
         # Delete ALL remaining llm-container/{instance_id}/* branches
         instance_prefix = f"llm-container/{self.instance_id}/"
@@ -140,23 +142,22 @@ class SandboxRunner:
             ]
             for branch_name in remaining_branches:
                 try:
-                    print(f"Deleting temporary branch: {branch_name}")
+                    click.echo(f"Deleting temporary branch: {branch_name}")
                     self.git_ops.delete_branch(branch_name)
                 except Exception as e:
-                    print(f"Warning: Failed to delete branch {branch_name}: {e}")
+                    click.echo(f"Warning: Failed to delete branch {branch_name}: {e}")
         except Exception as e:
-            print(f"Warning: Failed to list remaining branches: {e}")
+            click.echo(f"Warning: Failed to list remaining branches: {e}")
 
         # Remove instance directory
         if self.worktrees_base_dir.exists():
             try:
                 shutil.rmtree(self.worktrees_base_dir)
             except Exception as e:
-                print(f"Warning: Failed to remove instance directory: {e}")
+                click.echo(f"Warning: Failed to remove instance directory: {e}")
 
     def run_prompt(
         self,
-        commit: str,
         prompt: str,
         output_schema: Dict[str, Any],
         keep_branches: Optional[List[str]] = None,
@@ -167,7 +168,6 @@ class SandboxRunner:
         Execute one-shot LLM prompt with structured output.
 
         Args:
-            commit: Git commit/branch/tag to use as base (deprecated, not used in new architecture)
             prompt: User prompt for LLM
             output_schema: JSON schema for structured output
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
@@ -196,7 +196,7 @@ class SandboxRunner:
                 self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
             )
             self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Instance ID: {self.instance_id}")
+            click.echo(f"Instance ID: {self.instance_id}")
 
             # Step 2: Get container image (build if necessary)
             image_manager = Image(
@@ -215,7 +215,7 @@ class SandboxRunner:
             )
 
             self.container_manager.start_container(container_id)
-            print(f"Container started: {container_id[:12]}")
+            click.echo(f"Container started: {container_id[:12]}")
 
             # Step 4: Initialize MCP server
             mcp_server = ContainerMCPServer(
@@ -223,7 +223,7 @@ class SandboxRunner:
             )
 
             # Step 5: Execute LLM prompt with structured output
-            print("Executing LLM prompt...")
+            click.echo("Executing LLM prompt...")
 
             llm_provider = create_llm_provider(
                 self.provider_name,
@@ -242,8 +242,8 @@ class SandboxRunner:
         finally:
             # Step 6: Cleanup
             if container_id:
-                print("Cleaning up container...")
+                click.echo("Cleaning up container...")
                 self.container_manager.cleanup(container_id)
 
-            print("Cleaning up worktrees...")
+            click.echo("Cleaning up worktrees...")
             self._cleanup_worktrees(keep_branches)

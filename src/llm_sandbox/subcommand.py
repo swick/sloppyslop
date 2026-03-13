@@ -20,7 +20,7 @@ class Subcommand(ABC):
             help = "Analyze the project"
 
             def add_arguments(self, command):
-                # Add custom options (common options are automatic)
+                # Add custom options (common options like --network and --verbose are automatic)
                 command.params.append(
                     click.Option(["--depth"], type=int, default=3, help="Analysis depth")
                 )
@@ -28,18 +28,18 @@ class Subcommand(ABC):
 
             def execute(self, project_dir, run_sandbox, **kwargs):
                 # Common options available in kwargs:
-                # - commit: from --commit (already configured in run_sandbox)
                 # - network: from --network (already configured in run_sandbox)
-                # - keep_branch: from --keep-branch (already configured in run_sandbox)
+                # - verbose: from --verbose (already configured in run_sandbox)
 
                 depth = kwargs.get("depth", 3)
 
-                # run_sandbox is pre-configured with commit, network, keep_branches
+                # run_sandbox accepts optional keep_branches parameter
                 result = run_sandbox(
                     prompt=f"Analyze this project with depth {depth}",
                     output_schema={"type": "object", ...},
+                    keep_branches=["my-branch"],  # optional, defaults to []
                 )
-                print(f"Analysis complete: {result}")
+                click.echo(f"Analysis complete: {result}")
     """
 
     name: str = None  # Subcommand name (e.g., "analyze")
@@ -70,13 +70,14 @@ class Subcommand(ABC):
 
         Args:
             project_dir: Project directory path
-            run_sandbox: Function to run the sandbox, pre-configured with common options.
-                Signature: run_sandbox(prompt: str, output_schema: dict) -> dict
-                The commit, network, and keep_branches are already configured.
+            run_sandbox: Function to run the sandbox, pre-configured with network and verbose.
+                Signature: run_sandbox(prompt: str, output_schema: dict,
+                                      keep_branches: list = None) -> dict
+                The network and verbose are pre-configured from CLI.
+                Subcommands can specify keep_branches as needed.
             **kwargs: Arguments from CLI including:
-                - commit: Git commit/branch/tag from --commit (also configured in run_sandbox)
-                - network: Network mode from --network (also configured in run_sandbox)
-                - keep_branch: Branch tuple from --keep-branch (also configured in run_sandbox)
+                - network: Network mode from --network (pre-configured in run_sandbox)
+                - verbose: Verbose flag from --verbose (pre-configured in run_sandbox)
                 - Any custom arguments added by add_arguments()
 
         Returns:

@@ -80,6 +80,8 @@ llm-sandbox run \
   --keep-branch improvements
 ```
 
+The LLM can use the `checkout_commit` tool to create worktrees from any commit/branch it needs during execution.
+
 ## Core Concepts
 
 ### Git Worktrees
@@ -132,6 +134,8 @@ Execute one-shot LLM prompt in isolated container
 - `--keep-branch` - Branch name to preserve (can be specified multiple times)
 - `--network` - Network mode: `isolated` or `enabled`
 - `--verbose` - Show detailed tool usage and LLM messages
+
+Note: The LLM can use the `checkout_commit` tool to create worktrees from any commit/branch as needed.
 
 ### `llm-sandbox cleanup`
 Clean up all temporary worktrees and branches

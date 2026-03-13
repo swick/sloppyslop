@@ -108,23 +108,28 @@ class MySubcommand(Subcommand):
             }
         }
 
-        # Run the sandbox (pre-configured with --commit, --network, --keep-branch)
-        result = run_sandbox(prompt=prompt, output_schema=schema)
+        # Run the sandbox (network and verbose pre-configured from CLI)
+        # Optionally specify keep_branches
+        result = run_sandbox(
+            prompt=prompt,
+            output_schema=schema,
+            keep_branches=["my-branch"],  # optional, defaults to []
+        )
 
         # Process the result
-        print(f"Result: {result['result']}")
+        click.echo(f"Result: {result['result']}")
 ```
 
 3. Available in `**kwargs`:
-   - `commit`: Git commit from `--commit` (already configured in `run_sandbox`)
-   - `network`: Network mode from `--network` (already configured in `run_sandbox`)
-   - `keep_branch`: Tuple of branches from `--keep-branch` (already configured in `run_sandbox`)
-   - `verbose`: Boolean from `--verbose`
+   - `network`: Network mode from `--network` (pre-configured in `run_sandbox`)
+   - `verbose`: Boolean from `--verbose` (pre-configured in `run_sandbox`)
    - Any custom arguments you added in `add_arguments()`
 
 4. The `run_sandbox` function:
-   - Already configured with common options (`commit`, `network`, `keep_branch`)
-   - Signature: `run_sandbox(prompt: str, output_schema: dict) -> dict`
+   - Pre-configured with `network` and `verbose` from CLI options
+   - Signature: `run_sandbox(prompt: str, output_schema: dict, keep_branches: list = None) -> dict`
+   - Subcommands can specify `keep_branches` as needed
+   - The LLM can use `checkout_commit` tool to work with any commit/branch
    - Returns the structured output from the LLM
 
 ## Tips

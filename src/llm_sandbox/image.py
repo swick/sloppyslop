@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Optional
 
+import click
+
 from llm_sandbox.config import ImageConfig
 from llm_sandbox.container import ContainerManager
 
@@ -47,7 +49,7 @@ class Image:
         else:
             # Pre-built mode: use specified image or default
             image = self.config.image or self.DEFAULT_IMAGE
-            print(f"Using image: {image}")
+            click.echo(f"Using image: {image}")
             return image
 
     def build(self, force: bool = False) -> str:
@@ -126,14 +128,14 @@ class Image:
 
         # Build if needed
         if should_build:
-            print(f"Building image: {image_tag} ({reason})")
+            click.echo(f"Building image: {image_tag} ({reason})")
             self.container_manager.build_image(
                 containerfile_path,
                 self.project_path,
                 image_tag,
             )
         else:
-            print(f"Using image: {image_tag} ({reason})")
+            click.echo(f"Using image: {image_tag} ({reason})")
 
         return image_tag
 
@@ -160,5 +162,5 @@ class Image:
 
         except Exception as e:
             # If we can't determine, err on the side of rebuilding
-            print(f"Warning: Cannot determine image age: {e}")
+            click.echo(f"Warning: Cannot determine image age: {e}")
             return True

@@ -8,7 +8,7 @@ To use:
    OR
 2. Copy to .llm-sandbox/subcommands/analyze.py (project-specific)
 
-Then run: llm-sandbox analyze --commit HEAD --depth 3
+Then run: llm-sandbox analyze --depth 3
 
 Requirements:
 - llm-sandbox must be installed (uv pip install -e .)
@@ -30,8 +30,8 @@ class AnalyzeSubcommand(Subcommand):
         """
         Add custom arguments for this subcommand.
 
-        Note: Common options (--commit, --network, --pull-branches) are
-        automatically available to all subcommands.
+        Note: Common options (--network, --verbose) are automatically
+        available to all subcommands.
         """
         # Add custom options
         command.params.append(
@@ -57,19 +57,17 @@ class AnalyzeSubcommand(Subcommand):
 
         Args:
             project_dir: Project directory path
-            run_sandbox: Function to run the sandbox (pre-configured with commit, network, etc.)
+            run_sandbox: Function to run the sandbox (pre-configured with network and verbose)
             **kwargs: Additional arguments including:
-                - commit: Git commit from --commit option (common option)
                 - network: Network mode from --network option (common option)
-                - pull_branches: Branches from --pull-branches option (common option)
+                - verbose: Verbose flag from --verbose option (common option)
                 - depth: Custom depth argument
                 - output: Custom output file argument
         """
         depth = kwargs.get("depth", 3)
-        commit = kwargs.get("commit", "HEAD")  # Common option, already configured in run_sandbox
         output_file = kwargs.get("output")
 
-        click.echo(f"Analyzing project at {project_dir} (depth={depth}, commit={commit})")
+        click.echo(f"Analyzing project at {project_dir} (depth={depth})")
 
         # Define the analysis prompt
         prompt = f"""Analyze this project for code quality and security issues.
@@ -126,11 +124,12 @@ Provide specific file locations and line numbers where possible."""
         }
 
         # Run the sandbox
-        # Note: commit is already configured from --commit option
+        # Note: The LLM can use checkout_commit tool to work with any commit/branch
         click.echo("Running analysis in isolated container...")
         result = run_sandbox(
             prompt=prompt,
             output_schema=output_schema,
+            keep_branches=[],  # Optional: specify branches to keep
         )
 
         # Display results
