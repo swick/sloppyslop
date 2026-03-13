@@ -109,7 +109,7 @@ def init(project_dir: Path):
             click.echo("\nSaving configuration...")
             containerfile_path = project_dir / ".llm-sandbox" / "Containerfile"
             containerfile_path.parent.mkdir(parents=True, exist_ok=True)
-            containerfile_path.write_text(content)
+            containerfile_path.write_text(containerfile_content)
         elif choice == 2:
             # Specify custom path
             custom_path = click.prompt(
