@@ -9,7 +9,6 @@ from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
 from llm_sandbox.mcp_tools import MCPServer, ExecuteCommandTool, GitCommitTool
-from llm_sandbox.worktree import WorktreeManager
 
 
 class ContainerMCPServer(MCPServer):
@@ -50,7 +49,6 @@ class SandboxRunner:
 
         # Initialize components
         self.container_manager = ContainerManager()
-        self.worktree_manager = WorktreeManager(project_path)
         self.git_ops = GitOperations(project_path)
 
         # Get provider config
@@ -92,9 +90,9 @@ class SandboxRunner:
 
         try:
             # Step 1: Create worktree from commit
-            commit_hash = self.worktree_manager.get_commit_hash(commit)
+            commit_hash = self.git_ops.get_commit_hash(commit)
             worktree_dir = self.project_path / ".llm-sandbox" / "worktrees" / commit_hash
-            worktree_path = self.worktree_manager.create_worktree(commit, worktree_dir)
+            worktree_path = self.git_ops.create_worktree(commit, worktree_dir)
 
             # Step 2: Build/use cached container image
             image_tag = self.project_config.image_tag
@@ -158,4 +156,4 @@ class SandboxRunner:
 
             if worktree_path:
                 print("Cleaning up worktree...")
-                self.worktree_manager.remove_worktree(worktree_path)
+                self.git_ops.remove_worktree(worktree_path)

@@ -197,7 +197,7 @@ def create_run_sandbox_function(
         """
 
         # Run prompt
-        return = runner.run_prompt(
+        return runner.run_prompt(
             commit,
             prompt,
             output_schema,
