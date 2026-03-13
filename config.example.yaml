@@ -1,0 +1,41 @@
+# Example configuration file for llm-sandbox
+# Save this as ~/.config/llm-sandbox/config.yaml (or $XDG_CONFIG_HOME/llm-sandbox/config.yaml)
+
+llm:
+  # Which provider to use by default
+  default_provider: anthropic  # or vertex-ai
+
+  # Provider configurations
+  providers:
+    # Direct Anthropic API
+    anthropic:
+      api_key_env: ANTHROPIC_API_KEY  # Environment variable containing API key
+      model: claude-sonnet-4-5        # Model to use
+      backend: anthropic              # Use direct Anthropic API
+
+    # Google Cloud Vertex AI (alternative)
+    vertex-ai:
+      api_key_env: ANTHROPIC_API_KEY  # Not used for Vertex AI, but required field
+      model: claude-sonnet-4-5        # Model to use
+      backend: vertex-ai              # Use Vertex AI backend
+      region: us-east5                # GCP region where Vertex AI is enabled
+      project_id: my-gcp-project      # Your GCP project ID
+
+container:
+  # Network access mode for containers
+  network: isolated  # Options: isolated (no network) or enabled (network access)
+
+# Usage examples:
+#
+# 1. Using direct Anthropic API (default):
+#    - Set ANTHROPIC_API_KEY environment variable
+#    - Use default configuration above
+#
+# 2. Using Google Cloud Vertex AI:
+#    - Ensure you're authenticated with GCP (gcloud auth application-default login)
+#    - Set default_provider to "vertex-ai" or use --provider vertex-ai flag
+#    - Configure your GCP project_id and region
+#
+# 3. Switching providers:
+#    - Change default_provider in this file
+#    - Or use CLI flag: llm-sandbox run --provider vertex-ai ...

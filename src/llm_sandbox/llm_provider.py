@@ -4,7 +4,7 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-from anthropic import Anthropic
+from anthropic import Anthropic, AnthropicVertex
 
 from llm_sandbox.mcp_tools import MCPServer
 
@@ -50,31 +50,53 @@ class LLMProvider(ABC):
 
 
 class ClaudeProvider(LLMProvider):
-    """Claude API provider with MCP tool support and structured output."""
+    """Claude API provider with MCP tool support and structured output.
+
+    Supports both Anthropic's direct API and Google Cloud Vertex AI.
+    """
 
     def __init__(self, provider_config):
         """
         Initialize Claude provider.
 
         Args:
-            provider_config: Provider configuration with api_key_env and model
+            provider_config: Provider configuration with backend, model, and credentials
 
         Raises:
-            ValueError: If API key not found in environment
+            ValueError: If required configuration is missing
         """
         import os
 
-        # Get API key from environment
-        api_key = os.getenv(provider_config.api_key_env)
-        if not api_key:
-            raise ValueError(
-                f"API key not found. Set {provider_config.api_key_env} environment variable."
-            )
-
-        self.api_key = api_key
         self.model = provider_config.model
         self.provider_config = provider_config
-        self.client = Anthropic(api_key=api_key)
+        self.backend = provider_config.backend
+
+        if provider_config.backend == "vertex-ai":
+            # Vertex AI backend
+            if not provider_config.region:
+                raise ValueError(
+                    "Vertex AI backend requires 'region' configuration (e.g., 'us-east5')"
+                )
+            if not provider_config.project_id:
+                raise ValueError(
+                    "Vertex AI backend requires 'project_id' configuration (GCP project ID)"
+                )
+
+            self.client = AnthropicVertex(
+                region=provider_config.region,
+                project_id=provider_config.project_id,
+            )
+
+        else:
+            # Direct Anthropic API backend
+            api_key = os.getenv(provider_config.api_key_env)
+            if not api_key:
+                raise ValueError(
+                    f"API key not found. Set {provider_config.api_key_env} environment variable."
+                )
+
+            self.api_key = api_key
+            self.client = Anthropic(api_key=api_key)
 
     def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
         """

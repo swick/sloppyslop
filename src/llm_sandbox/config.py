@@ -13,6 +13,10 @@ class ProviderConfig(BaseModel):
 
     api_key_env: str
     model: str
+    backend: str = "anthropic"  # "anthropic" or "vertex-ai"
+    # Vertex AI specific fields
+    region: Optional[str] = None  # e.g., "us-east5"
+    project_id: Optional[str] = None  # GCP project ID
 
 
 class LLMConfig(BaseModel):
