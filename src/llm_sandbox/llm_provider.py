@@ -179,7 +179,7 @@ class ClaudeProvider(LLMProvider):
         tool_defs = [tool.to_dict() for tool in tools]
 
         # Build system prompt
-        system_prompt = """You are working in an isolated container environment. You have access to tools for executing commands and git operations.
+        base_system_prompt = """You are working in an isolated container environment. You have access to tools for executing commands and git operations.
 
 The container has two mounts:
 - /project (read-only): The original project code
@@ -187,7 +187,21 @@ The container has two mounts:
 
 Your task is to analyze the project and provide the requested information.
 
-Use the tools available to explore the project, run commands, and gather information as needed.
+Use the tools available to explore the project, run commands, and gather information as needed."""
+
+        # For Vertex AI, add schema to system prompt (no native structured output support)
+        if self.backend == "vertex-ai":
+            system_prompt = f"""{base_system_prompt}
+
+When you're done analyzing, provide your final answer as a JSON object matching this exact schema:
+
+{json.dumps(output_schema, indent=2)}
+
+Return ONLY the JSON object, no other text."""
+        else:
+            # For Anthropic API, use native structured output
+            system_prompt = f"""{base_system_prompt}
+
 When you're done analyzing, provide your final answer in the structured JSON format."""
 
         messages = [{"role": "user", "content": prompt}]
@@ -196,18 +210,31 @@ When you're done analyzing, provide your final answer in the structured JSON for
         while iteration < max_iterations:
             iteration += 1
 
-            # Make API call with JSON schema output format
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=8000,
-                system=system_prompt,
-                messages=messages,
-                tools=tool_defs,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": output_schema,
-                },
-            )
+            # Make API call
+            if self.backend == "vertex-ai":
+                # Vertex AI doesn't support structured output, rely on prompt engineering
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=8000,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tool_defs,
+                )
+            else:
+                # Anthropic API uses native structured output
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=8000,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tool_defs,
+                    output_config={
+                        "format": {
+                            "type": "json_schema",
+                            "schema": output_schema,
+                        }
+                    },
+                )
 
             # Add assistant response to messages
             assistant_message = {
