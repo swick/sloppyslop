@@ -81,7 +81,12 @@ class ProjectAnalyzer:
 
         return containerfiles
 
-    def generate_containerfile(self, project_path: Path) -> str:
+    def generate_containerfile(
+        self,
+        project_path: Path,
+        image_name: str,
+        extra_instructions: Optional[str] = None,
+    ) -> str:
         """
         Generate Containerfile using LLM based on project analysis.
 
@@ -90,6 +95,8 @@ class ProjectAnalyzer:
 
         Args:
             project_path: Path to project directory
+            image_name: Name for the container environment
+            extra_instructions: Optional additional requirements/instructions
 
         Returns:
             Generated Containerfile content
@@ -119,19 +126,29 @@ class ProjectAnalyzer:
             "required": ["containerfile", "explanation"],
         }
 
-        # Generate containerfile using structured output
-        prompt = f"""Analyze the project in the current directory and generate an appropriate Containerfile.
+        # Build the generation prompt
+        prompt = f"""Analyze the project in the current directory and generate a Containerfile for an environment named '{image_name}'.
 
 Project path: {project_path}
+
+The Containerfile should:
+1. Use an appropriate base image
+2. Install necessary dependencies for the project
+3. Set up the working environment
+4. Be suitable for running code analysis and development tasks"""
+
+        if extra_instructions:
+            prompt += f"\n\nAdditional requirements:\n{extra_instructions}"
+
+        prompt += """
 
 Use the available tools to:
 1. List the directory structure
 2. Read key files (package.json, requirements.txt, pyproject.toml, go.mod, etc.)
 3. Understand the project type and dependencies
 
-Then generate a Containerfile with these requirements:
+Containerfile requirements:
 - The resulting Containerfile will be used by an LLM to inspect, modify, build, run and test the project
-- Use an appropriate base image
 - Install all necessary dependencies
 - Set up the working directory as /workspace
 - Do not include CMD or ENTRYPOINT (container will be used interactively)
