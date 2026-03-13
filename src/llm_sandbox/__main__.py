@@ -53,11 +53,9 @@ def check(provider: Optional[str]):
         click.echo(f"Model: {provider_config.model}")
 
         if isinstance(provider_config, VertexAIConfig):
-            click.echo(f"Backend: vertex-ai")
             click.echo(f"Region: {provider_config.region}")
             click.echo(f"Project ID: {provider_config.project_id}")
         elif isinstance(provider_config, AnthropicConfig):
-            click.echo(f"Backend: anthropic")
             click.echo(f"API Key Env: {provider_config.api_key_env}")
         else:
             raise ValueError(f"Unknown provider config type: {type(provider_config)}")
