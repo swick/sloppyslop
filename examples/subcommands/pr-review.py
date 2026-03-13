@@ -12,16 +12,93 @@ using GitHub's suggestion feature for easy application.
 Usage:
     llm-sandbox pr-review --pr 123
     llm-sandbox pr-review --pr 123 --max-suggestions 5
+    llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
+
+Authentication:
+    Set GH_TOKEN environment variable or use --with-token option
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import click
+import requests
 
 from llm_sandbox.subcommand import Subcommand
+
+
+class GitHubClient:
+    """GitHub API client."""
+
+    def __init__(self, token: str):
+        """Initialize GitHub client with token."""
+        self.token = token
+        self.base_url = "https://api.github.com"
+        self.headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    def get_pull_request(self, repo: str, pr_number: int) -> dict:
+        """Get PR information."""
+        url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}"
+        response = requests.get(url, headers=self.headers)
+        response.raise_for_status()
+        data = response.json()
+
+        return {
+            "title": data["title"],
+            "head_ref": data["head"]["ref"],
+            "base_ref": data["base"]["ref"],
+            "author": data["user"]["login"],
+            "head_sha": data["head"]["sha"],
+        }
+
+    def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
+        """Post a comment on an issue/PR."""
+        url = f"{self.base_url}/repos/{repo}/issues/{issue_number}/comments"
+        response = requests.post(
+            url,
+            headers=self.headers,
+            json={"body": body},
+        )
+        response.raise_for_status()
+
+    def post_review_comment(
+        self,
+        repo: str,
+        pr_number: int,
+        commit_sha: str,
+        path: str,
+        line_start: int,
+        line_end: int,
+        body: str,
+    ) -> None:
+        """Post an inline review comment on specific lines."""
+        url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}/comments"
+
+        comment_data = {
+            "body": body,
+            "commit_id": commit_sha,
+            "path": path,
+            "side": "RIGHT",
+        }
+
+        # Single line vs multi-line
+        if line_start == line_end:
+            comment_data["line"] = line_end
+        else:
+            comment_data["start_line"] = line_start
+            comment_data["start_side"] = "RIGHT"
+            comment_data["line"] = line_end
+
+        response = requests.post(url, headers=self.headers, json=comment_data)
+        response.raise_for_status()
 
 
 class PRReviewSubcommand(Subcommand):
@@ -48,21 +125,53 @@ class PRReviewSubcommand(Subcommand):
                 help="Maximum number of suggestions to generate (default: 10)",
             )
         )
+        command.params.append(
+            click.Option(
+                ["--with-token"],
+                type=str,
+                help="GitHub token (defaults to GH_TOKEN environment variable)",
+            )
+        )
         return command
 
     def execute(self, project_dir: Path, run_sandbox, **kwargs):
         """Execute PR review workflow."""
         pr_number = kwargs["pr"]
         max_suggestions = kwargs.get("max_suggestions", 10)
+        token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
+
+        if not token:
+            click.echo(
+                "Error: GitHub token not found.\n"
+                "\n"
+                "Set GH_TOKEN environment variable or use --with-token option:\n"
+                "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
+                "  or\n"
+                "  llm-sandbox pr-review --pr 123 --with-token ghp_xxxxxxxxxxxx",
+                err=True
+            )
+            sys.exit(1)
+
+        # Initialize GitHub API client
+        self.github = GitHubClient(token)
 
         click.echo(f"\n{'='*60}")
         click.echo(f"GitHub PR Review: #{pr_number}")
         click.echo(f"{'='*60}\n")
 
-        # Step 1: Fetch PR info using gh CLI
+        # Step 1: Get repository info
+        click.echo("Fetching repository information...")
+        try:
+            repo_name = self._get_repo_name(project_dir)
+            click.echo(f"  Repository: {repo_name}")
+        except Exception as e:
+            click.echo(f"Error getting repository: {e}", err=True)
+            sys.exit(1)
+
+        # Step 2: Fetch PR info using GitHub API
         click.echo("Fetching PR information...")
         try:
-            pr_info = self._fetch_pr_info(pr_number)
+            pr_info = self.github.get_pull_request(repo_name, pr_number)
             click.echo(f"  PR Title: {pr_info['title']}")
             click.echo(f"  Branch: {pr_info['head_ref']}")
             click.echo(f"  Base: {pr_info['base_ref']}")
@@ -72,7 +181,7 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error fetching PR info: {e}", err=True)
             sys.exit(1)
 
-        # Step 2: Define the review prompt and schema
+        # Step 3: Define the review prompt and schema
         review_prompt = f"""Review the changes in PR #{pr_number} and suggest improvements.
 
 The PR branch is '{pr_info['head_ref']}' (based on '{pr_info['base_ref']}').
@@ -151,14 +260,14 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             "required": ["summary", "suggestions"],
         }
 
-        # Step 3: Get LLM review
+        # Step 4: Get LLM review
         click.echo("\nAnalyzing PR with LLM...")
         review_result = run_sandbox(
             prompt=review_prompt,
             output_schema=suggestion_schema,
         )
 
-        # Step 4: Show summary
+        # Step 5: Show summary
         click.echo(f"\n{'='*60}")
         click.echo("Review Summary")
         click.echo(f"{'='*60}")
@@ -169,7 +278,7 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             click.echo("\nNo suggestions to apply. PR looks good!")
             return
 
-        # Step 5: Interactive approval
+        # Step 6: Interactive approval
         click.echo(f"\n{'='*60}")
         click.echo("Review Suggestions")
         click.echo(f"{'='*60}\n")
@@ -197,7 +306,7 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             click.echo("\nNo suggestions accepted. No review to post.")
             return
 
-        # Step 6: Post review to GitHub
+        # Step 7: Post review to GitHub
         click.echo(f"\n{'='*60}")
         click.echo(f"Posting {len(accepted_suggestions)} suggestions to GitHub")
         click.echo(f"{'='*60}\n")
@@ -205,23 +314,26 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
         # Post summary comment
         summary_body = self._format_summary_comment(len(accepted_suggestions), review_result["summary"])
         try:
-            self._post_pr_comment(pr_number, summary_body)
+            self.github.post_issue_comment(repo_name, pr_number, summary_body)
             click.echo(f"✓ Posted review summary")
         except Exception as e:
             click.echo(f"Warning: Failed to post summary: {e}", err=True)
 
         # Post each suggestion as an inline comment
-        repo_name = self._get_repo_name()
         success_count = 0
         failed_suggestions = []
 
         for i, suggestion in enumerate(accepted_suggestions, 1):
             try:
-                self._post_inline_comment(
+                body = self._format_inline_comment(suggestion)
+                self.github.post_review_comment(
                     repo_name,
                     pr_number,
                     pr_info["head_sha"],
-                    suggestion,
+                    suggestion["file"],
+                    suggestion["line_start"],
+                    suggestion["line_end"],
+                    body,
                 )
                 click.echo(f"✓ Posted inline comment {i}/{len(accepted_suggestions)}: {suggestion['file']}")
                 success_count += 1
@@ -229,7 +341,7 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
                 click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
                 failed_suggestions.append(suggestion)
 
-        # Step 7: Show results
+        # Step 8: Show results
         click.echo(f"\n{'='*60}")
         click.echo(f"Posted {success_count}/{len(accepted_suggestions)} inline comments")
         click.echo(f"{'='*60}")
@@ -243,36 +355,31 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
         click.echo(f"\nView the review at:")
         click.echo(f"  https://github.com/{repo_name}/pull/{pr_number}")
 
-    def _fetch_pr_info(self, pr_number: int) -> dict:
-        """Fetch PR information using gh CLI."""
+    def _get_repo_name(self, project_dir: Path) -> str:
+        """Get GitHub repository owner/name from git remote."""
         try:
             result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    str(pr_number),
-                    "--json",
-                    "title,headRefName,baseRefName,author,headRefOid",
-                ],
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=project_dir,
                 capture_output=True,
                 text=True,
                 check=True,
             )
-            data = json.loads(result.stdout)
-            return {
-                "title": data["title"],
-                "head_ref": data["headRefName"],
-                "base_ref": data["baseRefName"],
-                "author": data["author"]["login"],
-                "head_sha": data["headRefOid"],
-            }
+            remote_url = result.stdout.strip()
+
+            # Parse GitHub URL
+            # Support both SSH (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git)
+            if "github.com" in remote_url:
+                # Extract owner/repo
+                match = re.search(r'github\.com[:/]([^/]+/[^/]+?)(\.git)?$', remote_url)
+                if match:
+                    return match.group(1)
+
+            raise ValueError(f"Could not parse GitHub repository from: {remote_url}")
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to fetch PR info. Is 'gh' CLI installed and authenticated?\n{e.stderr}"
-            )
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Failed to parse PR info: {e}")
+            raise RuntimeError(f"Failed to get git remote: {e.stderr}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to determine repository: {e}")
 
     def _indent_code(self, code: str, indent: int) -> str:
         """Indent code snippet for display."""
@@ -317,92 +424,3 @@ Provide up to {max_suggestions} specific, actionable suggestions."""
             "</details>",
         ]
         return "\n".join(parts)
-
-    def _post_pr_comment(self, pr_number: int, body: str) -> None:
-        """Post a general comment to GitHub PR using gh CLI."""
-        try:
-            subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "comment",
-                    str(pr_number),
-                    "--body",
-                    body,
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to post PR comment. Is 'gh' CLI installed and authenticated?\n{e.stderr}"
-            )
-
-    def _post_inline_comment(
-        self,
-        repo_name: str,
-        pr_number: int,
-        commit_sha: str,
-        suggestion: dict,
-    ) -> None:
-        """Post an inline review comment on specific lines using GitHub API."""
-        body = self._format_inline_comment(suggestion)
-
-        # Build gh api command
-        # For single line comments, use 'line'
-        # For multi-line comments, use 'start_line' and 'line'
-        cmd = [
-            "gh",
-            "api",
-            "--method",
-            "POST",
-            "-H",
-            "Accept: application/vnd.github+json",
-            "-H",
-            "X-GitHub-Api-Version: 2022-11-28",
-            f"/repos/{repo_name}/pulls/{pr_number}/comments",
-            "-f",
-            f"body={body}",
-            "-f",
-            f"commit_id={commit_sha}",
-            "-f",
-            f"path={suggestion['file']}",
-            "-f",
-            "side=RIGHT",
-        ]
-
-        # Add line parameters
-        if suggestion["line_start"] == suggestion["line_end"]:
-            # Single line comment
-            cmd.extend(["-F", f"line={suggestion['line_end']}"])
-        else:
-            # Multi-line comment
-            cmd.extend([
-                "-F", f"start_line={suggestion['line_start']}",
-                "-f", "start_side=RIGHT",
-                "-F", f"line={suggestion['line_end']}",
-            ])
-
-        try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to post inline comment: {e.stderr}")
-
-    def _get_repo_name(self) -> str:
-        """Get the GitHub repository name (owner/repo)."""
-        try:
-            result = subprocess.run(
-                ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError:
-            return "unknown/repo"
