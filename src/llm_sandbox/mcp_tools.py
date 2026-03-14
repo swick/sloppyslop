@@ -1,5 +1,6 @@
 """Model Context Protocol (MCP) tools - base classes and definitions."""
 
+import asyncio
 import glob
 import json
 import re
@@ -35,7 +36,7 @@ class MCPTool(ABC):
         }
 
     @abstractmethod
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute the tool with given arguments.
 
@@ -83,7 +84,7 @@ class MCPServer(ABC):
         """
         return list(self.tools.values())
 
-    def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute MCP tool.
 
@@ -101,7 +102,7 @@ class MCPServer(ABC):
             }
 
         tool = self.tools[tool_name]
-        return tool.execute(arguments)
+        return await tool.execute(arguments)
 
 
 # Container tools
@@ -138,12 +139,12 @@ class ExecuteCommandTool(MCPTool):
         )
         self.runner = runner
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Execute shell command in container."""
         command = arguments["command"]
         workdir = arguments.get("workdir", "/worktrees")
 
-        exit_code, stdout, stderr = self.runner.container_manager.exec_command(
+        exit_code, stdout, stderr = await self.runner.container_manager.exec_command(
             self.runner.container_id,
             command,
             workdir,
@@ -207,8 +208,8 @@ class GitCommitTool(MCPTool):
             return f"/worktrees/{worktree_name}"
         return "/worktrees"
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Commit files with message."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Commit files with message (blocking)."""
         files = arguments["files"]
         message = arguments["message"]
         branch = arguments["branch"]
@@ -221,7 +222,6 @@ class GitCommitTool(MCPTool):
             }
 
         # Extract worktree name from branch
-        # worktree_name can contain slashes (e.g., foo/bar)
         prefix = f"llm-container/{self.runner.instance_id}/"
         if not branch.startswith(prefix):
             return {
@@ -246,7 +246,7 @@ class GitCommitTool(MCPTool):
             }
 
         try:
-            # Use GitOperations to commit files
+            # Just call the blocking git operation
             self.runner.git_ops.commit_files(
                 host_worktree_path,
                 files,
@@ -261,7 +261,6 @@ class GitCommitTool(MCPTool):
             }
 
         except RuntimeError as e:
-            # Git command failed
             error_msg = str(e)
             return {
                 "success": False,
@@ -314,8 +313,8 @@ class CheckoutCommitTool(MCPTool):
         short_uuid = str(uuid.uuid4())[:8]
         return f"wt-{short_uuid}"
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Create worktree from commit."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Create worktree from commit (blocking)."""
         commit = arguments["commit"]
         worktree_name = arguments.get("worktree_name")
 
@@ -351,7 +350,7 @@ class CheckoutCommitTool(MCPTool):
         host_worktree_path = self.runner.worktrees_base_dir / worktree_name
 
         try:
-            # Use GitOperations to create worktree on host
+            # Just call the blocking git operation
             self.runner.git_ops.create_worktree_on_branch(
                 commit,
                 host_worktree_path,
@@ -437,8 +436,8 @@ class ReadFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Read file from worktree."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Read file from worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
 
@@ -454,7 +453,7 @@ class ReadFileTool(MCPTool):
         if not file_path.is_file():
             return {"success": False, "error": f"Path is not a file: {path}"}
 
-        # Read file
+        # Read file (blocking)
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
             return {
@@ -524,8 +523,8 @@ class WriteFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Write file to worktree."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Write file to worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
         content = arguments["content"]
@@ -541,7 +540,7 @@ class WriteFileTool(MCPTool):
         except Exception as e:
             return {"success": False, "error": f"Failed to create directory: {str(e)}"}
 
-        # Write file
+        # Write file (blocking)
         try:
             file_path.write_text(content, encoding="utf-8")
             return {
@@ -665,8 +664,8 @@ class EditFileTool(MCPTool):
 
         return True, ""
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Edit file in worktree by replacing line ranges."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Edit file in worktree by replacing line ranges (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
         edits = arguments["edits"]
@@ -683,7 +682,7 @@ class EditFileTool(MCPTool):
         if not file_path.is_file():
             return {"success": False, "error": f"Path is not a file: {path}"}
 
-        # Read file
+        # Read file (blocking)
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
             lines = content.split("\n")
@@ -695,25 +694,23 @@ class EditFileTool(MCPTool):
         if not valid:
             return {"success": False, "error": error}
 
-        # Sort edits by start_line in descending order (apply from bottom to top)
-        # This ensures line numbers remain valid as we edit
+        # Sort edits by start_line in descending order
         sorted_edits = sorted(edits, key=lambda e: e["start_line"], reverse=True)
 
         # Apply edits
         for edit in sorted_edits:
-            start_idx = edit["start_line"] - 1  # Convert to 0-indexed
-            end_idx = edit["end_line"]  # This is exclusive for slicing
+            start_idx = edit["start_line"] - 1
+            end_idx = edit["end_line"]
 
             new_text = edit["new_text"]
             new_lines = new_text.split("\n") if new_text else []
 
-            # Replace the line range with new lines
             lines[start_idx:end_idx] = new_lines
 
         # Reconstruct content
         new_content = "\n".join(lines)
 
-        # Write back
+        # Write back (blocking)
         try:
             file_path.write_text(new_content, encoding="utf-8")
             return {
@@ -757,8 +754,8 @@ class GlobTool(MCPTool):
         )
         self.runner = runner
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Find files matching pattern in worktree."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Find files matching pattern in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
 
@@ -772,7 +769,7 @@ class GlobTool(MCPTool):
         if not worktree_path.exists():
             return {"success": False, "error": f"Worktree directory does not exist: {worktree}"}
 
-        # Find matching files
+        # Find matching files (blocking)
         try:
             matches = []
             worktree_path_resolved = worktree_path.resolve()
@@ -838,8 +835,8 @@ class GrepTool(MCPTool):
         )
         self.runner = runner
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Search file contents in worktree."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Search file contents in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
         file_pattern = arguments.get("file_pattern")
@@ -865,7 +862,7 @@ class GrepTool(MCPTool):
             if file_pattern:
                 cmd.extend(["-g", file_pattern])
 
-            # Run ripgrep
+            # Run ripgrep (blocking)
             result = subprocess.run(
                 cmd,
                 cwd=worktree_path,
@@ -978,8 +975,8 @@ class ReadProjectFileTool(MCPTool):
         )
         self.runner = runner
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Read a file from the project directory."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Read a file from the project directory (blocking)."""
         path = arguments["path"]
         max_lines = arguments.get("max_lines", 1000)
 
@@ -1013,7 +1010,7 @@ class ReadProjectFileTool(MCPTool):
                     "error": "Path is not a file",
                 }
 
-            # Read file content
+            # Read file content (blocking)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
 
@@ -1063,8 +1060,8 @@ class ListProjectDirectoryTool(MCPTool):
         )
         self.runner = runner
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """List contents of a directory."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """List contents of a directory (blocking)."""
         path = arguments.get("path", ".")
 
         try:
@@ -1097,7 +1094,7 @@ class ListProjectDirectoryTool(MCPTool):
                     "error": "Path is not a directory",
                 }
 
-            # List directory contents
+            # List directory contents (blocking)
             entries = []
             for item in sorted(dir_path.iterdir()):
                 rel_path = item.relative_to(self.runner.project_path)

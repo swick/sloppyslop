@@ -33,6 +33,7 @@ Authentication:
 
 import json
 import os
+import asyncio
 import re
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from typing import Any, Dict
 import click
 import requests
 
+from llm_sandbox import AgentConfig
 from llm_sandbox.mcp_tools import (
     MCPTool,
     MCPServer,
@@ -523,10 +525,10 @@ Return:
             # Pre-checkout worktrees for PR head and base
             click.echo("\nChecking out worktrees...")
             click.echo(f"  Creating worktree 'pr-head' from {pr_head_branch}...")
-            head_result = checkout_tool.execute({
+            head_result = asyncio.run(checkout_tool.execute({
                 "commit": pr_head_branch,
                 "worktree_name": "pr-head",
-            })
+            }))
             if not head_result["success"]:
                 click.echo(f"Error: {head_result['error']}", err=True)
                 sys.exit(1)
@@ -534,10 +536,10 @@ Return:
             # Use the base ref directly (like "main" or "master")
             # The base commit is already available from the PR head fetch
             click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
-            base_result = checkout_tool.execute({
+            base_result = asyncio.run(checkout_tool.execute({
                 "commit": pr_info['base_ref'],
                 "worktree_name": "pr-base",
-            })
+            }))
             if not base_result["success"]:
                 click.echo(f"Error: {base_result['error']}", err=True)
                 sys.exit(1)
@@ -547,12 +549,14 @@ Return:
             # Create MCP server with all built-in tools + GitHub API tools
             mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
 
-            result = runner.run_agent(
+            # Create agent config and run
+            agent = AgentConfig(
                 prompt=agent_prompt,
                 output_schema=agent_schema,
                 mcp_server=mcp_server,
-                verbose=verbose,
             )
+            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
+            result = results[0]
         finally:
             runner.cleanup()
 

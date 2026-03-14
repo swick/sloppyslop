@@ -1,5 +1,6 @@
 """Base class for custom subcommands."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -15,6 +16,8 @@ class Subcommand(ABC):
     and implements the required methods.
 
     Example:
+        import asyncio
+        from llm_sandbox import AgentConfig
         from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ExecuteCommandTool
 
         class AnalyzeMCPServer(MCPServer):
@@ -47,12 +50,16 @@ class Subcommand(ABC):
                 try:
                     runner.setup(keep_branches=["my-branch"], network=network)
                     mcp_server = AnalyzeMCPServer(runner)
-                    result = runner.run_agent(
+
+                    # Create agent config and run
+                    agent = AgentConfig(
                         prompt=f"Analyze this project with depth {depth}",
                         output_schema={"type": "object", ...},
                         mcp_server=mcp_server,
-                        verbose=verbose,
                     )
+                    results = asyncio.run(runner.run_agents([agent], verbose=verbose))
+                    result = results[0]
+
                     click.echo(f"Analysis complete: {result}")
                 finally:
                     runner.cleanup()
@@ -88,8 +95,8 @@ class Subcommand(ABC):
             project_dir: Project directory path
             runner: SandboxRunner instance with methods:
                 - setup(keep_branches: list = None, network: str = None): Setup environment
-                - run_agent(prompt: str, output_schema: dict, mcp_server: MCPServer,
-                           verbose: bool = False) -> dict: Execute LLM agent with tools
+                - async run_agents(agents: List[AgentConfig], verbose: bool = False) -> List[dict]:
+                  Execute agents in parallel. Use asyncio.run() to call from sync context.
                 - cleanup(): Cleanup container and worktrees
             **kwargs: Arguments from CLI including:
                 - network: Network mode from --network
@@ -100,9 +107,9 @@ class Subcommand(ABC):
             Any value (typically None or a result dict)
 
         Note:
-            Best practice is to call runner.setup(), create an MCPServer,
-            call runner.run_agent(), and runner.cleanup() in a try/finally block
-            to ensure cleanup.
+            Best practice is to call runner.setup(), create an MCPServer and AgentConfig,
+            call asyncio.run(runner.run_agents([agent])), and runner.cleanup() in a
+            try/finally block to ensure cleanup.
         """
         pass
 

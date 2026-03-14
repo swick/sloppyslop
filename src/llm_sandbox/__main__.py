@@ -1,5 +1,6 @@
 """CLI entry point for LLM Sandbox."""
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -68,7 +69,7 @@ def check(provider: Optional[str]):
         )
 
         # Validate
-        result = llm_provider.validate()
+        result = asyncio.run(llm_provider.validate())
 
         if result["success"]:
             click.echo(f"✓ {result['message']}")

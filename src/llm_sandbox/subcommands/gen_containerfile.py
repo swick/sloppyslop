@@ -1,9 +1,11 @@
 """Generate Containerfile subcommand."""
 
+import asyncio
 from pathlib import Path
 
 import click
 
+from llm_sandbox import AgentConfig
 from llm_sandbox.image import Image
 from llm_sandbox.mcp_tools import (
     MCPServer,
@@ -117,11 +119,15 @@ Explore the project thoroughly before generating the Containerfile."""
             mcp_server = GenContainerfileMCPServer(runner)
 
             click.echo("\nGenerating Containerfile with LLM...")
-            result = runner.run_agent(
+
+            # Create agent config and run
+            agent = AgentConfig(
                 prompt=prompt,
                 output_schema=output_schema,
                 mcp_server=mcp_server,
             )
+            results = asyncio.run(runner.run_agents([agent]))
+            result = results[0]
 
             containerfile_content = result["containerfile"]
             explanation = result.get("explanation", "")

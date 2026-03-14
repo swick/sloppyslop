@@ -1,8 +1,10 @@
 """Orchestrates the full LLM sandbox workflow."""
 
+import asyncio
 import hashlib
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,7 +19,17 @@ from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
 from llm_sandbox.mcp_tools import MCPServer
 
 # Re-export for convenience
-__all__ = ["SandboxRunner"]
+__all__ = ["SandboxRunner", "AgentConfig"]
+
+
+@dataclass
+class AgentConfig:
+    """Configuration for a single agent in parallel execution."""
+
+    prompt: str
+    output_schema: Dict[str, Any]
+    mcp_server: MCPServer
+    agent_id: Optional[str] = None
 
 
 class SandboxRunner:
@@ -48,6 +60,11 @@ class SandboxRunner:
         self.created_worktrees: List[str] = []  # Track worktree names
         self.llm_provider: Optional[LLMProvider] = None
 
+        # Parallel execution support
+        self._agent_llm_providers: Dict[str, LLMProvider] = {}
+        self._git_lock: Optional[asyncio.Lock] = None
+        self._worktrees_lock: Optional[asyncio.Lock] = None
+
         # Internal state
         self._keep_branches: List[str] = []
         self._network_mode: str = "none"
@@ -72,7 +89,7 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
-    def _setup_git_symlink(self) -> None:
+    async def _setup_git_symlink(self) -> None:
         """
         Create symlink in container so worktree .git files work correctly.
 
@@ -91,7 +108,7 @@ class SandboxRunner:
 
             # Create the project directory structure in the container
             # (everything up to but not including .git)
-            exit_code, _, stderr = self.container_manager.exec_command(
+            exit_code, _, stderr = await self.container_manager.exec_command(
                 self.container_id,
                 f"mkdir -p {host_project_path}",
                 workdir="/",
@@ -102,7 +119,7 @@ class SandboxRunner:
                 return
 
             # Create symlink from host path to /project/.git
-            exit_code, _, stderr = self.container_manager.exec_command(
+            exit_code, _, stderr = await self.container_manager.exec_command(
                 self.container_id,
                 f"ln -sf /project/.git {host_project_path}/.git",
                 workdir="/",
@@ -250,7 +267,7 @@ class SandboxRunner:
         # Create symlink in container so worktree .git files work
         # The .git file in a worktree contains: gitdir: /host/path/.git/worktrees/name
         # We create a symlink: /host/path/.git -> /project/.git
-        self._setup_git_symlink()
+        asyncio.run(self._setup_git_symlink())
 
         # Step 4: Create LLM provider with system prompt
         base_system_prompt = self._create_base_system_prompt()
@@ -259,6 +276,10 @@ class SandboxRunner:
             self.provider_config,
             base_system_prompt,
         )
+
+        # Step 5: Initialize async locks for parallel execution
+        self._git_lock = asyncio.Lock()
+        self._worktrees_lock = asyncio.Lock()
 
     def _create_base_system_prompt(self) -> str:
         """
@@ -292,41 +313,125 @@ Your task is to analyze the project and provide the requested information.
 
 Use the tools available to explore the project, run commands, and gather information as needed."""
 
-    def run_agent(
+    def _create_agent_llm_provider(self, agent_id: str) -> LLMProvider:
+        """
+        Create LLM provider for agent with isolated conversation.
+
+        Args:
+            agent_id: Unique agent identifier
+
+        Returns:
+            LLM provider instance
+        """
+        base_prompt = self._create_base_system_prompt()
+        provider = create_llm_provider(
+            self.provider_name, self.provider_config, base_prompt
+        )
+        self._agent_llm_providers[agent_id] = provider
+        return provider
+
+    async def _run_single_agent(
         self,
-        prompt: str,
-        output_schema: Dict[str, Any],
-        mcp_server: MCPServer,
-        verbose: bool = False,
+        agent: AgentConfig,
+        verbose: bool
     ) -> Dict[str, Any]:
         """
-        Execute LLM agent with tools and structured output.
+        Run single agent using shared environment.
+
+        Args:
+            agent: Agent configuration
+            verbose: Enable verbose output
+
+        Returns:
+            Agent execution result
+        """
+        agent_id = agent.agent_id or str(uuid.uuid4())[:8]
+
+        if verbose:
+            click.echo(f"\n[Agent {agent_id}] Starting execution...")
+
+        # Create agent-specific LLM provider
+        llm_provider = self._create_agent_llm_provider(agent_id)
+
+        # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
+        result = await llm_provider.generate_structured(
+            agent.prompt,
+            agent.mcp_server,
+            agent.output_schema,
+            verbose=verbose,
+        )
+
+        if verbose:
+            click.echo(f"\n[Agent {agent_id}] Completed successfully")
+
+        return result
+
+    async def run_agents(
+        self,
+        agents: List[AgentConfig],
+        verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute agents in parallel using shared environment.
+
+        All agents share:
+        - Same container
+        - Same instance_id
+        - Same worktrees_base_dir
+        - Same created_worktrees list (synchronized)
+
+        Each agent gets:
+        - Separate LLM conversation history
+        - Separate MCP server (provided in AgentConfig)
 
         Must call setup() before calling this method.
 
         Args:
-            prompt: User prompt for LLM
-            output_schema: JSON schema for structured output
-            mcp_server: MCP server providing tools for the LLM
+            agents: List of agent configurations
             verbose: Enable verbose output (optional)
 
         Returns:
-            Structured output from LLM
+            List of structured outputs from each agent
         """
-        if not self.container_id or not self.instance_id or not self.llm_provider:
-            raise RuntimeError("Must call setup() before run_agent()")
+        if not self.container_id or not self.instance_id:
+            raise RuntimeError("Must call setup() before running agents")
 
-        # Execute LLM agent with tools
-        click.echo("Executing LLM agent...")
+        try:
+            if verbose:
+                click.echo(f"\n{'='*60}")
+                click.echo(f"Running {len(agents)} agent(s) in parallel")
+                click.echo(f"Shared environment:")
+                click.echo(f"  - Container ID: {self.container_id[:12]}")
+                click.echo(f"  - Instance ID: {self.instance_id}")
+                click.echo(f"  - Worktrees dir: {self.worktrees_base_dir}")
+                click.echo(f"{'='*60}")
 
-        result = self.llm_provider.generate_structured(
-            prompt,
-            mcp_server,
-            output_schema,
-            verbose=verbose,
-        )
+            # Run all agents in parallel
+            results = await asyncio.gather(*[
+                self._run_single_agent(agent, verbose)
+                for agent in agents
+            ], return_exceptions=True)
 
-        return result
+            # Process results, convert exceptions to error dicts
+            final_results = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    agent_id = agents[i].agent_id or f"agent-{i}"
+                    if verbose:
+                        click.echo(f"\n[Agent {agent_id}] Failed with error: {result}")
+                    final_results.append({
+                        "success": False,
+                        "error": str(result),
+                        "agent_id": agent_id,
+                    })
+                else:
+                    final_results.append(result)
+
+            return final_results
+
+        finally:
+            # Clear agent LLM providers
+            self._agent_llm_providers.clear()
 
     def cleanup(self) -> None:
         """

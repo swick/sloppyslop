@@ -1,11 +1,13 @@
 """Run subcommand for llm-sandbox."""
 
+import asyncio
 import json
 import sys
 from pathlib import Path
 
 import click
 
+from llm_sandbox import AgentConfig
 from llm_sandbox.subcommand import Subcommand
 from llm_sandbox.mcp_tools import (
     MCPServer,
@@ -143,12 +145,15 @@ class RunSubcommand(Subcommand):
             )
             # Create MCP server with all built-in tools
             mcp_server = RunMCPServer(runner)
-            result = runner.run_agent(
+
+            # Create agent config and run
+            agent = AgentConfig(
                 prompt=prompt,
                 output_schema=output_schema,
                 mcp_server=mcp_server,
-                verbose=verbose,
             )
+            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
+            result = results[0]
         finally:
             runner.cleanup()
 

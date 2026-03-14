@@ -1,12 +1,13 @@
-"""LLM provider integration."""
+"""LLM provider integration with async-only interface."""
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Union
 
 import click
-from anthropic import Anthropic, AnthropicVertex
+from anthropic import AsyncAnthropic, Anthropic, AnthropicVertex
 
 from llm_sandbox.config import AnthropicConfig, VertexAIConfig
 from llm_sandbox.mcp_tools import MCPServer
@@ -28,18 +29,14 @@ def extract_json_from_text(text: str) -> str:
         Extracted JSON string
     """
     # First, try to find JSON in markdown code blocks
-    # Match ```json or just ``` followed by content
-    # More flexible pattern that handles various newline situations
     json_block_pattern = r'```(?:json)?\s*(.*)```'
     match = re.search(json_block_pattern, text, re.DOTALL)
     if match:
         extracted = match.group(1).strip()
-        # If the extracted content looks like JSON, return it
         if extracted.startswith('{') or extracted.startswith('['):
             return extracted
 
     # Try to find JSON object boundaries
-    # Look for content between first { and last }
     first_brace = text.find('{')
     last_brace = text.rfind('}')
 
@@ -53,12 +50,11 @@ def extract_json_from_text(text: str) -> str:
     if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
         return text[first_bracket:last_bracket + 1]
 
-    # Return as-is if no extraction patterns match
     return text.strip()
 
 
 class LLMProvider(ABC):
-    """Base class for LLM providers."""
+    """Base class for LLM providers with async-only interface."""
 
     def __init__(self, base_system_prompt: str):
         """
@@ -72,43 +68,21 @@ class LLMProvider(ABC):
         self.verbose: bool = False
 
     def _generate_tools_description(self, mcp_server: MCPServer) -> str:
-        """
-        Generate a description of available tools from the MCP server.
-
-        Args:
-            mcp_server: MCP server with tools
-
-        Returns:
-            Formatted tool descriptions
-        """
+        """Generate a description of available tools from the MCP server."""
         tools = mcp_server.get_tools()
 
         if not tools:
             return "No tools available."
 
-        lines = ["Available tools:"]
-        lines.append("")
-
+        lines = ["Available tools:", ""]
         for tool in tools:
             lines.append(f"- {tool.name}: {tool.description}")
 
         return "\n".join(lines)
 
     def _build_system_prompt(self, mcp_server: MCPServer, output_schema: Dict[str, Any] = None) -> str:
-        """
-        Build the complete system prompt including base prompt and tool descriptions.
-
-        Args:
-            mcp_server: MCP server with tools
-            output_schema: Optional output schema for additional instructions
-
-        Returns:
-            Complete system prompt
-        """
-        parts = [self.base_system_prompt]
-        parts.append("")
-        parts.append(self._generate_tools_description(mcp_server))
-
+        """Build the complete system prompt including base prompt and tool descriptions."""
+        parts = [self.base_system_prompt, "", self._generate_tools_description(mcp_server)]
         return "\n\n".join(parts)
 
     def _clear_conversation(self):
@@ -117,26 +91,14 @@ class LLMProvider(ABC):
 
     def _add_user_message(self, content: Any):
         """Add user message to conversation history."""
-        self.conversation_history.append({
-            "role": "user",
-            "content": content,
-        })
+        self.conversation_history.append({"role": "user", "content": content})
 
     def _add_assistant_message(self, content: Any):
         """Add assistant message to conversation history."""
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": content,
-        })
+        self.conversation_history.append({"role": "assistant", "content": content})
 
     def _log_message(self, prefix: str, message: Dict[str, Any]):
-        """
-        Log a message if verbose mode is enabled.
-
-        Args:
-            prefix: Prefix for the log message (e.g., "→", "←")
-            message: Message to log
-        """
+        """Log a message if verbose mode is enabled."""
         if not self.verbose:
             return
 
@@ -146,16 +108,13 @@ class LLMProvider(ABC):
         click.echo(f"\n{prefix} {role.capitalize()} message:")
         click.echo(f"{'-'*60}")
 
-        # Handle different content types
         if isinstance(content, str):
-            # Simple text content
             if len(content) > 500:
                 click.echo(f"{content[:500]}...")
                 click.echo(f"[{len(content)} characters total]")
             else:
                 click.echo(content)
         elif isinstance(content, list):
-            # List of content blocks (for multi-modal messages)
             for block in content:
                 if isinstance(block, dict):
                     block_type = block.get("type", "unknown")
@@ -202,7 +161,7 @@ class LLMProvider(ABC):
         click.echo(f"{'-'*60}")
 
     @abstractmethod
-    def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
+    async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
         """
         Generate plain text response.
 
@@ -216,7 +175,7 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
-    def generate_structured(
+    async def generate_structured(
         self,
         prompt: str,
         mcp_server: MCPServer,
@@ -240,37 +199,26 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
-    def validate(self) -> Dict[str, Any]:
+    async def validate(self) -> Dict[str, Any]:
         """
         Validate that the provider is configured correctly and can connect.
 
-        Makes a minimal API call to verify:
-        - Credentials are valid
-        - API endpoint is reachable
-        - Model is accessible
-
         Returns:
-            Dictionary with validation results:
-            {
-                "success": bool,
-                "message": str,
-                "details": dict (optional error details)
-            }
-
-        Note: This method should not raise exceptions, but return error info in the dict.
+            Dictionary with validation results
         """
         pass
 
 
 class ClaudeProvider(LLMProvider):
-    """Claude API provider with MCP tool support and structured output.
+    """Claude API provider with async-only interface.
 
     Supports both Anthropic's direct API and Google Cloud Vertex AI.
+    Vertex AI uses asyncio.to_thread for async methods since no native async client exists.
     """
 
     def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig], base_system_prompt: str):
         """
-        Initialize Claude provider.
+        Initialize Claude provider with async client.
 
         Args:
             provider_config: Provider configuration (AnthropicConfig or VertexAIConfig)
@@ -298,10 +246,12 @@ class ClaudeProvider(LLMProvider):
                     "Vertex AI backend requires 'project_id' configuration (GCP project ID)"
                 )
 
-            self.client = AnthropicVertex(
+            # Vertex AI only has sync client, will use asyncio.to_thread for async methods
+            self.sync_client = AnthropicVertex(
                 region=provider_config.region,
                 project_id=provider_config.project_id,
             )
+            self.client = None  # No async client for Vertex AI
 
         elif isinstance(provider_config, AnthropicConfig):
             # Direct Anthropic API backend
@@ -314,38 +264,33 @@ class ClaudeProvider(LLMProvider):
                 )
 
             self.api_key = api_key
-            self.client = Anthropic(api_key=api_key)
+            # Use both sync and async clients for Anthropic
+            self.sync_client = Anthropic(api_key=api_key)
+            self.client = AsyncAnthropic(api_key=api_key)
 
         else:
             raise ValueError(f"Unknown provider config type: {type(provider_config)}")
 
-    def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
-        """
-        Generate plain text response.
+    async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
+        """Generate plain text response."""
+        if self.client:
+            # Anthropic async client
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        else:
+            # Vertex AI - use sync client with asyncio.to_thread
+            response = await asyncio.to_thread(
+                self.sync_client.messages.create,
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        return response.content[0].text.strip()
 
-        Args:
-            prompt: User prompt
-            max_tokens: Maximum tokens to generate
-
-        Returns:
-            Generated text
-        """
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        )
-
-        # Extract text from response
-        text = response.content[0].text.strip()
-        return text
-
-    def generate_structured(
+    async def generate_structured(
         self,
         prompt: str,
         mcp_server: MCPServer,
@@ -356,14 +301,14 @@ class ClaudeProvider(LLMProvider):
         """
         Generate structured output with MCP tool access.
 
-        Uses Claude's native JSON schema output format.
+        Executes tools concurrently when Claude requests multiple tools.
 
         Args:
             prompt: User prompt
             mcp_server: MCP server instance for tool execution
             output_schema: JSON schema for structured output
             max_iterations: Maximum tool use iterations
-            verbose: Enable verbose output (tool calls and messages)
+            verbose: Enable verbose output
 
         Returns:
             Structured output matching schema
@@ -376,7 +321,7 @@ class ClaudeProvider(LLMProvider):
         tools = mcp_server.get_tools()
         tool_defs = [tool.to_dict() for tool in tools]
 
-        # Build system prompt with tool descriptions
+        # Build system prompt
         base_prompt = self._build_system_prompt(mcp_server, output_schema)
 
         # For Vertex AI, add schema to system prompt (no native structured output support)
@@ -401,7 +346,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
             click.echo(f"\n{'='*60}")
             click.echo(f"Initial user prompt:")
             click.echo(f"{'='*60}")
-            # Truncate if very long
             if len(prompt) > 500:
                 click.echo(f"{prompt[:500]}...")
                 click.echo(f"[{len(prompt)} characters total]")
@@ -420,8 +364,10 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
             # Make API call
             if self.backend == "vertex-ai":
-                # Vertex AI doesn't support structured output, rely on prompt engineering
-                response = self.client.messages.create(
+                # Vertex AI - use sync client with asyncio.to_thread
+                # No structured output support, rely on prompt engineering
+                response = await asyncio.to_thread(
+                    self.sync_client.messages.create,
                     model=self.model,
                     max_tokens=8000,
                     system=system_prompt,
@@ -429,8 +375,8 @@ When you're done analyzing, provide your final answer in the structured JSON for
                     tools=tool_defs,
                 )
             else:
-                # Anthropic API uses native structured output
-                response = self.client.messages.create(
+                # Anthropic API - use async client with native structured output
+                response = await self.client.messages.create(
                     model=self.model,
                     max_tokens=8000,
                     system=system_prompt,
@@ -449,7 +395,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
             if self.verbose:
                 click.echo(f"\nResponse stop reason: {response.stop_reason}")
-                # Count content blocks by type
                 text_blocks = sum(1 for b in response.content if b.type == "text")
                 tool_blocks = sum(1 for b in response.content if b.type == "tool_use")
                 click.echo(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
@@ -457,9 +402,8 @@ When you're done analyzing, provide your final answer in the structured JSON for
             # Log assistant message
             self._log_message("→", self.conversation_history[-1])
 
-            # Check if we have a final answer (text response with JSON)
+            # Check if we have a final answer
             if response.stop_reason == "end_turn":
-                # Extract JSON from response
                 for block in response.content:
                     if block.type == "text":
                         text = block.text.strip()
@@ -477,7 +421,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
                                 click.echo(f"\n✓ Successfully parsed JSON output")
                             return result
                         except json.JSONDecodeError as e:
-                            # Print detailed error for debugging
                             click.echo(f"\n{'='*60}")
                             click.echo(f"ERROR: Failed to parse JSON from LLM response")
                             click.echo(f"{'='*60}")
@@ -497,83 +440,89 @@ When you're done analyzing, provide your final answer in the structured JSON for
                                 f"See output above for details."
                             )
 
-                # If we get here without valid JSON, something is wrong
                 raise RuntimeError("Response ended without valid JSON output")
 
             # Check if we need to execute tools
             if response.stop_reason == "tool_use":
-                # Execute all tool calls
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+                if self.verbose:
+                    click.echo(f"\n→ Executing {len(tool_blocks)} tool(s) concurrently")
+
+                # Execute tools in parallel
+                tool_results_data = await asyncio.gather(*[
+                    self._execute_single_tool(mcp_server, block)
+                    for block in tool_blocks
+                ], return_exceptions=True)
+
+                # Build tool results for conversation
                 tool_results = []
-
-                for block in response.content:
-                    if block.type == "tool_use":
+                for block, result_data in zip(tool_blocks, tool_results_data):
+                    if isinstance(result_data, Exception):
                         if self.verbose:
-                            click.echo(f"\n→ Tool call: {block.name}")
-                            click.echo(f"  Input: {json.dumps(block.input, indent=2)}")
+                            click.echo(f"← Tool {block.name} failed: {result_data}")
+                        result = {"success": False, "error": str(result_data)}
+                    else:
+                        result = result_data
 
-                        # Execute tool
-                        result = mcp_server.execute_tool(
-                            block.name,
-                            block.input,
-                        )
+                    if self.verbose:
+                        click.echo(f"← Tool result for {block.name}:")
+                        result_str = json.dumps(result, indent=2)
+                        if len(result_str) > 500:
+                            click.echo(f"  {result_str[:500]}...")
+                            click.echo(f"  [{len(result_str)} characters total]")
+                        else:
+                            click.echo(f"  {result_str}")
 
-                        if self.verbose:
-                            click.echo(f"← Tool result:")
-                            result_str = json.dumps(result, indent=2)
-                            # Truncate if very long
-                            if len(result_str) > 500:
-                                click.echo(f"  {result_str[:500]}...")
-                                click.echo(f"  [{len(result_str)} characters total]")
-                            else:
-                                click.echo(f"  {result_str}")
-
-                        # Add result
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result),
-                        })
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result),
+                    })
 
                 # Add tool results to conversation
                 self._add_user_message(tool_results)
 
-                # Log tool results
                 if self.verbose:
                     click.echo(f"\nTotal messages in conversation: {len(self.conversation_history)}")
                 self._log_message("←", self.conversation_history[-1])
 
                 continue
 
-            # If we get here, something unexpected happened
             break
 
         raise RuntimeError(
             f"Failed to generate structured output after {max_iterations} iterations"
         )
 
-    def validate(self) -> Dict[str, Any]:
-        """
-        Validate that the provider is configured correctly and can connect.
+    async def _execute_single_tool(self, mcp_server, block) -> Dict[str, Any]:
+        """Execute a single tool."""
+        if self.verbose:
+            click.echo(f"\n→ Tool call: {block.name}")
+            click.echo(f"  Input: {json.dumps(block.input, indent=2)}")
 
-        Makes a minimal API call to verify credentials and connectivity.
+        result = await mcp_server.execute_tool(block.name, block.input)
+        return result
 
-        Returns:
-            Dictionary with validation results
-        """
+    async def validate(self) -> Dict[str, Any]:
+        """Validate that the provider is configured correctly and can connect."""
         try:
-            # Make a minimal API call to test connectivity
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1,  # Minimal token usage
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "test",
-                    }
-                ],
-            )
+            if self.client:
+                # Anthropic async client
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "test"}],
+                )
+            else:
+                # Vertex AI - use sync client with asyncio.to_thread
+                response = await asyncio.to_thread(
+                    self.sync_client.messages.create,
+                    model=self.model,
+                    max_tokens=1,
+                    messages=[{"role": "user", "content": "test"}],
+                )
 
-            # If we get here, the API call succeeded
             return {
                 "success": True,
                 "message": f"Successfully connected to {self.backend} backend",
@@ -585,7 +534,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
             }
 
         except Exception as e:
-            # Categorize the error
             error_type = type(e).__name__
             error_message = str(e)
 
@@ -596,7 +544,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 "error_message": error_message,
             }
 
-            # Add specific guidance based on error type
             if "authentication" in error_message.lower() or "api key" in error_message.lower():
                 guidance = "Check your API key or authentication credentials"
             elif "not found" in error_message.lower() or "404" in error_message:
@@ -631,7 +578,7 @@ def create_llm_provider(
         base_system_prompt: Base system prompt describing the environment
 
     Returns:
-        LLM provider instance
+        LLM provider instance with async interface
 
     Raises:
         ValueError: If provider is not supported

@@ -1,16 +1,19 @@
 """Podman container management via REST API."""
 
+import asyncio
 import io
 import json
 import os
 import sys
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
 
 import click
 import requests_unixsocket
+from requests_futures.sessions import FuturesSession
 
 
 class ContainerManager:
@@ -21,6 +24,13 @@ class ContainerManager:
         self.session = requests_unixsocket.Session()
         self.socket_path = self._get_podman_socket_path()
         self.base_url = f"http+unix://{self.socket_path.replace('/', '%2F')}"
+
+        # Create async session using FuturesSession with ThreadPoolExecutor
+        self.async_session = FuturesSession(
+            executor=ThreadPoolExecutor(max_workers=10),
+            session=requests_unixsocket.Session()
+        )
+
         self._check_podman()
 
     def _get_podman_socket_path(self) -> str:
@@ -195,97 +205,6 @@ class ContainerManager:
         except Exception as e:
             raise RuntimeError(f"Failed to start container: {e}") from e
 
-    def exec_command(
-        self,
-        container_id: str,
-        command: str,
-        workdir: str = "/workspace",
-    ) -> Tuple[int, str, str]:
-        """
-        Execute command in container.
-
-        Args:
-            container_id: Container ID
-            command: Command to execute (no filtering applied)
-            workdir: Working directory for command
-
-        Returns:
-            Tuple of (exit_code, stdout, stderr)
-        """
-        # Step 1: Create exec instance
-        exec_config = {
-            "AttachStdout": True,
-            "AttachStderr": True,
-            "Cmd": ["sh", "-c", command],
-            "WorkingDir": workdir,
-        }
-
-        try:
-            response = self.session.post(
-                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}/exec",
-                json=exec_config,
-            )
-            response.raise_for_status()
-            exec_id = response.json()['Id']
-
-            # Step 2: Start exec instance and get output
-            start_config = {
-                "Detach": False,
-                "Tty": False,
-            }
-            response = self.session.post(
-                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/start",
-                json=start_config,
-                stream=True,
-            )
-            response.raise_for_status()
-
-            # Collect output
-            stdout_data = []
-            stderr_data = []
-
-            for chunk in response.iter_content(chunk_size=1024):
-                if not chunk:
-                    continue
-
-                # Podman uses Docker's stream format:
-                # [8]byte header: 1 byte stream type, 3 bytes padding, 4 bytes size
-                # followed by payload
-                i = 0
-                while i < len(chunk):
-                    if i + 8 > len(chunk):
-                        break
-
-                    stream_type = chunk[i]
-                    size = int.from_bytes(chunk[i+4:i+8], 'big')
-
-                    if i + 8 + size > len(chunk):
-                        break
-
-                    payload = chunk[i+8:i+8+size]
-
-                    if stream_type == 1:  # stdout
-                        stdout_data.append(payload)
-                    elif stream_type == 2:  # stderr
-                        stderr_data.append(payload)
-
-                    i += 8 + size
-
-            stdout = b''.join(stdout_data).decode('utf-8', errors='replace')
-            stderr = b''.join(stderr_data).decode('utf-8', errors='replace')
-
-            # Step 3: Get exit code
-            inspect_response = self.session.get(
-                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/json"
-            )
-            inspect_response.raise_for_status()
-            exit_code = inspect_response.json().get('ExitCode', 0)
-
-            return exit_code, stdout, stderr
-
-        except Exception as e:
-            return 1, "", f"Failed to execute command: {e}"
-
     def stop_container(self, container_id: str) -> None:
         """Stop container."""
         try:
@@ -357,3 +276,100 @@ class ContainerManager:
 
         except Exception as e:
             raise RuntimeError(f"Failed to get image info: {e}") from e
+
+    # Async version using FuturesSession
+
+    async def exec_command(
+        self,
+        container_id: str,
+        command: str,
+        workdir: str = "/workspace",
+    ) -> Tuple[int, str, str]:
+        """
+        Execute command in container using FuturesSession.
+
+        Args:
+            container_id: Container ID
+            command: Command to execute (no filtering applied)
+            workdir: Working directory for command
+
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
+        # Step 1: Create exec instance
+        exec_config = {
+            "AttachStdout": True,
+            "AttachStderr": True,
+            "Cmd": ["sh", "-c", command],
+            "WorkingDir": workdir,
+        }
+
+        try:
+            # Create exec instance (async)
+            future = self.async_session.post(
+                f"{self.base_url}/v4.0.0/libpod/containers/{container_id}/exec",
+                json=exec_config,
+            )
+            response = await asyncio.wrap_future(future)
+            response.raise_for_status()
+            exec_id = response.json()['Id']
+
+            # Step 2: Start exec instance and get output (async)
+            start_config = {
+                "Detach": False,
+                "Tty": False,
+            }
+            future = self.async_session.post(
+                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/start",
+                json=start_config,
+                stream=True,
+            )
+            response = await asyncio.wrap_future(future)
+            response.raise_for_status()
+
+            # Collect output
+            stdout_data = []
+            stderr_data = []
+
+            for chunk in response.iter_content(chunk_size=1024):
+                if not chunk:
+                    continue
+
+                # Podman uses Docker's stream format:
+                # [8]byte header: 1 byte stream type, 3 bytes padding, 4 bytes size
+                # followed by payload
+                i = 0
+                while i < len(chunk):
+                    if i + 8 > len(chunk):
+                        break
+
+                    stream_type = chunk[i]
+                    size = int.from_bytes(chunk[i+4:i+8], 'big')
+
+                    if i + 8 + size > len(chunk):
+                        break
+
+                    payload = chunk[i+8:i+8+size]
+
+                    if stream_type == 1:  # stdout
+                        stdout_data.append(payload)
+                    elif stream_type == 2:  # stderr
+                        stderr_data.append(payload)
+
+                    i += 8 + size
+
+            stdout = b''.join(stdout_data).decode('utf-8', errors='replace')
+            stderr = b''.join(stderr_data).decode('utf-8', errors='replace')
+
+            # Step 3: Get exit code (async)
+            future = self.async_session.get(
+                f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/json"
+            )
+            inspect_response = await asyncio.wrap_future(future)
+            inspect_response.raise_for_status()
+            exit_code = inspect_response.json().get('ExitCode', 0)
+
+            return exit_code, stdout, stderr
+
+        except Exception as e:
+            return 1, "", f"Failed to execute command: {e}"
