@@ -60,6 +60,71 @@ def extract_json_from_text(text: str) -> str:
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
+    base_system_prompt = """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
+
+The container has two mounts:
+- /project (read-only): The original project code
+- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
+
+Workflow:
+1. Use read_project_file/list_project_directory to explore the original project
+2. Use checkout_commit to create a worktree from any commit/branch
+3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
+4. Use glob and grep to search for files and content IN THE WORKTREE
+5. Use git_commit to commit changes to the worktree's branch
+
+File editing:
+- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
+- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
+- Line numbers are 1-indexed, ranges are inclusive
+
+Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
+To modify files, you must first create a worktree with checkout_commit.
+
+Your task is to analyze the project and provide the requested information.
+
+Use the tools available to explore the project, run commands, and gather information as needed."""
+
+    def _generate_tools_description(self, mcp_server: MCPServer) -> str:
+        """
+        Generate a description of available tools from the MCP server.
+
+        Args:
+            mcp_server: MCP server with tools
+
+        Returns:
+            Formatted tool descriptions
+        """
+        tools = mcp_server.get_tools()
+
+        if not tools:
+            return "No tools available."
+
+        lines = ["Available tools:"]
+        lines.append("")
+
+        for tool in tools:
+            lines.append(f"- {tool.name}: {tool.description}")
+
+        return "\n".join(lines)
+
+    def _build_system_prompt(self, mcp_server: MCPServer, output_schema: Dict[str, Any] = None) -> str:
+        """
+        Build the complete system prompt including base prompt and tool descriptions.
+
+        Args:
+            mcp_server: MCP server with tools
+            output_schema: Optional output schema for additional instructions
+
+        Returns:
+            Complete system prompt
+        """
+        parts = [self.base_system_prompt]
+        parts.append("")
+        parts.append(self._generate_tools_description(mcp_server))
+
+        return "\n\n".join(parts)
+
     @abstractmethod
     def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
         """
@@ -229,53 +294,12 @@ class ClaudeProvider(LLMProvider):
         tools = mcp_server.get_tools()
         tool_defs = [tool.to_dict() for tool in tools]
 
-        # Build system prompt
-        base_system_prompt = """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
-
-The container has two mounts:
-- /project (read-only): The original project code
-- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
-
-Available tools:
-
-Project exploration (read-only /project):
-- read_project_file: Read files from /project to explore the original code
-- list_project_directory: List directories in /project to understand structure
-
-Worktree operations:
-- checkout_commit: Create a worktree from any commit/branch (e.g., checkout_commit(commit="main", worktree_name="my-work"))
-- read_file: Read files from a worktree (requires worktree parameter)
-- write_file: Create/overwrite files in a worktree (requires worktree parameter)
-- edit_file: Replace line ranges in a worktree file (requires worktree parameter)
-- glob: Find files matching pattern in a worktree (requires worktree parameter)
-- grep: Search file contents in a worktree (requires worktree parameter)
-- git_commit: Commit changes in a worktree
-
-Shell commands:
-- execute_command: Run any shell command when file tools are insufficient
-
-Workflow:
-1. Use read_project_file/list_project_directory to explore the original project
-2. Use checkout_commit to create a worktree from any commit/branch
-3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
-4. Use glob and grep to search for files and content IN THE WORKTREE
-5. Use git_commit to commit changes to the worktree's branch
-
-File editing:
-- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
-- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
-- Line numbers are 1-indexed, ranges are inclusive
-
-Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
-To modify files, you must first create a worktree with checkout_commit.
-
-Your task is to analyze the project and provide the requested information.
-
-Use the tools available to explore the project, run commands, and gather information as needed."""
+        # Build system prompt with tool descriptions
+        base_prompt = self._build_system_prompt(mcp_server, output_schema)
 
         # For Vertex AI, add schema to system prompt (no native structured output support)
         if self.backend == "vertex-ai":
-            system_prompt = f"""{base_system_prompt}
+            system_prompt = f"""{base_prompt}
 
 When you're done analyzing, provide your final answer as a JSON object matching this exact schema:
 
@@ -284,7 +308,7 @@ When you're done analyzing, provide your final answer as a JSON object matching 
 Return ONLY the JSON object, no other text."""
         else:
             # For Anthropic API, use native structured output
-            system_prompt = f"""{base_system_prompt}
+            system_prompt = f"""{base_prompt}
 
 When you're done analyzing, provide your final answer in the structured JSON format."""
 
