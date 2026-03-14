@@ -576,12 +576,7 @@ Return:
             click.echo("\nNo suggestions accepted. No review to post.")
             return
 
-        # Step 6: Post review to GitHub
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Posting {len(accepted_suggestions)} suggestions to GitHub")
-        click.echo(f"{'='*60}\n")
-
-        # Post summary comment
+        # Step 6: Prepare summary comment
         summary = f"""Code review completed for PR #{pr_number}.
 
 Documentation reviewed:
@@ -597,11 +592,72 @@ Total suggestions: {len(all_suggestions)}
 Accepted suggestions: {len(accepted_suggestions)}"""
 
         summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
-        try:
-            self.github.post_issue_comment(repo_name, pr_number, summary_body)
-            click.echo(f"✓ Posted review summary")
-        except Exception as e:
-            click.echo(f"Warning: Failed to post summary: {e}", err=True)
+
+        # Let user review/edit the summary comment
+        click.echo(f"\n{'='*60}")
+        click.echo("Review Summary Comment")
+        click.echo(f"{'='*60}\n")
+        click.echo(summary_body)
+        click.echo(f"\n{'='*60}")
+
+        # Ask what to do with the summary
+        click.echo("\nOptions:")
+        click.echo("  [a] Accept summary")
+        click.echo("  [e] Edit summary")
+        click.echo("  [s] Skip summary")
+
+        post_summary = True
+        choice = click.prompt("Choose an option", type=click.Choice(['a', 'e', 's'], case_sensitive=False), default='a')
+
+        if choice == 'e':
+            click.echo("\nEnter your edited summary (press Ctrl+D or Ctrl+Z when done):")
+            click.echo("(Each line you type will be added to the summary)\n")
+            lines = []
+            try:
+                while True:
+                    line = input()
+                    lines.append(line)
+            except EOFError:
+                pass
+
+            if lines:
+                summary_body = "\n".join(lines)
+                click.echo(f"\n{'='*60}")
+                click.echo("Updated Summary:")
+                click.echo(f"{'='*60}\n")
+                click.echo(summary_body)
+                click.echo(f"\n{'='*60}")
+
+        if choice == 's':
+            post_summary = False
+            click.echo("\nSummary comment will be skipped")
+
+        # Final confirmation before posting everything
+        click.echo(f"\n{'='*60}")
+        click.echo("Ready to Post Review")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nThis will post to PR #{pr_number}:")
+        if post_summary:
+            click.echo(f"  • 1 summary comment")
+        click.echo(f"  • {len(accepted_suggestions)} inline suggestions")
+        click.echo()
+
+        if not click.confirm("Post review to GitHub?", default=True):
+            click.echo("\nCancelled. Review not posted.")
+            return
+
+        # Post to GitHub
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Posting review to GitHub")
+        click.echo(f"{'='*60}\n")
+
+        # Post summary comment if not skipped
+        if post_summary:
+            try:
+                self.github.post_issue_comment(repo_name, pr_number, summary_body)
+                click.echo(f"✓ Posted review summary")
+            except Exception as e:
+                click.echo(f"Warning: Failed to post summary: {e}", err=True)
 
         # Post each suggestion as an inline comment
         success_count = 0
