@@ -43,9 +43,11 @@ async def main():
     config = Config()  # Load from default config file
 
     runner = SandboxRunner(project_path, config)
-    runner.setup()
 
-    try:
+    # Use async context manager for proper lifecycle management
+    async with runner:
+        await runner.setup()
+
         # Create agent configurations
         # All agents will use the SAME async MCP server in this simple example
         # In practice, you might want different tool sets per agent
@@ -113,9 +115,7 @@ async def main():
             else:
                 print(f"Result: {result}")
 
-    finally:
-        # Cleanup (removes all worktrees and branches at once)
-        runner.cleanup()
+        # Cleanup happens automatically in __aexit__
 
 
 if __name__ == "__main__":

@@ -19,8 +19,6 @@ from llm_sandbox.mcp_tools import (
     EditFileTool,
     GlobTool,
     GrepTool,
-    ReadProjectFileTool,
-    ListProjectDirectoryTool,
     SpawnAgentTool,
     WaitForAgentsTool,
 )
@@ -45,8 +43,6 @@ class RunMCPServer(MCPServer):
         self.add_tool(EditFileTool(runner))
         self.add_tool(GlobTool(runner))
         self.add_tool(GrepTool(runner))
-        self.add_tool(ReadProjectFileTool(runner))
-        self.add_tool(ListProjectDirectoryTool(runner))
         self.add_tool(SpawnAgentTool(runner))
         self.add_tool(WaitForAgentsTool(runner))
 
@@ -141,12 +137,38 @@ class RunSubcommand(Subcommand):
             with open(schema_file) as f:
                 output_schema = json.load(f)
 
-        # Run the sandbox
-        try:
-            runner.setup(
+        # Run the sandbox using async context manager pattern
+        result = asyncio.run(self._execute_async(
+            runner,
+            keep_branch,
+            prompt,
+            output_schema,
+            network,
+            verbose
+        ))
+
+        # Output result as JSON
+        click.echo("\n" + "=" * 60)
+        click.echo("Result:")
+        click.echo("=" * 60)
+        click.echo(json.dumps(result, indent=2))
+
+    async def _execute_async(
+        self,
+        runner,
+        keep_branch,
+        prompt,
+        output_schema,
+        network,
+        verbose
+    ):
+        """Async execution of run command."""
+        async with runner:
+            await runner.setup(
                 keep_branches=list(keep_branch) if keep_branch else [],
                 network=network,
             )
+
             # Create MCP server with all built-in tools
             mcp_server = RunMCPServer(runner)
 
@@ -156,13 +178,5 @@ class RunSubcommand(Subcommand):
                 output_schema=output_schema,
                 mcp_server=mcp_server,
             )
-            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
-            result = results[0]
-        finally:
-            runner.cleanup()
-
-        # Output result as JSON
-        click.echo("\n" + "=" * 60)
-        click.echo("Result:")
-        click.echo("=" * 60)
-        click.echo(json.dumps(result, indent=2))
+            results = await runner.run_agents([agent], verbose=verbose)
+            return results[0]

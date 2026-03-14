@@ -9,8 +9,10 @@ from llm_sandbox import AgentConfig
 from llm_sandbox.image import Image
 from llm_sandbox.mcp_tools import (
     MCPServer,
-    ReadProjectFileTool,
-    ListProjectDirectoryTool,
+    CheckoutCommitTool,
+    ReadFileTool,
+    GlobTool,
+    GrepTool,
 )
 from llm_sandbox.subcommand import Subcommand
 
@@ -26,9 +28,11 @@ class GenContainerfileMCPServer(MCPServer):
             runner: SandboxRunner instance
         """
         super().__init__()
-        # Only need read-only project exploration tools
-        self.add_tool(ReadProjectFileTool(runner))
-        self.add_tool(ListProjectDirectoryTool(runner))
+        # Tools for exploring project via worktree
+        self.add_tool(CheckoutCommitTool(runner))
+        self.add_tool(ReadFileTool(runner))
+        self.add_tool(GlobTool(runner))
+        self.add_tool(GrepTool(runner))
 
 
 class GenContainerfileSubcommand(Subcommand):
@@ -83,7 +87,7 @@ class GenContainerfileSubcommand(Subcommand):
         }
 
         # Build the generation prompt
-        prompt = f"""Analyze the project in /project and generate a Containerfile.
+        prompt = f"""Analyze the project and generate a Containerfile.
 
 The Containerfile should:
 1. Use an appropriate base image (suggested: {Image.DEFAULT_IMAGE})
@@ -96,10 +100,12 @@ The Containerfile should:
 
         prompt += """
 
-Use the available tools to:
-1. List the directory structure (use list_project_directory)
-2. Read key files (package.json, requirements.txt, pyproject.toml, go.mod, etc.) using read_project_file
-3. Understand the project type and dependencies
+Use the available tools to explore the project:
+1. First, use checkout_commit to create a worktree from HEAD (e.g., worktree_name: "analysis")
+2. Use glob to find key files (package.json, requirements.txt, pyproject.toml, go.mod, etc.)
+3. Use read_file to examine these files
+4. Use grep to search for specific patterns if needed
+5. Understand the project type and dependencies
 
 Containerfile requirements:
 - The resulting Containerfile will be used by an LLM to inspect, modify, build, run and test the project
@@ -111,29 +117,16 @@ Containerfile requirements:
 
 Explore the project thoroughly before generating the Containerfile."""
 
-        # Run in container with default image
-        try:
-            runner.setup(network="enabled", image=Image.DEFAULT_IMAGE)
+        # Run using async context manager pattern
+        result = asyncio.run(self._execute_async(
+            runner,
+            prompt,
+            output_schema,
+            verbose
+        ))
 
-            # Create MCP server with project exploration tools
-            mcp_server = GenContainerfileMCPServer(runner)
-
-            click.echo("\nGenerating Containerfile with LLM...")
-
-            # Create agent config and run
-            agent = AgentConfig(
-                prompt=prompt,
-                output_schema=output_schema,
-                mcp_server=mcp_server,
-            )
-            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
-            result = results[0]
-
-            containerfile_content = result["containerfile"]
-            explanation = result.get("explanation", "")
-
-        finally:
-            runner.cleanup()
+        containerfile_content = result["containerfile"]
+        explanation = result.get("explanation", "")
 
         # Show generated content
         click.echo("\n" + "=" * 60)
@@ -149,3 +142,22 @@ Explore the project thoroughly before generating the Containerfile."""
         # Save to output path
         output_path.write_text(containerfile_content)
         click.echo(f"\n✓ Saved to: {output_path}")
+
+    async def _execute_async(self, runner, prompt, output_schema, verbose):
+        """Async execution of Containerfile generation."""
+        async with runner:
+            await runner.setup(network="enabled", image=Image.DEFAULT_IMAGE)
+
+            # Create MCP server with project exploration tools
+            mcp_server = GenContainerfileMCPServer(runner)
+
+            click.echo("\nGenerating Containerfile with LLM...")
+
+            # Create agent config and run
+            agent = AgentConfig(
+                prompt=prompt,
+                output_schema=output_schema,
+                mcp_server=mcp_server,
+            )
+            results = await runner.run_agents([agent], verbose=verbose)
+            return results[0]

@@ -22,6 +22,100 @@ from llm_sandbox.mcp_tools import MCPServer
 __all__ = ["SandboxRunner", "AgentConfig"]
 
 
+class BackgroundTaskManager:
+    """Manages lifecycle of background agent tasks with proper synchronization."""
+
+    def __init__(self):
+        """Initialize background task manager."""
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._lock = asyncio.Lock()
+
+    async def spawn(self, agent_id: str, coro):
+        """
+        Spawn background task with proper tracking.
+
+        Args:
+            agent_id: Unique agent identifier
+            coro: Coroutine to run as background task
+
+        Returns:
+            agent_id for tracking
+
+        Raises:
+            ValueError: If agent_id already exists
+        """
+        async with self._lock:
+            if agent_id in self._tasks:
+                raise ValueError(f"Agent {agent_id} already exists")
+            task = asyncio.create_task(coro)
+            self._tasks[agent_id] = task
+        return agent_id
+
+    async def wait_for(
+        self,
+        agent_ids: Optional[List[str]] = None,
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Wait for specific agents or all agents.
+
+        Args:
+            agent_ids: List of agent IDs to wait for (None = all)
+            timeout: Optional timeout in seconds
+
+        Returns:
+            Dict mapping agent_id to result
+        """
+        async with self._lock:
+            if agent_ids is None:
+                agent_ids = list(self._tasks.keys())
+            tasks = [self._tasks[aid] for aid in agent_ids if aid in self._tasks]
+
+        # Wait outside lock to avoid deadlock
+        if timeout:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout
+            )
+        else:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Remove completed tasks
+        async with self._lock:
+            for agent_id in agent_ids:
+                self._tasks.pop(agent_id, None)
+
+        return dict(zip(agent_ids, results))
+
+    async def cancel_all(self):
+        """Cancel all background tasks without recursion."""
+        async with self._lock:
+            tasks = list(self._tasks.values())
+            self._tasks.clear()
+
+        # Cancel all tasks but don't propagate cancel to children
+        # to avoid recursion depth issues
+        for task in tasks:
+            if not task.done():
+                try:
+                    task.cancel()
+                except Exception:
+                    pass  # Ignore errors during cancellation
+
+        # Wait for all tasks to complete, suppressing CancelledError
+        if tasks:
+            try:
+                await asyncio.wait(tasks, timeout=5.0)
+            except asyncio.TimeoutError:
+                pass  # Some tasks didn't finish in time, that's ok
+            except Exception:
+                pass  # Ignore other errors during cleanup
+
+    def get_running_agents(self) -> List[str]:
+        """Get list of currently running agent IDs (non-async for compatibility)."""
+        return list(self._tasks.keys())
+
+
 @dataclass
 class AgentConfig:
     """Configuration for a single agent in parallel execution."""
@@ -62,9 +156,10 @@ class SandboxRunner:
 
         # Parallel execution support
         self._agent_llm_providers: Dict[str, LLMProvider] = {}
-        self._git_lock: Optional[asyncio.Lock] = None
-        self._worktrees_lock: Optional[asyncio.Lock] = None
-        self._background_agents: Dict[str, asyncio.Task] = {}  # Track background agent tasks
+        # Initialize locks immediately (not in async setup) so they're always available
+        self._git_lock = asyncio.Lock()
+        self._worktrees_lock = asyncio.Lock()
+        self._background_task_manager = BackgroundTaskManager()
 
         # Review feedback storage (for PR review workflow)
         self._review_feedback: List[Dict[str, Any]] = []
@@ -73,13 +168,23 @@ class SandboxRunner:
         self._keep_branches: List[str] = []
         self._network_mode: str = "none"
         self._cleaned_up: bool = False
+        self._verbose: bool = False  # Current verbose setting for spawned agents
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async cleanup - properly awaits/cancels all tasks."""
+        await self._cleanup_async()
+        return False  # Don't suppress exceptions
 
     def __del__(self):
         """Destructor - ensure cleanup happens."""
-        try:
-            self.cleanup()
-        except Exception:
-            # Ignore errors during destruction
+        # Only do minimal cleanup - avoid calling cleanup() from __del__
+        # as it can cause issues with event loops
+        if hasattr(self, '_background_task_manager'):
+            # Can't use await in __del__, just mark for cleanup
             pass
 
     def _generate_instance_id(self) -> str:
@@ -209,7 +314,7 @@ class SandboxRunner:
             except Exception as e:
                 click.echo(f"Warning: Failed to remove instance directory: {e}")
 
-    def setup(
+    async def setup(
         self,
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
@@ -271,7 +376,7 @@ class SandboxRunner:
         # Create symlink in container so worktree .git files work
         # The .git file in a worktree contains: gitdir: /host/path/.git/worktrees/name
         # We create a symlink: /host/path/.git -> /project/.git
-        asyncio.run(self._setup_git_symlink())
+        await self._setup_git_symlink()
 
         # Step 4: Create LLM provider with system prompt
         base_system_prompt = self._create_base_system_prompt()
@@ -281,9 +386,7 @@ class SandboxRunner:
             base_system_prompt,
         )
 
-        # Step 5: Initialize async locks for parallel execution
-        self._git_lock = asyncio.Lock()
-        self._worktrees_lock = asyncio.Lock()
+        # Locks are already initialized in __init__()
 
     def _create_base_system_prompt(self) -> str:
         """
@@ -292,30 +395,7 @@ class SandboxRunner:
         Returns:
             Base system prompt string
         """
-        return """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
-
-The container has two mounts:
-- /project (read-only): The original project code
-- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
-
-Workflow:
-1. Use read_project_file/list_project_directory to explore the original project
-2. Use checkout_commit to create a worktree from any commit/branch
-3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
-4. Use glob and grep to search for files and content IN THE WORKTREE
-5. Use git_commit to commit changes to the worktree's branch
-
-File editing:
-- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
-- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
-- Line numbers are 1-indexed, ranges are inclusive
-
-Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
-To modify files, you must first create a worktree with checkout_commit.
-
-Your task is to analyze the project and provide the requested information.
-
-Use the tools available to explore the project, run commands, and gather information as needed."""
+        return """"""
 
     def _create_agent_llm_provider(self, agent_id: str) -> LLMProvider:
         """
@@ -400,6 +480,9 @@ Use the tools available to explore the project, run commands, and gather informa
         if not self.container_id or not self.instance_id:
             raise RuntimeError("Must call setup() before running agents")
 
+        # Store verbose flag so spawned agents can inherit it
+        self._verbose = verbose
+
         try:
             if verbose:
                 click.echo(f"\n{'='*60}")
@@ -436,10 +519,14 @@ Use the tools available to explore the project, run commands, and gather informa
         finally:
             # Clear agent LLM providers
             self._agent_llm_providers.clear()
+            # Reset verbose flag
+            self._verbose = False
+            # Don't cancel background agents here - let them run to completion
+            # They'll be cleaned up by explicit cleanup() call if needed
 
-    def cleanup(self) -> None:
+    async def _cleanup_async(self) -> None:
         """
-        Cleanup container and worktrees.
+        Async cleanup - properly awaits/cancels all tasks.
 
         Safe to call multiple times.
         """
@@ -449,13 +536,52 @@ Use the tools available to explore the project, run commands, and gather informa
 
         self._cleaned_up = True
 
-        # Cancel any background agents
-        if self._background_agents:
-            click.echo(f"Canceling {len(self._background_agents)} background agent(s)...")
-            for agent_id, task in self._background_agents.items():
-                if not task.done():
-                    task.cancel()
-            self._background_agents.clear()
+        # Cancel background agents with proper async handling
+        if self._background_task_manager:
+            running_agents = self._background_task_manager.get_running_agents()
+            if running_agents:
+                click.echo(f"Canceling {len(running_agents)} background agent(s)...")
+            await self._background_task_manager.cancel_all()
+
+        # Clear review feedback
+        self._review_feedback.clear()
+
+        # Cleanup container (sync is fine)
+        if self.container_id:
+            try:
+                click.echo("Cleaning up container...")
+                self.container_manager.cleanup(self.container_id)
+            except Exception as e:
+                click.echo(f"Warning: Failed to cleanup container: {e}")
+            finally:
+                self.container_id = None
+
+        # Cleanup worktrees (sync)
+        try:
+            click.echo("Cleaning up worktrees...")
+            self._cleanup_worktrees(self._keep_branches)
+        except Exception as e:
+            click.echo(f"Warning: Failed to cleanup worktrees: {e}")
+
+    def cleanup(self) -> None:
+        """
+        Cleanup container and worktrees (sync wrapper for backwards compatibility).
+
+        Safe to call multiple times.
+
+        Note: Prefer using async context manager pattern for proper async cleanup.
+        """
+        # Skip if already cleaned up
+        if self._cleaned_up:
+            return
+
+        self._cleaned_up = True
+
+        # Cancel background agents (best effort, can't await in sync context)
+        if self._background_task_manager:
+            running_agents = self._background_task_manager.get_running_agents()
+            if running_agents:
+                click.echo(f"Warning: {len(running_agents)} background agent(s) still running - use async context manager for proper cleanup")
 
         # Clear review feedback
         self._review_feedback.clear()

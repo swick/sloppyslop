@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class MCPTool(ABC):
     """Represents an MCP tool."""
 
-    def __init__(self, name: str, description: str, parameters: Dict[str, Any]):
+    def __init__(self, name: str, description: str, parameters: Dict[str, Any], inheritable: bool = True):
         """
         Initialize MCP tool.
 
@@ -22,10 +22,12 @@ class MCPTool(ABC):
             name: Tool name
             description: Tool description
             parameters: JSON schema for parameters
+            inheritable: Whether this tool can be inherited by spawned child agents (default: True)
         """
         self.name = name
         self.description = description
         self.parameters = parameters
+        self.inheritable = inheritable
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API."""
@@ -36,12 +38,13 @@ class MCPTool(ABC):
         }
 
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """
         Execute the tool with given arguments.
 
         Args:
             arguments: Tool arguments
+            mcp_server: Optional MCP server instance (for tools that need access to parent context)
 
         Returns:
             Tool execution result
@@ -52,9 +55,15 @@ class MCPTool(ABC):
 class MCPServer(ABC):
     """Abstract base class for MCP servers."""
 
-    def __init__(self):
-        """Initialize MCP server with tools dictionary."""
+    def __init__(self, spawn_depth: int = 0):
+        """
+        Initialize MCP server with tools dictionary.
+
+        Args:
+            spawn_depth: Depth of agent spawning (0 = root agent, increments for each spawned child)
+        """
         self.tools: Dict[str, MCPTool] = {}
+        self.spawn_depth: int = spawn_depth
 
     def add_tool(self, tool: MCPTool) -> None:
         """
@@ -102,7 +111,7 @@ class MCPServer(ABC):
             }
 
         tool = self.tools[tool_name]
-        return await tool.execute(arguments)
+        return await tool.execute(arguments, mcp_server=self)
 
 
 # Container tools
@@ -139,7 +148,7 @@ class ExecuteCommandTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Execute shell command in container."""
         command = arguments["command"]
         workdir = arguments.get("workdir", "/worktrees")
@@ -208,7 +217,7 @@ class GitCommitTool(MCPTool):
             return f"/worktrees/{worktree_name}"
         return "/worktrees"
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Commit files with message (blocking)."""
         files = arguments["files"]
         message = arguments["message"]
@@ -313,7 +322,7 @@ class CheckoutCommitTool(MCPTool):
         short_uuid = str(uuid.uuid4())[:8]
         return f"wt-{short_uuid}"
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Create worktree from commit (blocking)."""
         commit = arguments["commit"]
         worktree_name = arguments.get("worktree_name")
@@ -329,13 +338,6 @@ class CheckoutCommitTool(MCPTool):
                 "error": f"Invalid worktree name: {worktree_name}. Must match [a-zA-Z0-9_/-]+ (can contain slashes for hierarchy)",
             }
 
-        # Check for duplicates
-        if worktree_name in self.runner.created_worktrees:
-            return {
-                "success": False,
-                "error": f"Worktree '{worktree_name}' already exists in this session",
-            }
-
         # Check that worktrees base directory exists
         if not self.runner.worktrees_base_dir:
             return {
@@ -343,36 +345,47 @@ class CheckoutCommitTool(MCPTool):
                 "error": "Worktrees base directory not initialized",
             }
 
-        # Generate branch name
-        branch_name = f"llm-container/{self.runner.instance_id}/{worktree_name}"
+        # Use worktrees lock for atomic check-then-act operation
+        async with self.runner._worktrees_lock:
+            # Check for duplicates inside lock
+            if worktree_name in self.runner.created_worktrees:
+                return {
+                    "success": False,
+                    "error": f"Worktree '{worktree_name}' already exists in this session",
+                }
 
-        # Get host worktree path
-        host_worktree_path = self.runner.worktrees_base_dir / worktree_name
+            # Generate branch name
+            branch_name = f"llm-container/{self.runner.instance_id}/{worktree_name}"
 
-        try:
-            # Just call the blocking git operation
-            self.runner.git_ops.create_worktree_on_branch(
-                commit,
-                host_worktree_path,
-                branch_name,
-            )
+            # Get host worktree path
+            host_worktree_path = self.runner.worktrees_base_dir / worktree_name
 
-            # Track created worktree
-            self.runner.created_worktrees.append(worktree_name)
+            try:
+                # Use git lock for the actual git operation (run in thread to avoid blocking)
+                async with self.runner._git_lock:
+                    await asyncio.to_thread(
+                        self.runner.git_ops.create_worktree_on_branch,
+                        commit,
+                        host_worktree_path,
+                        branch_name,
+                    )
 
-            return {
-                "success": True,
-                "worktree_name": worktree_name,
-                "worktree_path": f"/worktrees/{worktree_name}",
-                "branch_name": branch_name,
-                "commit": commit,
-            }
+                # Track created worktree (still inside worktrees lock)
+                self.runner.created_worktrees.append(worktree_name)
 
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to create worktree: {str(e)}",
-            }
+                return {
+                    "success": True,
+                    "worktree_name": worktree_name,
+                    "worktree_path": f"/worktrees/{worktree_name}",
+                    "branch_name": branch_name,
+                    "commit": commit,
+                }
+
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to create worktree: {str(e)}",
+                }
 
 
 class ReadFileTool(MCPTool):
@@ -436,7 +449,7 @@ class ReadFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Read file from worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -523,7 +536,7 @@ class WriteFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Write file to worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -664,7 +677,7 @@ class EditFileTool(MCPTool):
 
         return True, ""
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Edit file in worktree by replacing line ranges (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -754,7 +767,7 @@ class GlobTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Find files matching pattern in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
@@ -835,7 +848,7 @@ class GrepTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Search file contents in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
@@ -944,192 +957,22 @@ class GrepTool(MCPTool):
 # Project-level tools (work on /project directory, used before worktrees exist)
 
 
-class ReadProjectFileTool(MCPTool):
-    """Tool for reading files from the read-only project directory."""
-
-    def __init__(self, runner: "SandboxRunner"):
-        """
-        Initialize read project file tool.
-
-        Args:
-            runner: SandboxRunner instance
-        """
-        super().__init__(
-            name="read_project_file",
-            description="Read contents of a file from the read-only /project directory. Use this to explore the original project before creating worktrees.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to file relative to project root",
-                    },
-                    "max_lines": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read (optional)",
-                        "default": 1000,
-                    },
-                },
-                "required": ["path"],
-            },
-        )
-        self.runner = runner
-
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Read a file from the project directory (blocking)."""
-        path = arguments["path"]
-        max_lines = arguments.get("max_lines", 1000)
-
-        try:
-            # Security: exclude .llm-sandbox directory
-            if ".llm-sandbox" in path:
-                return {
-                    "success": False,
-                    "error": "Permission denied",
-                }
-
-            file_path = self.runner.project_path / path
-
-            # Security check: ensure path is within project directory
-            file_path = file_path.resolve()
-            if not str(file_path).startswith(str(self.runner.project_path.resolve())):
-                return {
-                    "success": False,
-                    "error": "Path outside project directory",
-                }
-
-            if not file_path.exists():
-                return {
-                    "success": False,
-                    "error": "File not found",
-                }
-
-            if not file_path.is_file():
-                return {
-                    "success": False,
-                    "error": "Path is not a file",
-                }
-
-            # Read file content (blocking)
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-
-            if len(lines) > max_lines:
-                content = "".join(lines[:max_lines])
-                content += f"\n... (truncated, {len(lines) - max_lines} more lines)"
-            else:
-                content = "".join(lines)
-
-            return {
-                "success": True,
-                "content": content,
-                "lines": len(lines),
-                "path": path,
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-            }
-
-
-class ListProjectDirectoryTool(MCPTool):
-    """Tool for listing directory contents in the project."""
-
-    def __init__(self, runner: "SandboxRunner"):
-        """
-        Initialize list project directory tool.
-
-        Args:
-            runner: SandboxRunner instance
-        """
-        super().__init__(
-            name="list_project_directory",
-            description="List files and directories in the read-only /project directory. Use this to explore the project structure before creating worktrees.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path relative to project root (default: root)",
-                        "default": ".",
-                    },
-                },
-            },
-        )
-        self.runner = runner
-
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """List contents of a directory (blocking)."""
-        path = arguments.get("path", ".")
-
-        try:
-            # Security: exclude .llm-sandbox directory
-            if ".llm-sandbox" in path:
-                return {
-                    "success": False,
-                    "error": "Permission denied",
-                }
-
-            dir_path = self.runner.project_path / path
-
-            # Security check: ensure path is within project directory
-            dir_path = dir_path.resolve()
-            if not str(dir_path).startswith(str(self.runner.project_path.resolve())):
-                return {
-                    "success": False,
-                    "error": "Path outside project directory",
-                }
-
-            if not dir_path.exists():
-                return {
-                    "success": False,
-                    "error": "Directory not found",
-                }
-
-            if not dir_path.is_dir():
-                return {
-                    "success": False,
-                    "error": "Path is not a directory",
-                }
-
-            # List directory contents (blocking)
-            entries = []
-            for item in sorted(dir_path.iterdir()):
-                rel_path = item.relative_to(self.runner.project_path)
-                entries.append({
-                    "name": item.name,
-                    "path": str(rel_path),
-                    "type": "directory" if item.is_dir() else "file",
-                })
-
-            return {
-                "success": True,
-                "path": path,
-                "entries": entries,
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-            }
-
-
 class SpawnAgentTool(MCPTool):
     """Tool for spawning a sub-agent in the background to handle a specific task."""
 
-    def __init__(self, runner: "SandboxRunner"):
+    MAX_SPAWN_DEPTH = 3  # Configurable limit to prevent infinite recursion
+
+    def __init__(self, runner: "SandboxRunner", inheritable: bool = True):
         """
         Initialize spawn agent tool.
 
         Args:
             runner: SandboxRunner instance
+            inheritable: Whether this tool can be inherited by spawned child agents (default: True)
         """
         super().__init__(
             name="spawn_agent",
-            description="Spawn a sub-agent in the background to handle a specific task. Returns immediately with an agent_id. Use wait_for_agents to retrieve the result later. This allows parallel execution of multiple independent tasks.",
+            description="Spawn a sub-agent in the background to handle a specific task. The spawned agent will inherit tools from the parent agent. Returns immediately with an agent_id. Use wait_for_agents to retrieve the result later. This allows parallel execution of multiple independent tasks.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1145,70 +988,112 @@ class SpawnAgentTool(MCPTool):
                         "type": "string",
                         "description": "Optional identifier for this agent (auto-generated if not provided)",
                     },
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of tool names to provide to the sub-agent. Must be a subset of tools available to the parent agent. If not specified, the sub-agent inherits all parent tools.",
+                    },
                 },
                 "required": ["task", "output_schema"],
             },
+            inheritable=inheritable,
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Spawn sub-agent in background."""
         task = arguments["task"]
         output_schema = arguments["output_schema"]
         agent_id = arguments.get("agent_id", f"bg-{str(uuid.uuid4())[:8]}")
+        requested_tools = arguments.get("tools")
 
         try:
-            # Check if agent_id already exists
-            if agent_id in self.runner._background_agents:
+            if mcp_server is None:
+                # Fallback: no parent server available, return error
                 return {
                     "success": False,
-                    "error": f"Agent with id '{agent_id}' already exists",
+                    "error": "Cannot spawn agent: parent MCP server not available",
+                }
+
+            # Check spawn depth to prevent infinite recursion
+            parent_depth = mcp_server.spawn_depth
+
+            if parent_depth >= self.MAX_SPAWN_DEPTH:
+                return {
+                    "success": False,
+                    "error": f"Maximum spawn depth ({self.MAX_SPAWN_DEPTH}) exceeded. Current depth: {parent_depth}",
                 }
 
             # Import here to avoid circular dependency
             from llm_sandbox import AgentConfig
 
-            # Create MCP server with same tools as parent
-            mcp_server = MCPServer()
-            mcp_server.add_tools([
-                ExecuteCommandTool(self.runner),
-                CheckoutCommitTool(self.runner),
-                GitCommitTool(self.runner),
-                ReadFileTool(self.runner),
-                WriteFileTool(self.runner),
-                EditFileTool(self.runner),
-                GlobTool(self.runner),
-                GrepTool(self.runner),
-                ReadProjectFileTool(self.runner),
-                ListProjectDirectoryTool(self.runner),
-                SpawnAgentTool(self.runner),  # Allow nested spawning
-                WaitForAgentsTool(self.runner),  # Allow sub-agents to wait for their own spawned agents
-            ])
+            # Get parent's tools
+            parent_tools = mcp_server.tools
+
+            # Determine which tools to give the child agent
+            if requested_tools is not None:
+                # Validate that requested tools are a subset of parent tools
+                invalid_tools = [t for t in requested_tools if t not in parent_tools]
+                if invalid_tools:
+                    return {
+                        "success": False,
+                        "error": f"Invalid tools requested: {invalid_tools}. Must be a subset of parent tools: {list(parent_tools.keys())}",
+                    }
+
+                # Validate that requested tools are inheritable
+                non_inheritable = [name for name in requested_tools if not parent_tools[name].inheritable]
+                if non_inheritable:
+                    return {
+                        "success": False,
+                        "error": f"Tools are not inheritable: {non_inheritable}. Cannot pass non-inheritable tools to child agents.",
+                    }
+
+                # Add only the requested tools
+                tools_to_add = [parent_tools[name] for name in requested_tools]
+            else:
+                # Inherit all inheritable parent tools
+                tools_to_add = [tool for tool in parent_tools.values() if tool.inheritable]
+
+            # Create MCP server with inherited tools from parent and incremented spawn depth
+            child_spawn_depth = parent_depth + 1
+            child_mcp_server = MCPServer(spawn_depth=child_spawn_depth)
+            child_mcp_server.add_tools(tools_to_add)
 
             # Create agent config
             agent_config = AgentConfig(
                 prompt=task,
                 output_schema=output_schema,
-                mcp_server=mcp_server,
+                mcp_server=child_mcp_server,
                 agent_id=agent_id,
             )
 
             # Create task to run the agent in background
             async def run_background_agent():
-                results = await self.runner.run_agents([agent_config], verbose=False)
+                # Inherit verbose setting from parent runner
+                results = await self.runner.run_agents([agent_config], verbose=self.runner._verbose)
                 return results[0]
 
-            # Create and store the task
-            task_obj = asyncio.create_task(run_background_agent())
-            self.runner._background_agents[agent_id] = task_obj
+            # Use BackgroundTaskManager to spawn and track the task
+            await self.runner._background_task_manager.spawn(agent_id, run_background_agent())
+
+            # Get list of tool names provided to child
+            child_tool_names = list(child_mcp_server.tools.keys())
 
             return {
                 "success": True,
                 "agent_id": agent_id,
                 "status": "spawned",
-                "message": f"Agent '{agent_id}' spawned in background. Use wait_for_agents to retrieve result.",
+                "spawn_depth": child_spawn_depth,
+                "tools": child_tool_names,
+                "message": f"Agent '{agent_id}' spawned in background at depth {child_spawn_depth} with {len(child_tool_names)} tools. Use wait_for_agents to retrieve result.",
             }
 
+        except ValueError as e:
+            # Agent already exists
+            return {
+                "success": False,
+                "error": str(e),
+            }
         except Exception as e:
             return {
                 "success": False,
@@ -1219,12 +1104,13 @@ class SpawnAgentTool(MCPTool):
 class WaitForAgentsTool(MCPTool):
     """Tool for waiting for background agents to complete and retrieving their results."""
 
-    def __init__(self, runner: "SandboxRunner"):
+    def __init__(self, runner: "SandboxRunner", inheritable: bool = True):
         """
         Initialize wait for agents tool.
 
         Args:
             runner: SandboxRunner instance
+            inheritable: Whether this tool can be inherited by spawned child agents (default: True)
         """
         super().__init__(
             name="wait_for_agents",
@@ -1243,10 +1129,11 @@ class WaitForAgentsTool(MCPTool):
                     },
                 },
             },
+            inheritable=inheritable,
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Wait for background agents to complete."""
         agent_ids = arguments.get("agent_ids")
         timeout = arguments.get("timeout")
@@ -1254,7 +1141,7 @@ class WaitForAgentsTool(MCPTool):
         try:
             # If no agent_ids specified, wait for all
             if not agent_ids:
-                agent_ids = list(self.runner._background_agents.keys())
+                agent_ids = self.runner._background_task_manager.get_running_agents()
 
             if not agent_ids:
                 return {
@@ -1263,52 +1150,34 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
-            # Check that all requested agents exist
-            missing_agents = [aid for aid in agent_ids if aid not in self.runner._background_agents]
-            if missing_agents:
-                return {
-                    "success": False,
-                    "error": f"Unknown agent IDs: {missing_agents}",
-                    "available_agents": list(self.runner._background_agents.keys()),
-                }
+            # Use BackgroundTaskManager to wait for agents (handles validation internally)
+            results = await self.runner._background_task_manager.wait_for(
+                agent_ids=agent_ids,
+                timeout=timeout
+            )
 
-            # Gather tasks for requested agents
-            tasks = {aid: self.runner._background_agents[aid] for aid in agent_ids}
-
-            # Wait for all tasks with optional timeout
-            if timeout:
-                results_list = await asyncio.wait_for(
-                    asyncio.gather(*tasks.values(), return_exceptions=True),
-                    timeout=timeout
-                )
-            else:
-                results_list = await asyncio.gather(*tasks.values(), return_exceptions=True)
-
-            # Process results
-            results = {}
-            for agent_id, result in zip(agent_ids, results_list):
+            # Process results to handle exceptions
+            processed_results = {}
+            for agent_id, result in results.items():
                 if isinstance(result, Exception):
-                    results[agent_id] = {
+                    processed_results[agent_id] = {
                         "success": False,
                         "error": str(result),
                     }
                 else:
-                    results[agent_id] = result
-
-                # Remove completed agent from background dict
-                del self.runner._background_agents[agent_id]
+                    processed_results[agent_id] = result
 
             return {
                 "success": True,
-                "results": results,
-                "completed_count": len(results),
+                "results": processed_results,
+                "completed_count": len(processed_results),
             }
 
         except asyncio.TimeoutError:
             return {
                 "success": False,
                 "error": f"Timeout after {timeout} seconds waiting for agents: {agent_ids}",
-                "remaining_agents": list(self.runner._background_agents.keys()),
+                "remaining_agents": self.runner._background_task_manager.get_running_agents(),
             }
         except Exception as e:
             return {

@@ -38,7 +38,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import click
 import requests
@@ -55,8 +55,6 @@ from llm_sandbox.mcp_tools import (
     EditFileTool,
     GlobTool,
     GrepTool,
-    ReadProjectFileTool,
-    ListProjectDirectoryTool,
     SpawnAgentTool,
     WaitForAgentsTool,
 )
@@ -88,7 +86,7 @@ class GetPullRequestDiffTool(MCPTool):
         self.repo = repo
         self.pr_number = pr_number
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Fetch the PR diff from GitHub API."""
         try:
             diff = self.github_client.get_pull_request_diff(self.repo, self.pr_number)
@@ -128,7 +126,7 @@ class GetPullRequestCommitsTool(MCPTool):
         self.repo = repo
         self.pr_number = pr_number
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Fetch the PR commits from GitHub API."""
         try:
             commits = self.github_client.get_pull_request_commits(self.repo, self.pr_number)
@@ -322,7 +320,7 @@ class RecordReviewFeedbackTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Record review feedback."""
         feedback_item = {
             "file": arguments["file"],
@@ -377,7 +375,7 @@ class GetReviewFeedbackTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Retrieve review feedback."""
         feedback = self.runner._review_feedback
 
@@ -440,7 +438,7 @@ class AssignFeedbackProbabilityTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Assign probability to feedback items."""
         indices = arguments["feedback_indices"]
         probability = arguments["probability"]
@@ -482,16 +480,10 @@ class PRReviewMCPServer(MCPServer):
         super().__init__()
         # Add all built-in tools
         self.add_tool(ExecuteCommandTool(runner))
-        self.add_tool(CheckoutCommitTool(runner))
-        self.add_tool(GitCommitTool(runner))
         self.add_tool(ReadFileTool(runner))
-        self.add_tool(WriteFileTool(runner))
-        self.add_tool(EditFileTool(runner))
         self.add_tool(GlobTool(runner))
         self.add_tool(GrepTool(runner))
-        self.add_tool(ReadProjectFileTool(runner))
-        self.add_tool(ListProjectDirectoryTool(runner))
-        self.add_tool(SpawnAgentTool(runner))
+        self.add_tool(SpawnAgentTool(runner, inheritable=False))
         self.add_tool(WaitForAgentsTool(runner))
         # Add PR review specific tools
         self.add_tool(RecordReviewFeedbackTool(runner))
@@ -617,28 +609,30 @@ Your workflow:
    - Look for review instruction files as specified in those docs
    - If not specified, search common patterns: review/, docs/review/, .github/review/
    - Understand all review criteria from all instruction files
-   - Get PR changes summary using get_pull_request_commits() and get_pull_request_diff()
+   - Get PR changes summary using the MCP tools get_pull_request_commits and get_pull_request_diff
 
 2. Spawn sub-agents for specific review tasks:
    - Break down the review into specific tasks based on:
      * Review instruction categories (if found)
      * Common areas: security, performance, bugs, style, documentation
      * Changed file types or modules
-   - Use spawn_agent() to create a sub-agent for each task
+   - Use the spawn_agent MCP tool to create a sub-agent for each task
+     * Do not let them create new sub-agents
    - Give each sub-agent:
+     * The list of tools available to them
+     * Instructions to use record_review_feedback MCP tools to record findings
      * A clear, specific task description
      * The relevant review criteria for that task
-     * Instructions to use record_review_feedback() to record findings
    - Example tasks: "Review security aspects", "Review database changes", "Review API endpoints"
 
 3. Wait for sub-agents to complete:
-   - Use wait_for_agents() to wait for all spawned agents
-   - Sub-agents will record their findings using record_review_feedback()
+   - Use wait_for_agents MCP tool to wait for all spawned agents
+   - Sub-agents will record their findings using the record_review_feedback MCP tool
 
 4. Review and assign probabilities to findings:
-   - Use get_review_feedback() to retrieve all recorded findings
+   - Use get_review_feedback MCP tool to retrieve all recorded findings
    - Analyze each finding for validity and accuracy
-   - Use assign_feedback_probability() to assign confidence scores (0.0-1.0)
+   - Use assign_feedback_probability MCP tool to assign confidence scores (0.0-1.0)
    - Consider: Is the issue real? Is the suggested fix appropriate? Does it align with review criteria?
 
 5. Return a summary:
@@ -647,7 +641,7 @@ Your workflow:
    - Report total findings and their confidence distribution
    - DO NOT include the detailed findings in output (they're in the feedback store)
 
-The structured output should just be a high-level summary - the detailed findings are accessible via get_review_feedback()."""
+The structured output should just be a high-level summary - the detailed findings are accessible via the get_review_feedback MCP tool."""
 
         agent_schema = {
             "type": "object",
@@ -705,97 +699,102 @@ The structured output should just be a high-level summary - the detailed finding
             "required": ["review_summary", "documentation_found", "sub_agents_spawned", "findings_statistics", "overall_assessment"],
         }
 
-        # Run single agent with custom tools
-        try:
-            # Setup the sandbox environment
-            runner.setup(network=network)
-
-            # Create checkout tool instance
-            checkout_tool = CheckoutCommitTool(runner)
-
-            # Pre-checkout worktrees for PR head and base
-            click.echo("\nChecking out worktrees...")
-            click.echo(f"  Creating worktree 'pr-head' from {pr_head_branch}...")
-            head_result = asyncio.run(checkout_tool.execute({
-                "commit": pr_head_branch,
-                "worktree_name": "pr-head",
-            }))
-            if not head_result["success"]:
-                click.echo(f"Error: {head_result['error']}", err=True)
-                sys.exit(1)
-
-            # Use the base ref directly (like "main" or "master")
-            # The base commit is already available from the PR head fetch
-            click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
-            base_result = asyncio.run(checkout_tool.execute({
-                "commit": pr_info['base_ref'],
-                "worktree_name": "pr-base",
-            }))
-            if not base_result["success"]:
-                click.echo(f"Error: {base_result['error']}", err=True)
-                sys.exit(1)
-
-            click.echo("  Worktrees created successfully!")
-
-            # Create MCP server with all built-in tools + GitHub API tools
-            mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
-
-            # Create agent config and run
-            agent = AgentConfig(
-                prompt=agent_prompt,
-                output_schema=agent_schema,
-                mcp_server=mcp_server,
-            )
-            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
-            result = results[0]
-        finally:
-            runner.cleanup()
+        # Run single agent with custom tools using async context manager
+        result, all_feedback = asyncio.run(self._execute_async(
+            runner,
+            pr_head_branch,
+            pr_info,
+            repo_name,
+            pr_number,
+            agent_prompt,
+            agent_schema,
+            network,
+            verbose
+        ))
 
         # Show results
         click.echo(f"\n{'='*60}")
         click.echo("Review Agent Results")
         click.echo(f"{'='*60}")
-        click.echo(f"\nDocumentation Summary:")
-        click.echo(result["documentation_summary"])
-        click.echo(f"\nCommits Summary:")
-        click.echo(result["commits_summary"])
-        click.echo(f"\nReview Instruction Files: {len(result['review_instruction_files'])}")
-        if result["review_instruction_files"]:
-            for file in result["review_instruction_files"]:
+        click.echo(f"\nReview Summary:")
+        click.echo(result["review_summary"])
+        click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
+        if result["documentation_found"]:
+            for file in result["documentation_found"]:
                 click.echo(f"  - {file}")
-        else:
-            click.echo("  (No specific review instruction files found - using general best practices)")
-        click.echo(f"\nCriteria Applied:")
-        click.echo(result['review_criteria_applied'])
-        click.echo(f"\nFound {len(result['suggestions'])} suggestions")
+        click.echo(f"\nReview Criteria:")
+        click.echo(result["review_criteria_summary"])
 
-        all_suggestions = result["suggestions"]
+        click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
+        for agent in result["sub_agents_spawned"]:
+            click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
 
-        # Aggregate results
+        click.echo(f"\nFindings Statistics:")
+        stats = result["findings_statistics"]
+        click.echo(f"  Total findings: {stats['total_findings']}")
+        if "by_category" in stats:
+            click.echo(f"  By category: {stats['by_category']}")
+        if "by_severity" in stats:
+            click.echo(f"  By severity: {stats['by_severity']}")
+        if "high_confidence_count" in stats:
+            click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+
+        click.echo(f"\nOverall Assessment:")
+        click.echo(result["overall_assessment"])
+
+        # Filter out low-probability items (threshold: 0.5)
+        probability_threshold = 0.5
+        filtered_feedback = [
+            f for f in all_feedback
+            if f.get("probability", 1.0) >= probability_threshold
+        ]
+
         click.echo(f"\n{'='*60}")
-        click.echo(f"Review Complete - Total Suggestions: {len(all_suggestions)}")
+        click.echo(f"Filtering Feedback")
+        click.echo(f"{'='*60}")
+        click.echo(f"Total findings recorded: {len(all_feedback)}")
+        click.echo(f"After filtering (probability ≥ {probability_threshold}): {len(filtered_feedback)}")
+
+        # Sort by probability (highest first)
+        sorted_feedback = sorted(
+            filtered_feedback,
+            key=lambda x: x.get("probability", 1.0),
+            reverse=True
+        )
+
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Review Complete - {len(sorted_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
 
-        if not all_suggestions:
-            click.echo("\nNo suggestions generated. All files look good!")
+        if not sorted_feedback:
+            click.echo("\nNo high-confidence suggestions. All files look good!")
             return
 
         # Step 5: Interactive approval
         click.echo(f"\n{'='*60}")
-        click.echo("Review Suggestions")
+        click.echo("Review Suggestions (sorted by probability)")
         click.echo(f"{'='*60}\n")
 
         accepted_suggestions = []
-        for i, suggestion in enumerate(all_suggestions, 1):
-            click.echo(f"\nSuggestion {i}/{len(all_suggestions)}")
+        for i, suggestion in enumerate(sorted_feedback, 1):
+            probability = suggestion.get("probability", 1.0)
+            click.echo(f"\nSuggestion {i}/{len(sorted_feedback)}")
             click.echo(f"  File: {suggestion['file']}")
             click.echo(f"  Lines: {suggestion['line_start']}-{suggestion['line_end']}")
             click.echo(f"  Category: {suggestion['category']}")
+            click.echo(f"  Severity: {suggestion['severity']}")
+            click.echo(f"  Probability: {probability:.2f}")
+            if suggestion.get("probability_reasoning"):
+                click.echo(f"  Confidence reasoning: {suggestion['probability_reasoning']}")
             click.echo(f"  Reason: {suggestion['reason']}")
-            click.echo(f"\n  Current code:")
-            click.echo(f"    {self._indent_code(suggestion['current_code'], 4)}")
-            click.echo(f"\n  Suggested code:")
-            click.echo(f"    {self._indent_code(suggestion['suggested_code'], 4)}")
+
+            if suggestion.get('current_code'):
+                click.echo(f"\n  Current code:")
+                click.echo(f"    {self._indent_code(suggestion['current_code'], 4)}")
+
+            if suggestion.get('suggested_code'):
+                click.echo(f"\n  Suggested code:")
+                click.echo(f"    {self._indent_code(suggestion['suggested_code'], 4)}")
 
             # Ask user for approval
             if click.confirm("\n  Accept this suggestion?", default=False):
@@ -809,18 +808,30 @@ The structured output should just be a high-level summary - the detailed finding
             return
 
         # Step 6: Prepare summary comment
+        doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
+        agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
+
         summary = f"""Code review completed for PR #{pr_number}.
 
-Documentation reviewed:
-{result['documentation_summary']}
+Review approach:
+{result['review_summary'][:300]}{"..." if len(result['review_summary']) > 300 else ""}
 
-Changes analyzed:
-{result['commits_summary'][:300]}{"..." if len(result['commits_summary']) > 300 else ""}
+Documentation found: {doc_list}
 
-Review criteria applied:
-{result['review_criteria_applied'][:200]}{"..." if len(result['review_criteria_applied']) > 200 else ""}
+Review criteria:
+{result['review_criteria_summary'][:250]}{"..." if len(result['review_criteria_summary']) > 250 else ""}
 
-Total suggestions: {len(all_suggestions)}
+Sub-agents used:
+{agent_list}
+
+Findings:
+- Total findings: {stats['total_findings']}
+- High confidence (≥0.8): {stats.get('high_confidence_count', 'N/A')}
+- After filtering (≥{probability_threshold}): {len(sorted_feedback)}
+
+Overall assessment:
+{result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}
+
 Accepted suggestions: {len(accepted_suggestions)}"""
 
         summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
@@ -926,6 +937,66 @@ Accepted suggestions: {len(accepted_suggestions)}"""
 
         click.echo(f"\nView the review at:")
         click.echo(f"  https://github.com/{repo_name}/pull/{pr_number}")
+
+    async def _execute_async(
+        self,
+        runner,
+        pr_head_branch,
+        pr_info,
+        repo_name,
+        pr_number,
+        agent_prompt,
+        agent_schema,
+        network,
+        verbose
+    ):
+        """Async execution of PR review workflow."""
+        async with runner:
+            # Setup the sandbox environment
+            await runner.setup(network=network)
+
+            # Create checkout tool instance
+            checkout_tool = CheckoutCommitTool(runner)
+
+            # Pre-checkout worktrees for PR head and base
+            click.echo("\nChecking out worktrees...")
+            click.echo(f"  Creating worktree 'pr-head' from {pr_head_branch}...")
+            head_result = await checkout_tool.execute({
+                "commit": pr_head_branch,
+                "worktree_name": "pr-head",
+            })
+            if not head_result["success"]:
+                click.echo(f"Error: {head_result['error']}", err=True)
+                sys.exit(1)
+
+            # Use the base ref directly (like "main" or "master")
+            # The base commit is already available from the PR head fetch
+            click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
+            base_result = await checkout_tool.execute({
+                "commit": pr_info['base_ref'],
+                "worktree_name": "pr-base",
+            })
+            if not base_result["success"]:
+                click.echo(f"Error: {base_result['error']}", err=True)
+                sys.exit(1)
+
+            click.echo("  Worktrees created successfully!")
+
+            # Create MCP server with all built-in tools + GitHub API tools
+            mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
+
+            # Create agent config and run
+            agent = AgentConfig(
+                prompt=agent_prompt,
+                output_schema=agent_schema,
+                mcp_server=mcp_server,
+            )
+            results = await runner.run_agents([agent], verbose=verbose)
+
+            # Get feedback BEFORE exiting context manager (before cleanup clears it)
+            all_feedback = list(runner._review_feedback)
+
+            return results[0], all_feedback
 
     def _get_repo_name(self, project_dir: Path) -> str:
         """Get GitHub repository owner/name from git remote."""
