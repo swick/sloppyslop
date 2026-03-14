@@ -1117,4 +1117,204 @@ class ListProjectDirectoryTool(MCPTool):
             }
 
 
+class SpawnAgentTool(MCPTool):
+    """Tool for spawning a sub-agent in the background to handle a specific task."""
+
+    def __init__(self, runner: "SandboxRunner"):
+        """
+        Initialize spawn agent tool.
+
+        Args:
+            runner: SandboxRunner instance
+        """
+        super().__init__(
+            name="spawn_agent",
+            description="Spawn a sub-agent in the background to handle a specific task. Returns immediately with an agent_id. Use wait_for_agents to retrieve the result later. This allows parallel execution of multiple independent tasks.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Clear description of the task for the sub-agent to complete",
+                    },
+                    "output_schema": {
+                        "type": "object",
+                        "description": "JSON schema defining the expected output structure from the sub-agent",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Optional identifier for this agent (auto-generated if not provided)",
+                    },
+                },
+                "required": ["task", "output_schema"],
+            },
+        )
+        self.runner = runner
+
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Spawn sub-agent in background."""
+        task = arguments["task"]
+        output_schema = arguments["output_schema"]
+        agent_id = arguments.get("agent_id", f"bg-{str(uuid.uuid4())[:8]}")
+
+        try:
+            # Check if agent_id already exists
+            if agent_id in self.runner._background_agents:
+                return {
+                    "success": False,
+                    "error": f"Agent with id '{agent_id}' already exists",
+                }
+
+            # Import here to avoid circular dependency
+            from llm_sandbox import AgentConfig
+
+            # Create MCP server with same tools as parent
+            mcp_server = MCPServer()
+            mcp_server.add_tools([
+                ExecuteCommandTool(self.runner),
+                CheckoutCommitTool(self.runner),
+                GitCommitTool(self.runner),
+                ReadFileTool(self.runner),
+                WriteFileTool(self.runner),
+                EditFileTool(self.runner),
+                GlobTool(self.runner),
+                GrepTool(self.runner),
+                ReadProjectFileTool(self.runner),
+                ListProjectDirectoryTool(self.runner),
+                SpawnAgentTool(self.runner),  # Allow nested spawning
+                WaitForAgentsTool(self.runner),  # Allow sub-agents to wait for their own spawned agents
+            ])
+
+            # Create agent config
+            agent_config = AgentConfig(
+                prompt=task,
+                output_schema=output_schema,
+                mcp_server=mcp_server,
+                agent_id=agent_id,
+            )
+
+            # Create task to run the agent in background
+            async def run_background_agent():
+                results = await self.runner.run_agents([agent_config], verbose=False)
+                return results[0]
+
+            # Create and store the task
+            task_obj = asyncio.create_task(run_background_agent())
+            self.runner._background_agents[agent_id] = task_obj
+
+            return {
+                "success": True,
+                "agent_id": agent_id,
+                "status": "spawned",
+                "message": f"Agent '{agent_id}' spawned in background. Use wait_for_agents to retrieve result.",
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to spawn sub-agent: {str(e)}",
+            }
+
+
+class WaitForAgentsTool(MCPTool):
+    """Tool for waiting for background agents to complete and retrieving their results."""
+
+    def __init__(self, runner: "SandboxRunner"):
+        """
+        Initialize wait for agents tool.
+
+        Args:
+            runner: SandboxRunner instance
+        """
+        super().__init__(
+            name="wait_for_agents",
+            description="Wait for one or more background agents to complete and retrieve their results. If no agent_ids specified, waits for all background agents.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of agent IDs to wait for (waits for all if not specified)",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (optional, waits indefinitely if not specified)",
+                    },
+                },
+            },
+        )
+        self.runner = runner
+
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Wait for background agents to complete."""
+        agent_ids = arguments.get("agent_ids")
+        timeout = arguments.get("timeout")
+
+        try:
+            # If no agent_ids specified, wait for all
+            if not agent_ids:
+                agent_ids = list(self.runner._background_agents.keys())
+
+            if not agent_ids:
+                return {
+                    "success": True,
+                    "results": {},
+                    "message": "No background agents to wait for",
+                }
+
+            # Check that all requested agents exist
+            missing_agents = [aid for aid in agent_ids if aid not in self.runner._background_agents]
+            if missing_agents:
+                return {
+                    "success": False,
+                    "error": f"Unknown agent IDs: {missing_agents}",
+                    "available_agents": list(self.runner._background_agents.keys()),
+                }
+
+            # Gather tasks for requested agents
+            tasks = {aid: self.runner._background_agents[aid] for aid in agent_ids}
+
+            # Wait for all tasks with optional timeout
+            if timeout:
+                results_list = await asyncio.wait_for(
+                    asyncio.gather(*tasks.values(), return_exceptions=True),
+                    timeout=timeout
+                )
+            else:
+                results_list = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+            # Process results
+            results = {}
+            for agent_id, result in zip(agent_ids, results_list):
+                if isinstance(result, Exception):
+                    results[agent_id] = {
+                        "success": False,
+                        "error": str(result),
+                    }
+                else:
+                    results[agent_id] = result
+
+                # Remove completed agent from background dict
+                del self.runner._background_agents[agent_id]
+
+            return {
+                "success": True,
+                "results": results,
+                "completed_count": len(results),
+            }
+
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": f"Timeout after {timeout} seconds waiting for agents: {agent_ids}",
+                "remaining_agents": list(self.runner._background_agents.keys()),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to wait for agents: {str(e)}",
+            }
+
+
 

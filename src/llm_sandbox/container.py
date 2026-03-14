@@ -322,41 +322,39 @@ class ContainerManager:
             future = self.async_session.post(
                 f"{self.base_url}/v4.0.0/libpod/exec/{exec_id}/start",
                 json=start_config,
-                stream=True,
             )
             response = await asyncio.wrap_future(future)
             response.raise_for_status()
 
-            # Collect output
+            # Get all content (this is blocking, so wrap in thread)
+            raw_content = await asyncio.to_thread(lambda: response.content)
+
+            # Parse the stream format
             stdout_data = []
             stderr_data = []
 
-            for chunk in response.iter_content(chunk_size=1024):
-                if not chunk:
-                    continue
+            i = 0
+            while i < len(raw_content):
+                if i + 8 > len(raw_content):
+                    break
 
                 # Podman uses Docker's stream format:
                 # [8]byte header: 1 byte stream type, 3 bytes padding, 4 bytes size
                 # followed by payload
-                i = 0
-                while i < len(chunk):
-                    if i + 8 > len(chunk):
-                        break
+                stream_type = raw_content[i]
+                size = int.from_bytes(raw_content[i+4:i+8], 'big')
 
-                    stream_type = chunk[i]
-                    size = int.from_bytes(chunk[i+4:i+8], 'big')
+                if i + 8 + size > len(raw_content):
+                    break
 
-                    if i + 8 + size > len(chunk):
-                        break
+                payload = raw_content[i+8:i+8+size]
 
-                    payload = chunk[i+8:i+8+size]
+                if stream_type == 1:  # stdout
+                    stdout_data.append(payload)
+                elif stream_type == 2:  # stderr
+                    stderr_data.append(payload)
 
-                    if stream_type == 1:  # stdout
-                        stdout_data.append(payload)
-                    elif stream_type == 2:  # stderr
-                        stderr_data.append(payload)
-
-                    i += 8 + size
+                i += 8 + size
 
             stdout = b''.join(stdout_data).decode('utf-8', errors='replace')
             stderr = b''.join(stderr_data).decode('utf-8', errors='replace')

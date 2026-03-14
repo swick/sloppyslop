@@ -86,7 +86,7 @@ class GetPullRequestDiffTool(MCPTool):
         self.repo = repo
         self.pr_number = pr_number
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Fetch the PR diff from GitHub API."""
         try:
             diff = self.github_client.get_pull_request_diff(self.repo, self.pr_number)
@@ -126,7 +126,7 @@ class GetPullRequestCommitsTool(MCPTool):
         self.repo = repo
         self.pr_number = pr_number
 
-    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Fetch the PR commits from GitHub API."""
         try:
             commits = self.github_client.get_pull_request_commits(self.repo, self.pr_number)

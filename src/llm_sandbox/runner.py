@@ -64,6 +64,7 @@ class SandboxRunner:
         self._agent_llm_providers: Dict[str, LLMProvider] = {}
         self._git_lock: Optional[asyncio.Lock] = None
         self._worktrees_lock: Optional[asyncio.Lock] = None
+        self._background_agents: Dict[str, asyncio.Task] = {}  # Track background agent tasks
 
         # Internal state
         self._keep_branches: List[str] = []
