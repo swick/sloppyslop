@@ -28,63 +28,8 @@ from llm_sandbox.mcp_tools import (
     ListProjectDirectoryTool,
 )
 
-
-class ContainerMCPServer(MCPServer):
-    """MCP server for container and git operations."""
-
-    def __init__(
-        self,
-        container_manager: ContainerManager,
-        container_id: str,
-        instance_id: str,
-        runner: "SandboxRunner",
-        project_path: Path,
-        custom_tools: Optional[List] = None,
-    ):
-        """
-        Initialize container MCP server.
-
-        Args:
-            container_manager: Container manager instance
-            container_id: Container ID to execute commands in
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for tracking worktrees
-            project_path: Path to project directory for read-only access
-            custom_tools: Optional list of custom MCP tools to add
-        """
-        super().__init__()
-        execute_command_tool = ExecuteCommandTool(container_manager, container_id)
-        checkout_commit_tool = CheckoutCommitTool(
-            container_manager, container_id, instance_id, runner
-        )
-        git_commit_tool = GitCommitTool(
-            container_manager, container_id, instance_id, runner
-        )
-        read_file_tool = ReadFileTool(instance_id, runner)
-        write_file_tool = WriteFileTool(instance_id, runner)
-        edit_file_tool = EditFileTool(instance_id, runner)
-        glob_tool = GlobTool(instance_id, runner)
-        grep_tool = GrepTool(instance_id, runner)
-        read_project_file_tool = ReadProjectFileTool(project_path)
-        list_project_directory_tool = ListProjectDirectoryTool(project_path)
-
-        self.tools = {
-            execute_command_tool.name: execute_command_tool,
-            checkout_commit_tool.name: checkout_commit_tool,
-            git_commit_tool.name: git_commit_tool,
-            read_file_tool.name: read_file_tool,
-            write_file_tool.name: write_file_tool,
-            edit_file_tool.name: edit_file_tool,
-            glob_tool.name: glob_tool,
-            grep_tool.name: grep_tool,
-            read_project_file_tool.name: read_project_file_tool,
-            list_project_directory_tool.name: list_project_directory_tool,
-        }
-
-        # Add custom tools if provided
-        if custom_tools:
-            for tool in custom_tools:
-                self.tools[tool.name] = tool
+# Re-export for convenience
+__all__ = ["SandboxRunner"]
 
 
 class SandboxRunner:
@@ -315,8 +260,8 @@ class SandboxRunner:
         self,
         prompt: str,
         output_schema: Dict[str, Any],
+        mcp_server: MCPServer,
         verbose: bool = False,
-        custom_tools: Optional[List] = None,
     ) -> Dict[str, Any]:
         """
         Execute LLM prompt with structured output.
@@ -326,24 +271,14 @@ class SandboxRunner:
         Args:
             prompt: User prompt for LLM
             output_schema: JSON schema for structured output
+            mcp_server: MCP server providing tools for the LLM
             verbose: Enable verbose output (optional)
-            custom_tools: Optional list of custom MCP tools to add (optional)
 
         Returns:
             Structured output from LLM
         """
         if not self.container_id or not self.instance_id:
             raise RuntimeError("Must call setup() before run_prompt()")
-
-        # Initialize MCP server with custom tools
-        mcp_server = ContainerMCPServer(
-            self.container_manager,
-            self.container_id,
-            self.instance_id,
-            self,
-            self.project_path,
-            custom_tools=custom_tools,
-        )
 
         # Execute LLM prompt with structured output
         click.echo("Executing LLM prompt...")

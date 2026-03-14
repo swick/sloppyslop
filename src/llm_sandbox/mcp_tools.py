@@ -55,6 +55,25 @@ class MCPServer(ABC):
         """Initialize MCP server with tools dictionary."""
         self.tools: Dict[str, MCPTool] = {}
 
+    def add_tool(self, tool: MCPTool) -> None:
+        """
+        Add a tool to the server.
+
+        Args:
+            tool: MCP tool instance to add
+        """
+        self.tools[tool.name] = tool
+
+    def add_tools(self, tools: List[MCPTool]) -> None:
+        """
+        Add multiple tools to the server.
+
+        Args:
+            tools: List of MCP tool instances to add
+        """
+        for tool in tools:
+            self.add_tool(tool)
+
     def get_tools(self) -> List[MCPTool]:
         """
         Get list of available MCP tools.
@@ -1151,5 +1170,6 @@ class ListProjectDirectoryTool(MCPTool):
                 "success": False,
                 "error": str(e),
             }
+
 
 

@@ -7,6 +7,47 @@ from pathlib import Path
 import click
 
 from llm_sandbox.subcommand import Subcommand
+from llm_sandbox.mcp_tools import (
+    MCPServer,
+    ExecuteCommandTool,
+    CheckoutCommitTool,
+    GitCommitTool,
+    ReadFileTool,
+    WriteFileTool,
+    EditFileTool,
+    GlobTool,
+    GrepTool,
+    ReadProjectFileTool,
+    ListProjectDirectoryTool,
+)
+
+
+class RunMCPServer(MCPServer):
+    """MCP server with all built-in tools for run subcommand."""
+
+    def __init__(self, container_manager, container_id, instance_id, runner, project_path):
+        """
+        Initialize run MCP server with all built-in tools.
+
+        Args:
+            container_manager: Container manager instance
+            container_id: Container ID
+            instance_id: Instance ID
+            runner: SandboxRunner instance
+            project_path: Path to project directory
+        """
+        super().__init__()
+        # Add all built-in tools
+        self.add_tool(ExecuteCommandTool(container_manager, container_id))
+        self.add_tool(CheckoutCommitTool(container_manager, container_id, instance_id, runner))
+        self.add_tool(GitCommitTool(container_manager, container_id, instance_id, runner))
+        self.add_tool(ReadFileTool(instance_id, runner))
+        self.add_tool(WriteFileTool(instance_id, runner))
+        self.add_tool(EditFileTool(instance_id, runner))
+        self.add_tool(GlobTool(instance_id, runner))
+        self.add_tool(GrepTool(instance_id, runner))
+        self.add_tool(ReadProjectFileTool(project_path))
+        self.add_tool(ListProjectDirectoryTool(project_path))
 
 
 class RunSubcommand(Subcommand):
@@ -105,9 +146,18 @@ class RunSubcommand(Subcommand):
                 keep_branches=list(keep_branch) if keep_branch else [],
                 network=network,
             )
+            # Create MCP server with all built-in tools
+            mcp_server = RunMCPServer(
+                runner.container_manager,
+                runner.container_id,
+                runner.instance_id,
+                runner,
+                project_dir,
+            )
             result = runner.run_prompt(
                 prompt=prompt,
                 output_schema=output_schema,
+                mcp_server=mcp_server,
                 verbose=verbose,
             )
         finally:
