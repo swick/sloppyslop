@@ -26,20 +26,26 @@ class Subcommand(ABC):
                 )
                 return command
 
-            def execute(self, project_dir, run_sandbox, **kwargs):
+            def execute(self, project_dir, runner, **kwargs):
                 # Common options available in kwargs:
-                # - network: from --network (already configured in run_sandbox)
-                # - verbose: from --verbose (already configured in run_sandbox)
+                # - network: from --network
+                # - verbose: from --verbose
 
                 depth = kwargs.get("depth", 3)
+                network = kwargs["network"]
+                verbose = kwargs["verbose"]
 
-                # run_sandbox accepts optional keep_branches parameter
-                result = run_sandbox(
-                    prompt=f"Analyze this project with depth {depth}",
-                    output_schema={"type": "object", ...},
-                    keep_branches=["my-branch"],  # optional, defaults to []
-                )
-                click.echo(f"Analysis complete: {result}")
+                # Setup sandbox, run prompt, and cleanup
+                try:
+                    runner.setup(keep_branches=["my-branch"], network=network)
+                    result = runner.run_prompt(
+                        prompt=f"Analyze this project with depth {depth}",
+                        output_schema={"type": "object", ...},
+                        verbose=verbose,
+                    )
+                    click.echo(f"Analysis complete: {result}")
+                finally:
+                    runner.cleanup()
     """
 
     name: str = None  # Subcommand name (e.g., "analyze")
@@ -62,7 +68,7 @@ class Subcommand(ABC):
     def execute(
         self,
         project_dir: Path,
-        run_sandbox: Callable,
+        runner: Any,  # SandboxRunner type
         **kwargs
     ) -> Any:
         """
@@ -70,18 +76,22 @@ class Subcommand(ABC):
 
         Args:
             project_dir: Project directory path
-            run_sandbox: Function to run the sandbox, pre-configured with network and verbose.
-                Signature: run_sandbox(prompt: str, output_schema: dict,
-                                      keep_branches: list = None) -> dict
-                The network and verbose are pre-configured from CLI.
-                Subcommands can specify keep_branches as needed.
+            runner: SandboxRunner instance with methods:
+                - setup(keep_branches: list = None, network: str = None): Setup environment
+                - run_prompt(prompt: str, output_schema: dict, verbose: bool = False,
+                           custom_tools: list = None) -> dict: Execute LLM prompt
+                - cleanup(): Cleanup container and worktrees
             **kwargs: Arguments from CLI including:
-                - network: Network mode from --network (pre-configured in run_sandbox)
-                - verbose: Verbose flag from --verbose (pre-configured in run_sandbox)
+                - network: Network mode from --network
+                - verbose: Verbose flag from --verbose
                 - Any custom arguments added by add_arguments()
 
         Returns:
             Any value (typically None or a result dict)
+
+        Note:
+            Best practice is to call runner.setup(), runner.run_prompt(),
+            and runner.cleanup() in a try/finally block to ensure cleanup.
         """
         pass
 

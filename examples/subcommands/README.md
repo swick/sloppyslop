@@ -116,9 +116,11 @@ class MySubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir: Path, run_sandbox, **kwargs):
+    def execute(self, project_dir: Path, runner, **kwargs):
         """Execute your workflow."""
         my_arg = kwargs["my_arg"]
+        network = kwargs["network"]
+        verbose = kwargs["verbose"]
 
         # Define your prompt and schema
         prompt = f"Do something with {my_arg}"
@@ -129,30 +131,45 @@ class MySubcommand(Subcommand):
             }
         }
 
-        # Run the sandbox (network and verbose pre-configured from CLI)
-        # Optionally specify keep_branches
-        result = run_sandbox(
-            prompt=prompt,
-            output_schema=schema,
-            keep_branches=["my-branch"],  # optional, defaults to []
-        )
+        # Setup and run the sandbox
+        try:
+            runner.setup(
+                keep_branches=["my-branch"],  # optional, defaults to []
+                network=network,
+            )
 
-        # Process the result
-        click.echo(f"Result: {result['result']}")
+            result = runner.run_prompt(
+                prompt=prompt,
+                output_schema=schema,
+                verbose=verbose,
+                custom_tools=None,  # optional, defaults to None
+            )
+
+            # Process the result
+            click.echo(f"Result: {result['result']}")
+        finally:
+            # Cleanup is called automatically, but you can call it explicitly
+            runner.cleanup()
 ```
 
 3. Available in `**kwargs`:
-   - `network`: Network mode from `--network` (pre-configured in `run_sandbox`)
-   - `verbose`: Boolean from `--verbose` (pre-configured in `run_sandbox`)
+   - `network`: Network mode from `--network`
+   - `verbose`: Boolean from `--verbose`
    - Any custom arguments you added in `add_arguments()`
 
-4. The `run_sandbox` function:
-   - Pre-configured with `network` and `verbose` from CLI options
-   - Signature: `run_sandbox(prompt: str, output_schema: dict, keep_branches: list = None, custom_tools: list = None) -> dict`
-   - Subcommands can specify `keep_branches` as needed
-   - Subcommands can provide `custom_tools` (list of MCP tool instances) to extend available tools
-   - The LLM can use `checkout_commit` tool to work with any commit/branch
-   - Returns the structured output from the LLM
+4. The `runner` parameter (SandboxRunner instance):
+   - **`runner.setup(keep_branches: list = None, network: str = None)`**: Setup the sandbox environment
+     - Creates worktrees directory
+     - Builds/gets container image
+     - Starts the container
+   - **`runner.run_prompt(prompt: str, output_schema: dict, verbose: bool = False, custom_tools: list = None) -> dict`**: Execute LLM prompt
+     - Must call `setup()` first
+     - Returns structured output from LLM
+     - Can provide custom MCP tools to extend available tools
+   - **`runner.cleanup()`**: Cleanup container and worktrees
+     - Called automatically by destructor
+     - Safe to call multiple times
+     - Best practice: call in `finally` block
 
 ## Creating Custom MCP Tools
 
@@ -226,19 +243,24 @@ class GetPullRequestInfoTool(MCPTool):
 from llm_sandbox.mcp_tools import MCPTool
 
 class MySubcommand(Subcommand):
-    def execute(self, project_dir: Path, run_sandbox, **kwargs):
+    def execute(self, project_dir: Path, runner, **kwargs):
         # Create custom tool instances
         custom_tool = GetPullRequestInfoTool(
             github_token=kwargs["token"],
             repo="owner/repo",
         )
 
-        # Pass custom tools to run_sandbox
-        result = run_sandbox(
-            prompt="Fetch PR #123 and analyze it",
-            output_schema={"type": "object", "properties": {...}},
-            custom_tools=[custom_tool],  # List of custom tools
-        )
+        # Setup, run with custom tools, and cleanup
+        try:
+            runner.setup(network=kwargs["network"])
+            result = runner.run_prompt(
+                prompt="Fetch PR #123 and analyze it",
+                output_schema={"type": "object", "properties": {...}},
+                verbose=kwargs["verbose"],
+                custom_tools=[custom_tool],  # List of custom tools
+            )
+        finally:
+            runner.cleanup()
 ```
 
 ### Custom Tool Guidelines

@@ -270,10 +270,12 @@ class PRReviewSubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir: Path, run_sandbox, **kwargs):
+    def execute(self, project_dir: Path, runner, **kwargs):
         """Execute multi-agent PR review workflow."""
         pr_number = kwargs["pr"]
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
+        network = kwargs["network"]
+        verbose = kwargs["verbose"]
 
         if not token:
             click.echo(
@@ -450,11 +452,16 @@ Return:
         }
 
         # Run single agent with custom tools
-        result = run_sandbox(
-            prompt=agent_prompt,
-            output_schema=agent_schema,
-            custom_tools=[pr_diff_tool, pr_commits_tool],
-        )
+        try:
+            runner.setup(network=network)
+            result = runner.run_prompt(
+                prompt=agent_prompt,
+                output_schema=agent_schema,
+                verbose=verbose,
+                custom_tools=[pr_diff_tool, pr_commits_tool],
+            )
+        finally:
+            runner.cleanup()
 
         # Show results
         click.echo(f"\n{'='*60}")

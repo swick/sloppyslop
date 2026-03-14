@@ -163,10 +163,9 @@ class SandboxRunner:
             if branch_name in self.created_worktrees:
                 try:
                     click.echo(f"Keeping branch: {full_branch_name} → {branch_name}")
-                    # Rename branch by creating new branch at same commit and deleting old one
-                    # Use -f to force overwrite if target branch already exists
-                    self.git_ops.repo.git.branch("-f", branch_name, full_branch_name)
-                    self.git_ops.delete_branch(full_branch_name)
+                    # Use git branch -M (move/rename with force) to properly rename the branch
+                    # This handles refs correctly, including branches with slashes in the name
+                    self.git_ops.repo.git.branch("-M", full_branch_name, branch_name)
                 except Exception as e:
                     click.echo(f"Warning: Failed to rename branch {full_branch_name}: {e}")
             else:

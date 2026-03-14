@@ -55,7 +55,7 @@ class RunSubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir: Path, run_sandbox, **kwargs):
+    def execute(self, project_dir: Path, runner, **kwargs):
         """
         Execute the run command.
         """
@@ -64,6 +64,8 @@ class RunSubcommand(Subcommand):
         prompt_file = kwargs.get("prompt_file")
         schema = kwargs.get("schema")
         schema_file = kwargs.get("schema_file")
+        network = kwargs["network"]
+        verbose = kwargs["verbose"]
 
         # Validate prompt input
         if not prompt and not prompt_file:
@@ -99,11 +101,18 @@ class RunSubcommand(Subcommand):
                 output_schema = json.load(f)
 
         # Run the sandbox
-        result = run_sandbox(
-            prompt=prompt,
-            output_schema=output_schema,
-            keep_branches=list(keep_branch) if keep_branch else [],
-        )
+        try:
+            runner.setup(
+                keep_branches=list(keep_branch) if keep_branch else [],
+                network=network,
+            )
+            result = runner.run_prompt(
+                prompt=prompt,
+                output_schema=output_schema,
+                verbose=verbose,
+            )
+        finally:
+            runner.cleanup()
 
         # Output result as JSON
         click.echo("\n" + "=" * 60)

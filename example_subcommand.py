@@ -51,13 +51,13 @@ class AnalyzeSubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir, run_sandbox, **kwargs):
+    def execute(self, project_dir, runner, **kwargs):
         """
         Execute the analysis.
 
         Args:
             project_dir: Project directory path
-            run_sandbox: Function to run the sandbox (pre-configured with network and verbose)
+            runner: SandboxRunner instance with setup(), run_prompt(), and cleanup() methods
             **kwargs: Additional arguments including:
                 - network: Network mode from --network option (common option)
                 - verbose: Verbose flag from --verbose option (common option)
@@ -66,6 +66,8 @@ class AnalyzeSubcommand(Subcommand):
         """
         depth = kwargs.get("depth", 3)
         output_file = kwargs.get("output")
+        network = kwargs["network"]
+        verbose = kwargs["verbose"]
 
         click.echo(f"Analyzing project at {project_dir} (depth={depth})")
 
@@ -126,11 +128,18 @@ Provide specific file locations and line numbers where possible."""
         # Run the sandbox
         # Note: The LLM can use checkout_commit tool to work with any commit/branch
         click.echo("Running analysis in isolated container...")
-        result = run_sandbox(
-            prompt=prompt,
-            output_schema=output_schema,
-            keep_branches=[],  # Optional: specify branches to keep
-        )
+        try:
+            runner.setup(
+                keep_branches=[],  # Optional: specify branches to keep
+                network=network,
+            )
+            result = runner.run_prompt(
+                prompt=prompt,
+                output_schema=output_schema,
+                verbose=verbose,
+            )
+        finally:
+            runner.cleanup()
 
         # Display results
         click.echo("\n" + "=" * 60)

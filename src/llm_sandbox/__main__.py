@@ -296,77 +296,6 @@ def cleanup():
     click.echo("\n✓ Cleanup complete")
 
 
-def create_run_sandbox_function(
-    project_dir: Path,
-    network: Optional[str],
-    verbose: bool,
-):
-    """
-    Create a run_sandbox function for use by subcommands.
-
-    This function is pre-configured with common options from the command line.
-
-    Args:
-        project_dir: Project directory
-        network: Network mode override
-        verbose: Enable verbose output
-
-    Returns:
-        Function that can run the sandbox
-    """
-    # Load configuration (project overrides global)
-    config = load_config(project_dir)
-
-    # Initialize runner
-    runner = SandboxRunner(project_dir, config)
-
-    def run_sandbox(
-        prompt: str,
-        output_schema: dict,
-        keep_branches: Optional[list] = None,
-        custom_tools: Optional[list] = None,
-    ) -> dict:
-        """
-        Run the sandbox and return structured output.
-
-        Args:
-            prompt: User prompt for LLM
-            output_schema: JSON schema for structured output
-            keep_branches: List of branch names to keep (default: [])
-            custom_tools: Optional list of custom MCP tools to add (default: None)
-
-        Returns:
-            Structured output from LLM
-
-        Note:
-            The network and verbose are already configured from command line options.
-            The keep_branches and custom_tools can be specified by subcommands.
-        """
-
-        try:
-            # Setup the sandbox
-            runner.setup(
-                keep_branches=keep_branches,
-                network=network,
-            )
-
-            # Run the prompt
-            result = runner.run_prompt(
-                prompt,
-                output_schema,
-                verbose,
-                custom_tools,
-            )
-
-            return result
-
-        finally:
-            # Always cleanup
-            runner.cleanup()
-
-    return run_sandbox
-
-
 def make_subcommand_callback(subcommand_instance):
     """
     Create a callback function for a subcommand.
@@ -378,18 +307,17 @@ def make_subcommand_callback(subcommand_instance):
         Click callback function
     """
     def callback(project_dir, network, verbose, **kwargs):
-        # Create run_sandbox function pre-configured with common options
-        run_sandbox = create_run_sandbox_function(
-            project_dir,
-            network,
-            verbose,
-        )
+        # Load configuration (project overrides global)
+        config = load_config(project_dir)
+
+        # Create SandboxRunner instance
+        runner = SandboxRunner(project_dir, config)
 
         # Execute the subcommand
         try:
             subcommand_instance.execute(
                 project_dir=project_dir,
-                run_sandbox=run_sandbox,
+                runner=runner,
                 network=network,
                 verbose=verbose,
                 **kwargs
