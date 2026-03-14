@@ -2,15 +2,16 @@
 
 This subcommand demonstrates a single-agent workflow with custom MCP tools:
 1. Fetches PR information from GitHub API
-2. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
-3. Agent reads project documentation (AGENTS.md, CLAUDE.md) if available
-4. Agent uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
-5. OR agent uses git history (git rev-list --ancestry-path) to identify commits in the PR
-6. Agent examines each commit (git show) to understand all changes
-7. Agent finds review instruction files in review/ and docs/review/ folders
-8. Agent reads ALL review instruction files and applies criteria to ALL PR changes
-9. Agent generates suggestions based on all criteria
-10. User approves suggestions and posts to GitHub
+2. Fetches PR head from GitHub into branch (fetch/pr-{id}/{head-branch} pattern)
+3. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
+4. Agent reads project documentation (AGENTS.md, CLAUDE.md) if available
+5. Agent uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
+6. OR agent uses git history (git rev-list --ancestry-path) to identify commits in the PR
+7. Agent examines each commit (git show) to understand all changes
+8. Agent finds review instruction files in review/ and docs/review/ folders
+9. Agent reads ALL review instruction files and applies criteria to ALL PR changes
+10. Agent generates suggestions based on all criteria
+11. User approves suggestions and posts to GitHub
 
 Custom MCP Tools:
 - get_pull_request_commits: Fetches commit list from GitHub API
@@ -152,6 +153,7 @@ class GitHubClient:
             "base_ref": data["base"]["ref"],
             "author": data["user"]["login"],
             "head_sha": data["head"]["sha"],
+            "base_sha": data["base"]["sha"],
         }
 
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> None:
@@ -311,19 +313,39 @@ class PRReviewSubcommand(Subcommand):
         try:
             pr_info = self.github.get_pull_request(repo_name, pr_number)
             click.echo(f"  PR Title: {pr_info['title']}")
-            click.echo(f"  Branch: {pr_info['head_ref']}")
-            click.echo(f"  Base: {pr_info['base_ref']}")
+            click.echo(f"  Branch: {pr_info['head_ref']} ({pr_info['head_sha'][:7]})")
+            click.echo(f"  Base: {pr_info['base_ref']} ({pr_info['base_sha'][:7]})")
             click.echo(f"  Author: {pr_info['author']}")
-            click.echo(f"  Head SHA: {pr_info['head_sha']}")
         except Exception as e:
             click.echo(f"Error fetching PR info: {e}", err=True)
             sys.exit(1)
 
-        # Step 3: Create custom tools for GitHub PR data
+        # Step 3: Fetch PR head from GitHub into local branch
+        click.echo("\nFetching PR commits...")
+
+        # Create branch name with fetch/pr-{id}/{branch} pattern
+        pr_head_branch = f"fetch/pr-{pr_number}/{pr_info['head_ref']}"
+
+        try:
+            # Fetch the PR head (this will also fetch the necessary base commits)
+            # GitHub exposes PRs at refs/pull/<number>/head
+            subprocess.run(
+                ["git", "fetch", "origin", f"pull/{pr_number}/head:{pr_head_branch}"],
+                cwd=project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            click.echo(f"  Fetched PR head: {pr_head_branch}")
+        except subprocess.CalledProcessError as e:
+            click.echo(f"Error fetching PR head: {e.stderr}", err=True)
+            sys.exit(1)
+
+        # Step 4: Create custom tools for GitHub PR data
         pr_diff_tool = GetPullRequestDiffTool(self.github, repo_name, pr_number)
         pr_commits_tool = GetPullRequestCommitsTool(self.github, repo_name, pr_number)
 
-        # Step 4: Single agent does everything
+        # Step 5: Single agent does everything
         click.echo("\nStarting review agent...")
 
         agent_prompt = f"""You are a code review agent for PR #{pr_number}.
@@ -466,15 +488,17 @@ Return:
 
             # Pre-checkout worktrees for PR head and base
             click.echo("\nChecking out worktrees...")
-            click.echo(f"  Creating worktree 'pr-head' from {pr_info['head_ref']}...")
+            click.echo(f"  Creating worktree 'pr-head' from {pr_head_branch}...")
             head_result = checkout_tool.execute({
-                "commit": pr_info['head_ref'],
+                "commit": pr_head_branch,
                 "worktree_name": "pr-head",
             })
             if not head_result["success"]:
                 click.echo(f"Error: {head_result['error']}", err=True)
                 sys.exit(1)
 
+            # Use the base ref directly (like "main" or "master")
+            # The base commit is already available from the PR head fetch
             click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
             base_result = checkout_tool.execute({
                 "commit": pr_info['base_ref'],

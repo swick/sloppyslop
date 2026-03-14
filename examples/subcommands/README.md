@@ -31,14 +31,15 @@ To use an example subcommand:
 
 A single-agent GitHub PR review workflow that:
 1. Fetches PR information from GitHub API
-2. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
-3. Agent reads project documentation (AGENTS.md, CLAUDE.md)
-4. Agent identifies commits and changes in the PR using git history or GitHub API
-5. Agent finds and reads ALL review instruction files from `review/` and `docs/review/` folders
-6. Agent applies all review criteria to ALL PR changes
-7. Agent generates suggestions based on all criteria
-8. User approves suggestions interactively
-9. Posts accepted suggestions as **inline review comments** directly on the relevant lines
+2. Fetches PR head from GitHub into branch (`fetch/pr-{id}/{head-branch}` pattern)
+3. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
+4. Agent reads project documentation (AGENTS.md, CLAUDE.md)
+5. Agent identifies commits and changes in the PR using git history or GitHub API
+6. Agent finds and reads ALL review instruction files from `review/` and `docs/review/` folders
+7. Agent applies all review criteria to ALL PR changes
+8. Agent generates suggestions based on all criteria
+9. User approves suggestions interactively
+10. Posts accepted suggestions as **inline review comments** directly on the relevant lines
 
 **Important:**
 - The `review/` and `docs/review/` folders contain **review instructions** (how to review), not the files to review
@@ -65,7 +66,8 @@ llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
 **Single-Agent Workflow:**
 1. **Pre-setup (Python code):**
    - Fetches PR information from GitHub API
-   - Pre-checks out worktrees for PR head and base branches (pr-head and pr-base)
+   - Fetches PR head into local branch (`fetch/pr-{id}/{head-branch}` pattern)
+   - Pre-checks out worktrees for PR head and base commits (pr-head from fetch branch, pr-base from base ref)
 
 2. **Review agent performs all tasks:**
    - Uses pre-checked-out worktrees (pr-head and pr-base)
