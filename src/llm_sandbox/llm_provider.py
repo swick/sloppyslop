@@ -60,6 +60,11 @@ def extract_json_from_text(text: str) -> str:
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
+    def __init__(self):
+        """Initialize LLM provider with conversation tracking."""
+        self.conversation_history: List[Dict[str, Any]] = []
+        self.verbose: bool = False
+
     base_system_prompt = """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
 
 The container has two mounts:
@@ -124,6 +129,96 @@ Use the tools available to explore the project, run commands, and gather informa
         parts.append(self._generate_tools_description(mcp_server))
 
         return "\n\n".join(parts)
+
+    def _clear_conversation(self):
+        """Clear conversation history."""
+        self.conversation_history = []
+
+    def _add_user_message(self, content: Any):
+        """Add user message to conversation history."""
+        self.conversation_history.append({
+            "role": "user",
+            "content": content,
+        })
+
+    def _add_assistant_message(self, content: Any):
+        """Add assistant message to conversation history."""
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": content,
+        })
+
+    def _log_message(self, prefix: str, message: Dict[str, Any]):
+        """
+        Log a message if verbose mode is enabled.
+
+        Args:
+            prefix: Prefix for the log message (e.g., "→", "←")
+            message: Message to log
+        """
+        if not self.verbose:
+            return
+
+        role = message.get("role", "unknown")
+        content = message.get("content")
+
+        click.echo(f"\n{prefix} {role.capitalize()} message:")
+        click.echo(f"{'-'*60}")
+
+        # Handle different content types
+        if isinstance(content, str):
+            # Simple text content
+            if len(content) > 500:
+                click.echo(f"{content[:500]}...")
+                click.echo(f"[{len(content)} characters total]")
+            else:
+                click.echo(content)
+        elif isinstance(content, list):
+            # List of content blocks (for multi-modal messages)
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "unknown")
+                    if block_type == "text":
+                        text = block.get("text", "")
+                        click.echo(f"[Text block]")
+                        if len(text) > 500:
+                            click.echo(f"{text[:500]}...")
+                            click.echo(f"[{len(text)} characters total]")
+                        else:
+                            click.echo(text)
+                    elif block_type == "tool_use":
+                        click.echo(f"[Tool use: {block.get('name')}]")
+                        click.echo(f"ID: {block.get('id')}")
+                        click.echo(f"Input: {json.dumps(block.get('input', {}), indent=2)}")
+                    elif block_type == "tool_result":
+                        click.echo(f"[Tool result for: {block.get('tool_use_id')}]")
+                        result_content = block.get("content", "")
+                        if len(result_content) > 500:
+                            click.echo(f"{result_content[:500]}...")
+                            click.echo(f"[{len(result_content)} characters total]")
+                        else:
+                            click.echo(result_content)
+                    else:
+                        click.echo(f"[{block_type}]")
+                        click.echo(json.dumps(block, indent=2))
+                    click.echo()
+                else:
+                    # Handle anthropic content blocks (objects with .type attribute)
+                    if hasattr(block, 'type'):
+                        if block.type == "text":
+                            click.echo(f"[Text block]")
+                            if len(block.text) > 500:
+                                click.echo(f"{block.text[:500]}...")
+                                click.echo(f"[{len(block.text)} characters total]")
+                            else:
+                                click.echo(block.text)
+                        elif block.type == "tool_use":
+                            click.echo(f"[Tool use: {block.name}]")
+                            click.echo(f"ID: {block.id}")
+                            click.echo(f"Input: {json.dumps(block.input, indent=2)}")
+                        click.echo()
+
+        click.echo(f"{'-'*60}")
 
     @abstractmethod
     def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
@@ -202,6 +297,7 @@ class ClaudeProvider(LLMProvider):
         Raises:
             ValueError: If required configuration is missing
         """
+        super().__init__()
         import os
 
         self.model = provider_config.model
@@ -290,6 +386,10 @@ class ClaudeProvider(LLMProvider):
         Returns:
             Structured output matching schema
         """
+        # Set verbose mode and clear conversation history
+        self.verbose = verbose
+        self._clear_conversation()
+
         # Get available tools
         tools = mcp_server.get_tools()
         tool_defs = [tool.to_dict() for tool in tools]
@@ -312,9 +412,10 @@ Return ONLY the JSON object, no other text."""
 
 When you're done analyzing, provide your final answer in the structured JSON format."""
 
-        messages = [{"role": "user", "content": prompt}]
+        # Add initial user message
+        self._add_user_message(prompt)
 
-        if verbose:
+        if self.verbose:
             click.echo(f"\n{'='*60}")
             click.echo(f"Initial user prompt:")
             click.echo(f"{'='*60}")
@@ -330,7 +431,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
         while iteration < max_iterations:
             iteration += 1
 
-            if verbose:
+            if self.verbose:
                 click.echo(f"\n{'='*60}")
                 click.echo(f"Iteration {iteration}/{max_iterations}")
                 click.echo(f"{'='*60}")
@@ -342,7 +443,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
                     model=self.model,
                     max_tokens=8000,
                     system=system_prompt,
-                    messages=messages,
+                    messages=self.conversation_history,
                     tools=tool_defs,
                 )
             else:
@@ -351,7 +452,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
                     model=self.model,
                     max_tokens=8000,
                     system=system_prompt,
-                    messages=messages,
+                    messages=self.conversation_history,
                     tools=tool_defs,
                     output_config={
                         "format": {
@@ -361,37 +462,18 @@ When you're done analyzing, provide your final answer in the structured JSON for
                     },
                 )
 
-            # Add assistant response to messages
-            assistant_message = {
-                "role": "assistant",
-                "content": response.content,
-            }
-            messages.append(assistant_message)
+            # Add assistant response to conversation
+            self._add_assistant_message(response.content)
 
-            if verbose:
+            if self.verbose:
                 click.echo(f"\nResponse stop reason: {response.stop_reason}")
                 # Count content blocks by type
                 text_blocks = sum(1 for b in response.content if b.type == "text")
                 tool_blocks = sum(1 for b in response.content if b.type == "tool_use")
                 click.echo(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
-                click.echo(f"\n→ Assistant message:")
-                click.echo(f"{'-'*60}")
-                # Print each content block
-                for block in response.content:
-                    if block.type == "text":
-                        click.echo(f"[Text block]")
-                        if len(block.text) > 500:
-                            click.echo(f"{block.text[:500]}...")
-                            click.echo(f"[{len(block.text)} characters total]")
-                        else:
-                            click.echo(block.text)
-                    elif block.type == "tool_use":
-                        click.echo(f"[Tool use: {block.name}]")
-                        click.echo(f"ID: {block.id}")
-                        click.echo(f"Input: {json.dumps(block.input, indent=2)}")
-                    click.echo()
-                click.echo(f"{'-'*60}")
-                click.echo(f"Total messages in conversation: {len(messages)}")
+
+            # Log assistant message
+            self._log_message("→", self.conversation_history[-1])
 
             # Check if we have a final answer (text response with JSON)
             if response.stop_reason == "end_turn":
@@ -399,17 +481,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 for block in response.content:
                     if block.type == "text":
                         text = block.text.strip()
-
-                        if verbose:
-                            click.echo(f"\nAssistant response (text):")
-                            click.echo(f"{'-'*60}")
-                            # Truncate if very long
-                            if len(text) > 500:
-                                click.echo(f"{text[:500]}...")
-                                click.echo(f"[{len(text)} characters total]")
-                            else:
-                                click.echo(text)
-                            click.echo(f"{'-'*60}")
 
                         # For Vertex AI, extract JSON from response (handles markdown code blocks, etc.)
                         # Anthropic API with output_config should guarantee valid JSON
@@ -420,7 +491,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                         try:
                             result = json.loads(json_text)
-                            if verbose:
+                            if self.verbose:
                                 click.echo(f"\n✓ Successfully parsed JSON output")
                             return result
                         except json.JSONDecodeError as e:
@@ -454,7 +525,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                 for block in response.content:
                     if block.type == "tool_use":
-                        if verbose:
+                        if self.verbose:
                             click.echo(f"\n→ Tool call: {block.name}")
                             click.echo(f"  Input: {json.dumps(block.input, indent=2)}")
 
@@ -464,7 +535,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
                             block.input,
                         )
 
-                        if verbose:
+                        if self.verbose:
                             click.echo(f"← Tool result:")
                             result_str = json.dumps(result, indent=2)
                             # Truncate if very long
@@ -481,27 +552,13 @@ When you're done analyzing, provide your final answer in the structured JSON for
                             "content": json.dumps(result),
                         })
 
-                # Add tool results to messages
-                tool_results_message = {
-                    "role": "user",
-                    "content": tool_results,
-                }
-                messages.append(tool_results_message)
+                # Add tool results to conversation
+                self._add_user_message(tool_results)
 
-                if verbose:
-                    click.echo(f"\n→ Tool results message:")
-                    click.echo(f"{'-'*60}")
-                    for tr in tool_results:
-                        click.echo(f"[Tool result for: {tr['tool_use_id']}]")
-                        content = tr['content']
-                        if len(content) > 500:
-                            click.echo(f"{content[:500]}...")
-                            click.echo(f"[{len(content)} characters total]")
-                        else:
-                            click.echo(content)
-                        click.echo()
-                    click.echo(f"{'-'*60}")
-                    click.echo(f"Total messages in conversation: {len(messages)}")
+                # Log tool results
+                if self.verbose:
+                    click.echo(f"\nTotal messages in conversation: {len(self.conversation_history)}")
+                self._log_message("←", self.conversation_history[-1])
 
                 continue
 
