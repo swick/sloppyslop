@@ -13,7 +13,7 @@ class Image:
     """Manages container image lifecycle - checking, building, and rebuilding."""
 
     # Default image to use when no image or build config is specified
-    DEFAULT_IMAGE = "registry.fedoraproject.org/fedora-toolbox"
+    DEFAULT_IMAGE = "registry.fedoraproject.org/fedora-toolbox:44"
 
     def __init__(
         self,

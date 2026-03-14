@@ -159,6 +159,11 @@ class ContainerManager:
         Returns:
             Container ID
         """
+        # Check if image exists, pull if not
+        if not self.image_exists(image_id):
+            click.echo(f"Image not found locally: {image_id}")
+            self.pull_image(image_id)
+
         config = {
             "image": image_id,
             "command": ["sleep", "infinity"],
@@ -246,6 +251,40 @@ class ContainerManager:
             return response.status_code == 204
         except Exception:
             return False
+
+    def pull_image(self, reference: str) -> None:
+        """
+        Pull container image from registry.
+
+        Args:
+            reference: Image reference (e.g., "docker.io/library/python:3.11")
+        """
+        try:
+            click.echo(f"Pulling image: {reference}")
+            response = self.session.post(
+                f"{self.base_url}/v4.0.0/libpod/images/pull",
+                params={"reference": reference},
+                stream=True,
+            )
+            response.raise_for_status()
+
+            # Stream progress output
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if 'stream' in data:
+                            click.echo(data['stream'].rstrip())
+                        elif 'id' in data:
+                            # Show progress for layers
+                            click.echo(f"{data.get('id', '')}: {data.get('status', '')}")
+                    except json.JSONDecodeError:
+                        continue
+
+            click.echo(f"✓ Image pulled: {reference}")
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to pull image: {e}") from e
 
     def get_image_created_time(self, tag: str) -> float:
         """

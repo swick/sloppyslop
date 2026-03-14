@@ -57,6 +57,8 @@ from llm_sandbox.mcp_tools import (
     GrepTool,
     ReadProjectFileTool,
     ListProjectDirectoryTool,
+    SpawnAgentTool,
+    WaitForAgentsTool,
 )
 from llm_sandbox.subcommand import Subcommand
 
@@ -263,6 +265,144 @@ class GitHubClient:
         return commits
 
 
+class RecordReviewFeedbackTool(MCPTool):
+    """Tool for recording review feedback during PR analysis."""
+
+    def __init__(self, runner: "SandboxRunner"):
+        """
+        Initialize record review feedback tool.
+
+        Args:
+            runner: SandboxRunner instance
+        """
+        super().__init__(
+            name="record_review_feedback",
+            description="Record a review suggestion or feedback item. Use this to incrementally build up review feedback as you analyze the PR. Later you can retrieve all feedback with get_review_feedback.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "File path relative to repository root",
+                    },
+                    "line_start": {
+                        "type": "integer",
+                        "description": "Starting line number (1-indexed)",
+                    },
+                    "line_end": {
+                        "type": "integer",
+                        "description": "Ending line number (1-indexed)",
+                    },
+                    "current_code": {
+                        "type": "string",
+                        "description": "Current code snippet that needs review",
+                    },
+                    "suggested_code": {
+                        "type": "string",
+                        "description": "Suggested improved code (can be empty if just a comment)",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Explanation of why this change is suggested",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["bug", "performance", "security", "style", "refactor", "documentation", "best-practice"],
+                        "description": "Category of the feedback",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low", "info"],
+                        "description": "Severity level (optional, defaults to 'medium')",
+                        "default": "medium",
+                    },
+                },
+                "required": ["file", "line_start", "line_end", "reason", "category"],
+            },
+        )
+        self.runner = runner
+
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Record review feedback."""
+        feedback_item = {
+            "file": arguments["file"],
+            "line_start": arguments["line_start"],
+            "line_end": arguments["line_end"],
+            "current_code": arguments.get("current_code", ""),
+            "suggested_code": arguments.get("suggested_code", ""),
+            "reason": arguments["reason"],
+            "category": arguments["category"],
+            "severity": arguments.get("severity", "medium"),
+        }
+
+        self.runner._review_feedback.append(feedback_item)
+
+        return {
+            "success": True,
+            "message": f"Recorded feedback for {arguments['file']}:{arguments['line_start']}-{arguments['line_end']}",
+            "total_feedback_items": len(self.runner._review_feedback),
+        }
+
+
+class GetReviewFeedbackTool(MCPTool):
+    """Tool for retrieving recorded review feedback."""
+
+    def __init__(self, runner: "SandboxRunner"):
+        """
+        Initialize get review feedback tool.
+
+        Args:
+            runner: SandboxRunner instance
+        """
+        super().__init__(
+            name="get_review_feedback",
+            description="Retrieve all recorded review feedback. Returns a list of all feedback items recorded so far.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Optional: filter by file path",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional: filter by category",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "description": "Optional: filter by severity",
+                    },
+                },
+            },
+        )
+        self.runner = runner
+
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve review feedback."""
+        feedback = self.runner._review_feedback
+
+        # Apply filters if provided
+        file_filter = arguments.get("file")
+        category_filter = arguments.get("category")
+        severity_filter = arguments.get("severity")
+
+        if file_filter:
+            feedback = [f for f in feedback if f["file"] == file_filter]
+
+        if category_filter:
+            feedback = [f for f in feedback if f["category"] == category_filter]
+
+        if severity_filter:
+            feedback = [f for f in feedback if f["severity"] == severity_filter]
+
+        return {
+            "success": True,
+            "feedback": feedback,
+            "count": len(feedback),
+            "total_recorded": len(self.runner._review_feedback),
+        }
+
+
 class PRReviewMCPServer(MCPServer):
     """MCP Server for PR review with all built-in tools plus GitHub API tools."""
 
@@ -288,6 +428,11 @@ class PRReviewMCPServer(MCPServer):
         self.add_tool(GrepTool(runner))
         self.add_tool(ReadProjectFileTool(runner))
         self.add_tool(ListProjectDirectoryTool(runner))
+        self.add_tool(SpawnAgentTool(runner))
+        self.add_tool(WaitForAgentsTool(runner))
+        # Add PR review specific tools
+        self.add_tool(RecordReviewFeedbackTool(runner))
+        self.add_tool(GetReviewFeedbackTool(runner))
         # Add custom GitHub API tools
         self.add_tool(GetPullRequestDiffTool(github_client, repo, pr_number))
         self.add_tool(GetPullRequestCommitsTool(github_client, repo, pr_number))
@@ -406,20 +551,17 @@ Your tasks:
 1. Read project documentation from pr-head worktree (if available):
    - Try to read AGENTS.md (using read_file)
    - Try to read CLAUDE.md (using read_file)
+   - These files may contain information about where review instruction files are located
    - If these don't exist, that's fine - note that in your summary
+   - Read EACH instruction file you find using read_file(worktree="pr-head", path="...")
+   - Understand all the review criteria from all instruction files
+   - If no review instruction files exist, use general best practices
 
 2. Identify commits and changes in the PR:
    - You can use get_pull_request_commits() to get the list of commits from GitHub API
    - You can use get_pull_request_diff() to get the full PR diff from GitHub API
    - For each commit, use git show to examine what changed (files, diffs, commit messages)
    - Build a summary of all changes across all commits in the PR
-
-3. Find and read review instruction files from pr-head worktree:
-   - Use glob to find files in: review/ directory
-   - Use glob to find files in: docs/review/ directory
-   - Read EACH instruction file using read_file(worktree="pr-head", path="...")
-   - Understand all the review criteria from all instruction files
-   - If no review instruction files exist, use general best practices
 
 4. Review ALL the changes in the PR according to ALL the criteria:
    - Apply all criteria from all instruction files

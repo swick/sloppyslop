@@ -66,6 +66,9 @@ class SandboxRunner:
         self._worktrees_lock: Optional[asyncio.Lock] = None
         self._background_agents: Dict[str, asyncio.Task] = {}  # Track background agent tasks
 
+        # Review feedback storage (for PR review workflow)
+        self._review_feedback: List[Dict[str, Any]] = []
+
         # Internal state
         self._keep_branches: List[str] = []
         self._network_mode: str = "none"
@@ -445,6 +448,17 @@ Use the tools available to explore the project, run commands, and gather informa
             return
 
         self._cleaned_up = True
+
+        # Cancel any background agents
+        if self._background_agents:
+            click.echo(f"Canceling {len(self._background_agents)} background agent(s)...")
+            for agent_id, task in self._background_agents.items():
+                if not task.done():
+                    task.cancel()
+            self._background_agents.clear()
+
+        # Clear review feedback
+        self._review_feedback.clear()
 
         # Cleanup container
         if self.container_id:

@@ -126,7 +126,7 @@ Explore the project thoroughly before generating the Containerfile."""
                 output_schema=output_schema,
                 mcp_server=mcp_server,
             )
-            results = asyncio.run(runner.run_agents([agent]))
+            results = asyncio.run(runner.run_agents([agent], verbose=verbose))
             result = results[0]
 
             containerfile_content = result["containerfile"]

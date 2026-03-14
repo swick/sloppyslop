@@ -21,6 +21,8 @@ from llm_sandbox.mcp_tools import (
     GrepTool,
     ReadProjectFileTool,
     ListProjectDirectoryTool,
+    SpawnAgentTool,
+    WaitForAgentsTool,
 )
 
 
@@ -45,6 +47,8 @@ class RunMCPServer(MCPServer):
         self.add_tool(GrepTool(runner))
         self.add_tool(ReadProjectFileTool(runner))
         self.add_tool(ListProjectDirectoryTool(runner))
+        self.add_tool(SpawnAgentTool(runner))
+        self.add_tool(WaitForAgentsTool(runner))
 
 
 class RunSubcommand(Subcommand):
