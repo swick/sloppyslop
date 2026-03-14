@@ -37,8 +37,10 @@ import asyncio
 import re
 import subprocess
 import sys
+import uuid
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import click
 import requests
@@ -261,6 +263,303 @@ class GitHubClient:
             })
 
         return commits
+
+
+class ReviewFeedbackEditor:
+    """Handles serialization and editing of review feedback."""
+
+    @staticmethod
+    def serialize(feedback: List[Dict[str, Any]]) -> str:
+        """
+        Serialize feedback into human-editable text format.
+
+        Args:
+            feedback: List of feedback items
+
+        Returns:
+            Text representation of feedback
+        """
+        lines = []
+        lines.append("# PR Review Feedback")
+        lines.append("# Edit this file to modify review suggestions")
+        lines.append("# Lines starting with # are comments and will be ignored")
+        lines.append("#")
+        lines.append("# How to ignore/delete suggestions:")
+        lines.append("# - Delete the '## Suggestion N' header line")
+        lines.append("# - OR add 'ignore: true' to the suggestion")
+        lines.append("#")
+        lines.append("# Format:")
+        lines.append("# - Edit fields to modify suggestion")
+        lines.append("# - Keep at least: file, line_start, line_end, reason, category")
+        lines.append("")
+        lines.append("# Suggestion Index:")
+
+        # Add suggestion index/table of contents
+        for i, item in enumerate(feedback):
+            prob = item.get('probability', 1.0)
+            lines.append(f"#   {i + 1}. {item['file']}:{item['line_start']}-{item['line_end']} "
+                        f"[{item['category']}, {item.get('severity', 'medium')}, p={prob:.2f}]")
+        lines.append("")
+        lines.append("# ============================================================")
+        lines.append("")
+
+        for i, item in enumerate(feedback):
+            lines.append(f"## Suggestion {i + 1}")
+            lines.append(f"file: {item['file']}")
+            lines.append(f"line_start: {item['line_start']}")
+            lines.append(f"line_end: {item['line_end']}")
+            lines.append(f"category: {item['category']}")
+            lines.append(f"severity: {item.get('severity', 'medium')}")
+            lines.append(f"probability: {item.get('probability', 1.0)}")
+            if item.get('probability_reasoning'):
+                lines.append(f"probability_reasoning: {item['probability_reasoning']}")
+            lines.append(f"reason: {item['reason']}")
+
+            if item.get('current_code'):
+                lines.append("current_code: |")
+                for code_line in item['current_code'].split('\n'):
+                    lines.append(f"  {code_line}")
+
+            if item.get('suggested_code'):
+                lines.append("suggested_code: |")
+                for code_line in item['suggested_code'].split('\n'):
+                    lines.append(f"  {code_line}")
+
+            lines.append("")  # Empty line between suggestions
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def deserialize(text: str) -> List[Dict[str, Any]]:
+        """
+        Deserialize text back into feedback items.
+
+        Args:
+            text: Text representation of feedback
+
+        Returns:
+            List of feedback items (excluding ignored ones)
+        """
+        feedback = []
+        current_item = None
+        current_field = None
+        multiline_content = []
+
+        for line in text.split('\n'):
+            # Skip comments and empty lines when not in multiline
+            if not current_field and (line.strip().startswith('#') or not line.strip()):
+                continue
+
+            # Check for new suggestion header
+            if line.startswith('## Suggestion'):
+                # Save previous item if exists and not ignored
+                if current_item:
+                    # Check if item should be ignored
+                    ignore = current_item.get('ignore', '').lower() in ['true', 'yes', '1']
+                    if not ignore:
+                        # Remove the ignore field before adding
+                        current_item.pop('ignore', None)
+                        feedback.append(current_item)
+                current_item = {}
+                current_field = None
+                continue
+
+            if current_item is None:
+                continue
+
+            # Handle multiline fields (ending)
+            if current_field and not line.startswith('  ') and ':' in line:
+                # Save multiline content
+                if multiline_content:
+                    current_item[current_field] = '\n'.join(multiline_content)
+                    multiline_content = []
+                current_field = None
+
+            # Parse field: value
+            if ':' in line and not current_field:
+                field, value = line.split(':', 1)
+                field = field.strip()
+                value = value.strip()
+
+                # Check for multiline field
+                if value == '|':
+                    current_field = field
+                    multiline_content = []
+                else:
+                    # Single-line field
+                    if field in ['line_start', 'line_end']:
+                        current_item[field] = int(value)
+                    elif field == 'probability':
+                        current_item[field] = float(value)
+                    elif field == 'ignore':
+                        # Keep as string for now, will check later
+                        current_item[field] = value
+                    else:
+                        current_item[field] = value
+            elif current_field and line.startswith('  '):
+                # Multiline content
+                multiline_content.append(line[2:])  # Remove indent
+
+        # Save last item if exists and not ignored
+        if current_item:
+            # Save any remaining multiline content
+            if current_field and multiline_content:
+                current_item[current_field] = '\n'.join(multiline_content)
+            # Check if item should be ignored
+            ignore = current_item.get('ignore', '').lower() in ['true', 'yes', '1']
+            if not ignore:
+                # Remove the ignore field before adding
+                current_item.pop('ignore', None)
+                feedback.append(current_item)
+
+        return feedback
+
+    @staticmethod
+    def save_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None) -> tuple[str, Path]:
+        """
+        Save feedback to a file.
+
+        Args:
+            feedback: List of feedback items
+            project_dir: Project directory path
+            feedback_id: Optional ID to use (generates new one if not provided)
+
+        Returns:
+            Tuple of (feedback_id, file_path)
+        """
+        if not feedback_id:
+            feedback_id = str(uuid.uuid4())[:8]
+
+        # Save to project directory instead of temp
+        review_dir = project_dir / ".llm-sandbox" / "pr-review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+
+        review_file = review_dir / f"{feedback_id}.txt"
+        review_file.write_text(ReviewFeedbackEditor.serialize(feedback))
+        return feedback_id, review_file
+
+    @staticmethod
+    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[List[Dict[str, Any]]]:
+        """
+        Load feedback from a file or ID.
+
+        Args:
+            feedback_id_or_path: Either a feedback ID or full file path
+            project_dir: Project directory path
+
+        Returns:
+            List of feedback items, or None if not found/invalid
+        """
+        # Check if it's a full path
+        file_path = Path(feedback_id_or_path)
+        if not file_path.exists():
+            # Try as ID in project directory first
+            review_dir = project_dir / ".llm-sandbox" / "pr-review"
+            file_path = review_dir / f"{feedback_id_or_path}.txt"
+
+            if not file_path.exists():
+                # Fallback to temp directory for backward compatibility
+                file_path = Path(tempfile.gettempdir()) / f"pr_review_{feedback_id_or_path}.txt"
+
+        if not file_path.exists():
+            return None
+
+        try:
+            text = file_path.read_text()
+            return ReviewFeedbackEditor.deserialize(text)
+        except Exception as e:
+            click.echo(f"Error loading feedback from {file_path}: {e}", err=True)
+            return None
+
+    @staticmethod
+    def edit_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+        """
+        Open feedback in editor for human modification.
+
+        Args:
+            feedback: List of feedback items
+            project_dir: Project directory path
+            feedback_id: Optional ID to use (generates new one if not provided)
+
+        Returns:
+            Modified feedback list, or None if user cancelled
+        """
+        # Save feedback to file
+        feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id)
+
+        # Print file location
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Review Feedback Saved")
+        click.echo(f"{'='*60}")
+        click.echo(f"File: {review_file}")
+        click.echo(f"ID: {feedback_id}")
+        click.echo(f"\nYou can reload this review later with:")
+        click.echo(f"  llm-sandbox pr-review --pr <number> --load-review {feedback_id}")
+        click.echo(f"{'='*60}\n")
+
+        # Get editor from environment, default to vi
+        editor = os.environ.get('EDITOR', 'vi')
+
+        try:
+            while True:
+                # Open editor
+                try:
+                    subprocess.run([editor, str(review_file)], check=True)
+                except subprocess.CalledProcessError:
+                    click.echo(f"Error: Editor '{editor}' failed", err=True)
+                    return None
+
+                # Read modified content
+                try:
+                    modified_text = review_file.read_text()
+                    modified_feedback = ReviewFeedbackEditor.deserialize(modified_text)
+                except Exception as e:
+                    click.echo(f"Error parsing edited feedback: {e}", err=True)
+                    choice = click.prompt(
+                        "What would you like to do?",
+                        type=click.Choice(['edit', 'cancel'], case_sensitive=False),
+                        default='edit'
+                    )
+                    if choice == 'cancel':
+                        return None
+                    continue
+
+                # Show summary of changes
+                click.echo(f"\n{'='*60}")
+                click.echo(f"Feedback Summary")
+                click.echo(f"{'='*60}")
+                click.echo(f"Original suggestions: {len(feedback)}")
+                click.echo(f"After editing: {len(modified_feedback)}")
+                click.echo(f"Deleted: {len(feedback) - len(modified_feedback)}")
+
+                # Ask what to do next
+                click.echo("\nWhat would you like to do?")
+                click.echo("  [p] Post review to GitHub")
+                click.echo("  [e] Edit again")
+                click.echo("  [s] Save and exit without posting")
+                click.echo("  [x] Exit without saving")
+
+                choice = click.prompt(
+                    "Choose an option",
+                    type=click.Choice(['p', 'e', 's', 'x'], case_sensitive=False),
+                    default='p'
+                )
+
+                if choice == 'p':
+                    return modified_feedback
+                elif choice == 's':
+                    # Save and exit
+                    review_file.write_text(ReviewFeedbackEditor.serialize(modified_feedback))
+                    click.echo(f"\nFeedback saved to: {review_file}")
+                    click.echo(f"ID: {feedback_id}")
+                    return None
+                elif choice == 'x':
+                    return None
+                # else 'e' - loop continues
+
+        except KeyboardInterrupt:
+            click.echo("\n\nInterrupted. Feedback saved for later use.")
+            return None
 
 
 class RecordReviewFeedbackTool(MCPTool):
@@ -517,6 +816,20 @@ class PRReviewSubcommand(Subcommand):
                 help="GitHub token (defaults to GH_TOKEN environment variable)",
             )
         )
+        command.params.append(
+            click.Option(
+                ["--load-review"],
+                type=str,
+                help="Load review from file ID or path instead of generating new review",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--review-id"],
+                type=str,
+                help="Use specified ID for review file (auto-generated if not provided)",
+            )
+        )
         return command
 
     def execute(self, project_dir: Path, runner, **kwargs):
@@ -525,6 +838,8 @@ class PRReviewSubcommand(Subcommand):
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
         network = kwargs["network"]
         verbose = kwargs["verbose"]
+        load_review = kwargs.get("load_review")
+        review_id = kwargs.get("review_id")
 
         if not token:
             click.echo(
@@ -699,48 +1014,68 @@ The structured output should just be a high-level summary - the detailed finding
             "required": ["review_summary", "documentation_found", "sub_agents_spawned", "findings_statistics", "overall_assessment"],
         }
 
-        # Run single agent with custom tools using async context manager
-        result, all_feedback = asyncio.run(self._execute_async(
-            runner,
-            pr_head_branch,
-            pr_info,
-            repo_name,
-            pr_number,
-            agent_prompt,
-            agent_schema,
-            network,
-            verbose
-        ))
+        # Check if we should load from file instead of running agent
+        if load_review:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Loading Review from File/ID")
+            click.echo(f"{'='*60}\n")
+            click.echo(f"Loading from: {load_review}")
 
-        # Show results
-        click.echo(f"\n{'='*60}")
-        click.echo("Review Agent Results")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nReview Summary:")
-        click.echo(result["review_summary"])
-        click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
-        if result["documentation_found"]:
-            for file in result["documentation_found"]:
-                click.echo(f"  - {file}")
-        click.echo(f"\nReview Criteria:")
-        click.echo(result["review_criteria_summary"])
+            all_feedback = ReviewFeedbackEditor.load_feedback(load_review, project_dir)
 
-        click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
-        for agent in result["sub_agents_spawned"]:
-            click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
+            if all_feedback is None:
+                click.echo(f"Error: Could not load review from '{load_review}'", err=True)
+                click.echo("Make sure the file exists or the ID is correct.", err=True)
+                sys.exit(1)
 
-        click.echo(f"\nFindings Statistics:")
-        stats = result["findings_statistics"]
-        click.echo(f"  Total findings: {stats['total_findings']}")
-        if "by_category" in stats:
-            click.echo(f"  By category: {stats['by_category']}")
-        if "by_severity" in stats:
-            click.echo(f"  By severity: {stats['by_severity']}")
-        if "high_confidence_count" in stats:
-            click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+            click.echo(f"Loaded {len(all_feedback)} suggestions")
 
-        click.echo(f"\nOverall Assessment:")
-        click.echo(result["overall_assessment"])
+            # Skip to editing step
+            result = None
+            stats = None
+        else:
+            # Run single agent with custom tools using async context manager
+            result, all_feedback = asyncio.run(self._execute_async(
+                runner,
+                pr_head_branch,
+                pr_info,
+                repo_name,
+                pr_number,
+                agent_prompt,
+                agent_schema,
+                network,
+                verbose
+            ))
+
+            # Show results
+            click.echo(f"\n{'='*60}")
+            click.echo("Review Agent Results")
+            click.echo(f"{'='*60}")
+            click.echo(f"\nReview Summary:")
+            click.echo(result["review_summary"])
+            click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
+            if result["documentation_found"]:
+                for file in result["documentation_found"]:
+                    click.echo(f"  - {file}")
+            click.echo(f"\nReview Criteria:")
+            click.echo(result["review_criteria_summary"])
+
+            click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
+            for agent in result["sub_agents_spawned"]:
+                click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
+
+            click.echo(f"\nFindings Statistics:")
+            stats = result["findings_statistics"]
+            click.echo(f"  Total findings: {stats['total_findings']}")
+            if "by_category" in stats:
+                click.echo(f"  By category: {stats['by_category']}")
+            if "by_severity" in stats:
+                click.echo(f"  By severity: {stats['by_severity']}")
+            if "high_confidence_count" in stats:
+                click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+
+            click.echo(f"\nOverall Assessment:")
+            click.echo(result["overall_assessment"])
 
         # Filter out low-probability items (threshold: 0.5)
         probability_threshold = 0.5
@@ -770,48 +1105,33 @@ The structured output should just be a high-level summary - the detailed finding
             click.echo("\nNo high-confidence suggestions. All files look good!")
             return
 
-        # Step 5: Interactive approval
+        # Step 5: Open editor for review and modification
         click.echo(f"\n{'='*60}")
-        click.echo("Review Suggestions (sorted by probability)")
+        click.echo("Opening editor for review suggestions")
         click.echo(f"{'='*60}\n")
+        click.echo("You can now edit the suggestions in your editor.")
+        click.echo("- Remove entire suggestion blocks to delete them")
+        click.echo("- Modify fields to adjust suggestions")
+        click.echo("- Save and close when done\n")
 
-        accepted_suggestions = []
-        for i, suggestion in enumerate(sorted_feedback, 1):
-            probability = suggestion.get("probability", 1.0)
-            click.echo(f"\nSuggestion {i}/{len(sorted_feedback)}")
-            click.echo(f"  File: {suggestion['file']}")
-            click.echo(f"  Lines: {suggestion['line_start']}-{suggestion['line_end']}")
-            click.echo(f"  Category: {suggestion['category']}")
-            click.echo(f"  Severity: {suggestion['severity']}")
-            click.echo(f"  Probability: {probability:.2f}")
-            if suggestion.get("probability_reasoning"):
-                click.echo(f"  Confidence reasoning: {suggestion['probability_reasoning']}")
-            click.echo(f"  Reason: {suggestion['reason']}")
+        # Open editor (use custom ID if --review-id was specified)
+        accepted_suggestions = ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id)
 
-            if suggestion.get('current_code'):
-                click.echo(f"\n  Current code:")
-                click.echo(f"    {self._indent_code(suggestion['current_code'], 4)}")
+        if accepted_suggestions is None:
+            click.echo("\nReview cancelled. No review will be posted.")
+            return
 
-            if suggestion.get('suggested_code'):
-                click.echo(f"\n  Suggested code:")
-                click.echo(f"    {self._indent_code(suggestion['suggested_code'], 4)}")
-
-            # Ask user for approval
-            if click.confirm("\n  Accept this suggestion?", default=False):
-                accepted_suggestions.append(suggestion)
-                click.echo("    ✓ Accepted")
-            else:
-                click.echo("    ✗ Rejected")
-
-        if not accepted_suggestions:
-            click.echo("\nNo suggestions accepted. No review to post.")
+        if len(accepted_suggestions) == 0:
+            click.echo("\nNo suggestions remaining after editing. No review will be posted.")
             return
 
         # Step 6: Prepare summary comment
-        doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
-        agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
+        if result:
+            # Generated with LLM - include detailed summary
+            doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
+            agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
 
-        summary = f"""Code review completed for PR #{pr_number}.
+            summary = f"""Code review completed for PR #{pr_number}.
 
 Review approach:
 {result['review_summary'][:300]}{"..." if len(result['review_summary']) > 300 else ""}
@@ -833,6 +1153,13 @@ Overall assessment:
 {result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}
 
 Accepted suggestions: {len(accepted_suggestions)}"""
+        else:
+            # Loaded from file - simple summary
+            summary = f"""Code review completed for PR #{pr_number}.
+
+Review loaded from saved file.
+
+Total suggestions: {len(accepted_suggestions)}"""
 
         summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
 
