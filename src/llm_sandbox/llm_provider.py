@@ -60,35 +60,16 @@ def extract_json_from_text(text: str) -> str:
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
-    def __init__(self):
-        """Initialize LLM provider with conversation tracking."""
+    def __init__(self, base_system_prompt: str):
+        """
+        Initialize LLM provider with conversation tracking.
+
+        Args:
+            base_system_prompt: Base system prompt describing the environment and capabilities
+        """
+        self.base_system_prompt = base_system_prompt
         self.conversation_history: List[Dict[str, Any]] = []
         self.verbose: bool = False
-
-    base_system_prompt = """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
-
-The container has two mounts:
-- /project (read-only): The original project code
-- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
-
-Workflow:
-1. Use read_project_file/list_project_directory to explore the original project
-2. Use checkout_commit to create a worktree from any commit/branch
-3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
-4. Use glob and grep to search for files and content IN THE WORKTREE
-5. Use git_commit to commit changes to the worktree's branch
-
-File editing:
-- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
-- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
-- Line numbers are 1-indexed, ranges are inclusive
-
-Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
-To modify files, you must first create a worktree with checkout_commit.
-
-Your task is to analyze the project and provide the requested information.
-
-Use the tools available to explore the project, run commands, and gather information as needed."""
 
     def _generate_tools_description(self, mcp_server: MCPServer) -> str:
         """
@@ -287,17 +268,18 @@ class ClaudeProvider(LLMProvider):
     Supports both Anthropic's direct API and Google Cloud Vertex AI.
     """
 
-    def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig]):
+    def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig], base_system_prompt: str):
         """
         Initialize Claude provider.
 
         Args:
             provider_config: Provider configuration (AnthropicConfig or VertexAIConfig)
+            base_system_prompt: Base system prompt describing the environment
 
         Raises:
             ValueError: If required configuration is missing
         """
-        super().__init__()
+        super().__init__(base_system_prompt)
         import os
 
         self.model = provider_config.model
@@ -635,9 +617,27 @@ When you're done analyzing, provide your final answer in the structured JSON for
             }
 
 
-def create_llm_provider(provider_name: str, provider_config: Union[AnthropicConfig, VertexAIConfig]) -> LLMProvider:
+def create_llm_provider(
+    provider_name: str,
+    provider_config: Union[AnthropicConfig, VertexAIConfig],
+    base_system_prompt: str,
+) -> LLMProvider:
+    """
+    Create an LLM provider instance.
+
+    Args:
+        provider_name: Name of the provider (anthropic, vertex-ai)
+        provider_config: Provider configuration
+        base_system_prompt: Base system prompt describing the environment
+
+    Returns:
+        LLM provider instance
+
+    Raises:
+        ValueError: If provider is not supported
+    """
     if provider_name in ("anthropic", "vertex-ai"):
-        return ClaudeProvider(provider_config)
+        return ClaudeProvider(provider_config, base_system_prompt)
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider_name}. "

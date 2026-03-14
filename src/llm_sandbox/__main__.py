@@ -65,8 +65,12 @@ def check(provider: Optional[str]):
 
         click.echo("\nValidating provider...")
 
-        # Create provider
-        llm_provider = create_llm_provider(provider_name, provider_config)
+        # Create provider with simple system prompt for validation
+        llm_provider = create_llm_provider(
+            provider_name,
+            provider_config,
+            base_system_prompt="You are a helpful AI assistant.",
+        )
 
         # Validate
         result = llm_provider.validate()
@@ -131,7 +135,11 @@ def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool)
 
     try:
         provider_name, provider_config = get_provider_config(config)
-        llm_provider = create_llm_provider(provider_name, provider_config)
+        llm_provider = create_llm_provider(
+            provider_name,
+            provider_config,
+            base_system_prompt="You are an expert in containerization and build systems. You help users create appropriate Containerfiles for their projects based on their dependencies and requirements.",
+        )
     except Exception as e:
         click.echo(f"Error: LLM provider not configured: {e}", err=True)
         click.echo("\nPlease configure your LLM provider first:", err=True)

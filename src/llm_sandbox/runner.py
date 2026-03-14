@@ -245,11 +245,45 @@ class SandboxRunner:
         # We create a symlink: /host/path/.git -> /project/.git
         self._setup_git_symlink()
 
-        # Step 4: Create LLM provider
+        # Step 4: Create LLM provider with system prompt
+        base_system_prompt = self._create_base_system_prompt()
         self.llm_provider = create_llm_provider(
             self.provider_name,
             self.provider_config,
+            base_system_prompt,
         )
+
+    def _create_base_system_prompt(self) -> str:
+        """
+        Create the base system prompt describing the container environment.
+
+        Returns:
+            Base system prompt string
+        """
+        return """You are working in an isolated container environment. You have access to tools for git operations, file operations, and command execution.
+
+The container has two mounts:
+- /project (read-only): The original project code
+- /worktrees (read-write): A folder in which you can checkout specific commits/branches in sub-directories
+
+Workflow:
+1. Use read_project_file/list_project_directory to explore the original project
+2. Use checkout_commit to create a worktree from any commit/branch
+3. Use file operation tools (read_file, write_file, edit_file) to work with files IN THE WORKTREE
+4. Use glob and grep to search for files and content IN THE WORKTREE
+5. Use git_commit to commit changes to the worktree's branch
+
+File editing:
+- edit_file works by replacing line ranges: specify start_line, end_line, and new_text for each edit
+- Can apply multiple edits in one call (edits are applied from bottom to top to maintain line numbers)
+- Line numbers are 1-indexed, ranges are inclusive
+
+Important: Worktree file operation tools (read_file, write_file, edit_file, glob, grep) ONLY work within checked-out worktrees.
+To modify files, you must first create a worktree with checkout_commit.
+
+Your task is to analyze the project and provide the requested information.
+
+Use the tools available to explore the project, run commands, and gather information as needed."""
 
     def run_agent(
         self,
