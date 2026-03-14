@@ -138,6 +138,50 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
+    def _setup_git_symlink(self) -> None:
+        """
+        Create symlink in container so worktree .git files work correctly.
+
+        Worktree .git files contain: gitdir: /host/path/to/project/.git/worktrees/name
+        Inside container, project is at /project, not /host/path/to/project
+
+        Solution: Create symlink /host/path/to/project/.git -> /project/.git
+        This way git can follow the path in the .git file.
+        """
+        if not self.container_id:
+            return
+
+        try:
+            # Get the absolute path to the project on the host
+            host_project_path = str(self.project_path.absolute())
+
+            # Extract parent directory and create it in container
+            parent_dir = str(self.project_path.absolute().parent)
+
+            # Create the parent directory structure in the container
+            exit_code, _, stderr = self.container_manager.exec_command(
+                self.container_id,
+                f"mkdir -p {parent_dir}",
+                workdir="/",
+            )
+
+            if exit_code != 0:
+                click.echo(f"Warning: Failed to create directory structure for git symlink: {stderr}")
+                return
+
+            # Create symlink from host path to /project/.git
+            exit_code, _, stderr = self.container_manager.exec_command(
+                self.container_id,
+                f"ln -sf /project/.git {host_project_path}/.git",
+                workdir="/",
+            )
+
+            if exit_code != 0:
+                click.echo(f"Warning: Failed to create git symlink: {stderr}")
+
+        except Exception as e:
+            click.echo(f"Warning: Failed to setup git symlink: {e}")
+
     def _cleanup_worktrees(self, keep_branches: List[str]) -> None:
         """
         Remove worktrees and cleanup branches.
@@ -263,6 +307,11 @@ class SandboxRunner:
 
         self.container_manager.start_container(self.container_id)
         click.echo(f"Container started: {self.container_id[:12]}")
+
+        # Create symlink in container so worktree .git files work
+        # The .git file in a worktree contains: gitdir: /host/path/.git/worktrees/name
+        # We create a symlink: /host/path/.git -> /project/.git
+        self._setup_git_symlink()
 
     def run_prompt(
         self,

@@ -97,11 +97,6 @@ class GitOperations:
         # GitPython doesn't have direct worktree support, use git command
         try:
             self.repo.git.worktree("add", "-b", branch_name, str(worktree_dir), commit)
-
-            # Patch the .git file to point to /project instead of host path
-            # This is needed for the container to access the git repository correctly
-            self._patch_worktree_gitdir(worktree_dir)
-
             return worktree_dir
 
         except git.GitCommandError as e:
@@ -110,52 +105,6 @@ class GitOperations:
                 f"Commit: {commit}\n"
                 f"Branch: {branch_name}"
             ) from e
-
-    def _patch_worktree_gitdir(self, worktree_dir: Path) -> None:
-        """
-        Patch the .git file in a worktree to point to /project instead of host path.
-
-        The .git file in a worktree contains:
-            gitdir: /host/path/to/repo/.git/worktrees/name
-
-        We need to change it to:
-            gitdir: /project/.git/worktrees/name
-
-        Args:
-            worktree_dir: Path to the worktree directory
-        """
-        git_file = worktree_dir / ".git"
-
-        if not git_file.exists():
-            return
-
-        try:
-            # Read the .git file
-            content = git_file.read_text()
-
-            # Parse gitdir line
-            if not content.startswith("gitdir: "):
-                return
-
-            # Extract the worktree name from the path
-            # e.g., gitdir: /var/home/swick/Projects/llm-container-sandbox/.git/worktrees/pr-1
-            # Extract: pr-1
-            parts = content.strip().split("/.git/worktrees/")
-            if len(parts) != 2:
-                return
-
-            worktree_name = parts[1]
-
-            # Create new gitdir pointing to /project
-            new_content = f"gitdir: /project/.git/worktrees/{worktree_name}\n"
-
-            # Write back
-            git_file.write_text(new_content)
-
-        except Exception:
-            # If patching fails, silently continue
-            # The worktree will still work on the host, just not in the container
-            pass
 
     def delete_branch(self, branch_name: str, force: bool = True) -> None:
         """
