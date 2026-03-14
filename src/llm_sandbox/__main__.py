@@ -8,7 +8,7 @@ from typing import Optional
 import click
 
 from llm_sandbox.analyzer import ProjectAnalyzer
-from llm_sandbox.builtin_subcommands import RunSubcommand
+from llm_sandbox.subcommands import RunSubcommand
 from llm_sandbox.config import (
     AnthropicConfig,
     BuildConfig,

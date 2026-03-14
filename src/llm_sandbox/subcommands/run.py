@@ -1,9 +1,8 @@
-"""Built-in subcommands for llm-sandbox."""
+"""Run subcommand for llm-sandbox."""
 
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
