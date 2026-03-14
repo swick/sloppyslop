@@ -155,13 +155,11 @@ class SandboxRunner:
             # Get the absolute path to the project on the host
             host_project_path = str(self.project_path.absolute())
 
-            # Extract parent directory and create it in container
-            parent_dir = str(self.project_path.absolute().parent)
-
-            # Create the parent directory structure in the container
+            # Create the project directory structure in the container
+            # (everything up to but not including .git)
             exit_code, _, stderr = self.container_manager.exec_command(
                 self.container_id,
-                f"mkdir -p {parent_dir}",
+                f"mkdir -p {host_project_path}",
                 workdir="/",
             )
 

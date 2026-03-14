@@ -30,7 +30,7 @@ def extract_json_from_text(text: str) -> str:
     # First, try to find JSON in markdown code blocks
     # Match ```json or just ``` followed by content
     # More flexible pattern that handles various newline situations
-    json_block_pattern = r'```(?:json)?\s*(.*?)```'
+    json_block_pattern = r'```(?:json)?\s*(.*)```'
     match = re.search(json_block_pattern, text, re.DOTALL)
     if match:
         extracted = match.group(1).strip()
