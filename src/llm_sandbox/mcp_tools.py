@@ -110,13 +110,12 @@ class MCPServer(ABC):
 class ExecuteCommandTool(MCPTool):
     """Tool for executing shell commands in container."""
 
-    def __init__(self, container_manager, container_id: str):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize execute command tool.
 
         Args:
-            container_manager: Container manager instance
-            container_id: Container ID to execute commands in
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="execute_command",
@@ -137,16 +136,15 @@ class ExecuteCommandTool(MCPTool):
                 "required": ["command"],
             },
         )
-        self.container_manager = container_manager
-        self.container_id = container_id
+        self.runner = runner
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Execute shell command in container."""
         command = arguments["command"]
         workdir = arguments.get("workdir", "/worktrees")
 
-        exit_code, stdout, stderr = self.container_manager.exec_command(
-            self.container_id,
+        exit_code, stdout, stderr = self.runner.container_manager.exec_command(
+            self.runner.container_id,
             command,
             workdir,
         )
@@ -162,21 +160,12 @@ class ExecuteCommandTool(MCPTool):
 class GitCommitTool(MCPTool):
     """Tool for committing files to git worktree."""
 
-    def __init__(
-        self,
-        container_manager,
-        container_id: str,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize git commit tool.
 
         Args:
-            container_manager: Container manager instance (unused, kept for compatibility)
-            container_id: Container ID (unused, kept for compatibility)
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for host git operations
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="git_commit",
@@ -201,19 +190,18 @@ class GitCommitTool(MCPTool):
                 "required": ["files", "message", "branch"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def _validate_branch_pattern(self, branch: str) -> bool:
         """Validate branch matches required pattern."""
-        pattern = rf"^llm-container/{re.escape(self.instance_id)}/[a-zA-Z0-9_/-]+$"
+        pattern = rf"^llm-container/{re.escape(self.runner.instance_id)}/[a-zA-Z0-9_/-]+$"
         return bool(re.match(pattern, branch))
 
     def _derive_worktree_path(self, branch: str) -> str:
         """Derive worktree path from branch name."""
         # Extract worktree name from branch: llm-container/{instance_id}/{worktree_name}
         # worktree_name can contain slashes (e.g., foo/bar)
-        prefix = f"llm-container/{self.instance_id}/"
+        prefix = f"llm-container/{self.runner.instance_id}/"
         if branch.startswith(prefix):
             worktree_name = branch[len(prefix):]
             return f"/worktrees/{worktree_name}"
@@ -229,12 +217,12 @@ class GitCommitTool(MCPTool):
         if not self._validate_branch_pattern(branch):
             return {
                 "success": False,
-                "error": f"Invalid branch name: {branch}. Must match pattern: llm-container/{self.instance_id}/<worktree_name>",
+                "error": f"Invalid branch name: {branch}. Must match pattern: llm-container/{self.runner.instance_id}/<worktree_name>",
             }
 
         # Extract worktree name from branch
         # worktree_name can contain slashes (e.g., foo/bar)
-        prefix = f"llm-container/{self.instance_id}/"
+        prefix = f"llm-container/{self.runner.instance_id}/"
         if not branch.startswith(prefix):
             return {
                 "success": False,
@@ -290,21 +278,12 @@ class GitCommitTool(MCPTool):
 class CheckoutCommitTool(MCPTool):
     """Tool for creating new worktrees from commits."""
 
-    def __init__(
-        self,
-        container_manager,
-        container_id: str,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize checkout commit tool.
 
         Args:
-            container_manager: Container manager instance (unused, kept for compatibility)
-            container_id: Container ID (unused, kept for compatibility)
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for git operations and tracking worktrees
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="checkout_commit",
@@ -324,7 +303,6 @@ class CheckoutCommitTool(MCPTool):
                 "required": ["commit"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def _validate_worktree_name(self, name: str) -> bool:
@@ -367,7 +345,7 @@ class CheckoutCommitTool(MCPTool):
             }
 
         # Generate branch name
-        branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
+        branch_name = f"llm-container/{self.runner.instance_id}/{worktree_name}"
 
         # Get host worktree path
         host_worktree_path = self.runner.worktrees_base_dir / worktree_name
@@ -401,17 +379,12 @@ class CheckoutCommitTool(MCPTool):
 class ReadFileTool(MCPTool):
     """Tool for reading files from a worktree."""
 
-    def __init__(
-        self,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize read file tool.
 
         Args:
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for worktree access
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="read_file",
@@ -431,7 +404,6 @@ class ReadFileTool(MCPTool):
                 "required": ["worktree", "path"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
@@ -498,17 +470,12 @@ class ReadFileTool(MCPTool):
 class WriteFileTool(MCPTool):
     """Tool for writing files to a worktree."""
 
-    def __init__(
-        self,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize write file tool.
 
         Args:
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for worktree access
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="write_file",
@@ -532,7 +499,6 @@ class WriteFileTool(MCPTool):
                 "required": ["worktree", "path", "content"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
@@ -590,17 +556,12 @@ class WriteFileTool(MCPTool):
 class EditFileTool(MCPTool):
     """Tool for editing files in a worktree by replacing line ranges."""
 
-    def __init__(
-        self,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize edit file tool.
 
         Args:
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for worktree access
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="edit_file",
@@ -642,7 +603,6 @@ class EditFileTool(MCPTool):
                 "required": ["worktree", "path", "edits"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def _validate_and_resolve_path(self, worktree: str, path: str) -> Tuple[bool, str, Path]:
@@ -770,17 +730,12 @@ class EditFileTool(MCPTool):
 class GlobTool(MCPTool):
     """Tool for finding files matching a glob pattern in a worktree."""
 
-    def __init__(
-        self,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize glob tool.
 
         Args:
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for worktree access
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="glob",
@@ -800,7 +755,6 @@ class GlobTool(MCPTool):
                 "required": ["worktree", "pattern"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -848,17 +802,12 @@ class GlobTool(MCPTool):
 class GrepTool(MCPTool):
     """Tool for searching file contents using regex in a worktree."""
 
-    def __init__(
-        self,
-        instance_id: str,
-        runner: "SandboxRunner",
-    ):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize grep tool.
 
         Args:
-            instance_id: Unique instance ID for this run
-            runner: Reference to SandboxRunner for worktree access
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="grep",
@@ -887,7 +836,6 @@ class GrepTool(MCPTool):
                 "required": ["worktree", "pattern"],
             },
         )
-        self.instance_id = instance_id
         self.runner = runner
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1002,12 +950,12 @@ class GrepTool(MCPTool):
 class ReadProjectFileTool(MCPTool):
     """Tool for reading files from the read-only project directory."""
 
-    def __init__(self, project_path: Path):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize read project file tool.
 
         Args:
-            project_path: Path to project directory
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="read_project_file",
@@ -1028,7 +976,7 @@ class ReadProjectFileTool(MCPTool):
                 "required": ["path"],
             },
         )
-        self.project_path = project_path
+        self.runner = runner
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Read a file from the project directory."""
@@ -1043,11 +991,11 @@ class ReadProjectFileTool(MCPTool):
                     "error": "Permission denied",
                 }
 
-            file_path = self.project_path / path
+            file_path = self.runner.project_path / path
 
             # Security check: ensure path is within project directory
             file_path = file_path.resolve()
-            if not str(file_path).startswith(str(self.project_path.resolve())):
+            if not str(file_path).startswith(str(self.runner.project_path.resolve())):
                 return {
                     "success": False,
                     "error": "Path outside project directory",
@@ -1092,12 +1040,12 @@ class ReadProjectFileTool(MCPTool):
 class ListProjectDirectoryTool(MCPTool):
     """Tool for listing directory contents in the project."""
 
-    def __init__(self, project_path: Path):
+    def __init__(self, runner: "SandboxRunner"):
         """
         Initialize list project directory tool.
 
         Args:
-            project_path: Path to project directory
+            runner: SandboxRunner instance
         """
         super().__init__(
             name="list_project_directory",
@@ -1113,7 +1061,7 @@ class ListProjectDirectoryTool(MCPTool):
                 },
             },
         )
-        self.project_path = project_path
+        self.runner = runner
 
     def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """List contents of a directory."""
@@ -1127,11 +1075,11 @@ class ListProjectDirectoryTool(MCPTool):
                     "error": "Permission denied",
                 }
 
-            dir_path = self.project_path / path
+            dir_path = self.runner.project_path / path
 
             # Security check: ensure path is within project directory
             dir_path = dir_path.resolve()
-            if not str(dir_path).startswith(str(self.project_path.resolve())):
+            if not str(dir_path).startswith(str(self.runner.project_path.resolve())):
                 return {
                     "success": False,
                     "error": "Path outside project directory",
@@ -1152,7 +1100,7 @@ class ListProjectDirectoryTool(MCPTool):
             # List directory contents
             entries = []
             for item in sorted(dir_path.iterdir()):
-                rel_path = item.relative_to(self.project_path)
+                rel_path = item.relative_to(self.runner.project_path)
                 entries.append({
                     "name": item.name,
                     "path": str(rel_path),

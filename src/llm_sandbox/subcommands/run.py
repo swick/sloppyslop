@@ -25,29 +25,24 @@ from llm_sandbox.mcp_tools import (
 class RunMCPServer(MCPServer):
     """MCP server with all built-in tools for run subcommand."""
 
-    def __init__(self, container_manager, container_id, instance_id, runner, project_path):
+    def __init__(self, runner):
         """
         Initialize run MCP server with all built-in tools.
 
         Args:
-            container_manager: Container manager instance
-            container_id: Container ID
-            instance_id: Instance ID
             runner: SandboxRunner instance
-            project_path: Path to project directory
         """
         super().__init__()
-        # Add all built-in tools
-        self.add_tool(ExecuteCommandTool(container_manager, container_id))
-        self.add_tool(CheckoutCommitTool(container_manager, container_id, instance_id, runner))
-        self.add_tool(GitCommitTool(container_manager, container_id, instance_id, runner))
-        self.add_tool(ReadFileTool(instance_id, runner))
-        self.add_tool(WriteFileTool(instance_id, runner))
-        self.add_tool(EditFileTool(instance_id, runner))
-        self.add_tool(GlobTool(instance_id, runner))
-        self.add_tool(GrepTool(instance_id, runner))
-        self.add_tool(ReadProjectFileTool(project_path))
-        self.add_tool(ListProjectDirectoryTool(project_path))
+        self.add_tool(ExecuteCommandTool(runner))
+        self.add_tool(CheckoutCommitTool(runner))
+        self.add_tool(GitCommitTool(runner))
+        self.add_tool(ReadFileTool(runner))
+        self.add_tool(WriteFileTool(runner))
+        self.add_tool(EditFileTool(runner))
+        self.add_tool(GlobTool(runner))
+        self.add_tool(GrepTool(runner))
+        self.add_tool(ReadProjectFileTool(runner))
+        self.add_tool(ListProjectDirectoryTool(runner))
 
 
 class RunSubcommand(Subcommand):
@@ -147,13 +142,7 @@ class RunSubcommand(Subcommand):
                 network=network,
             )
             # Create MCP server with all built-in tools
-            mcp_server = RunMCPServer(
-                runner.container_manager,
-                runner.container_id,
-                runner.instance_id,
-                runner,
-                project_dir,
-            )
+            mcp_server = RunMCPServer(runner)
             result = runner.run_prompt(
                 prompt=prompt,
                 output_schema=output_schema,

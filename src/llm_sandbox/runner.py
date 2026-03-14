@@ -14,19 +14,7 @@ from llm_sandbox.container import ContainerManager
 from llm_sandbox.git_ops import GitOperations
 from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
-from llm_sandbox.mcp_tools import (
-    MCPServer,
-    ExecuteCommandTool,
-    GitCommitTool,
-    CheckoutCommitTool,
-    ReadFileTool,
-    WriteFileTool,
-    EditFileTool,
-    GlobTool,
-    GrepTool,
-    ReadProjectFileTool,
-    ListProjectDirectoryTool,
-)
+from llm_sandbox.mcp_tools import MCPServer
 
 # Re-export for convenience
 __all__ = ["SandboxRunner"]
@@ -46,23 +34,23 @@ class SandboxRunner:
         self.project_path = project_path
         self.config = config
 
-        # Initialize components
-        self.container_manager = ContainerManager()
-        self.git_ops = GitOperations(project_path)
-
         # Get provider config
         self.provider_name, self.provider_config = get_provider_config(config)
 
-        # Instance tracking for dynamic worktrees
+        # Public API - Components for tool access
+        self.container_manager = ContainerManager()
+        self.git_ops = GitOperations(project_path)
+
+        # Public API - Instance state (available after setup())
         self.instance_id: Optional[str] = None
+        self.container_id: Optional[str] = None
         self.worktrees_base_dir: Optional[Path] = None
         self.created_worktrees: List[str] = []  # Track worktree names
 
-        # Runtime state
-        self.container_id: Optional[str] = None
-        self.keep_branches: List[str] = []
-        self.network_mode: str = "none"
-        self.cleaned_up: bool = False
+        # Internal state
+        self._keep_branches: List[str] = []
+        self._network_mode: str = "none"
+        self._cleaned_up: bool = False
 
     def __del__(self):
         """Destructor - ensure cleanup happens."""
@@ -215,14 +203,14 @@ class SandboxRunner:
             keep_branches = []
 
         # Store for cleanup
-        self.keep_branches = keep_branches
+        self._keep_branches = keep_branches
 
         # Use network from config if not specified
         if network is None:
             network = self.config.container.network
 
         # Convert network setting to podman format
-        self.network_mode = "none" if network == "isolated" else "bridge"
+        self._network_mode = "none" if network == "isolated" else "bridge"
 
         # Step 1: Generate instance ID and create empty worktrees directory
         self.instance_id = self._generate_instance_id()
@@ -245,7 +233,7 @@ class SandboxRunner:
             image_tag,
             self.project_path,
             self.worktrees_base_dir,
-            self.network_mode,
+            self._network_mode,
         )
 
         self.container_manager.start_container(self.container_id)
@@ -304,10 +292,10 @@ class SandboxRunner:
         Safe to call multiple times.
         """
         # Skip if already cleaned up
-        if self.cleaned_up:
+        if self._cleaned_up:
             return
 
-        self.cleaned_up = True
+        self._cleaned_up = True
 
         # Cleanup container
         if self.container_id:
@@ -322,6 +310,6 @@ class SandboxRunner:
         # Cleanup worktrees
         try:
             click.echo("Cleaning up worktrees...")
-            self._cleanup_worktrees(self.keep_branches)
+            self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
             click.echo(f"Warning: Failed to cleanup worktrees: {e}")

@@ -264,42 +264,28 @@ class GitHubClient:
 class PRReviewMCPServer(MCPServer):
     """MCP Server for PR review with all built-in tools plus GitHub API tools."""
 
-    def __init__(
-        self,
-        container_manager,
-        container_id: str,
-        instance_id: str,
-        runner,
-        project_path,
-        github_client: "GitHubClient",
-        repo: str,
-        pr_number: int,
-    ):
+    def __init__(self, runner, github_client: "GitHubClient", repo: str, pr_number: int):
         """
         Initialize PR review MCP server.
 
         Args:
-            container_manager: Container manager instance
-            container_id: Container ID
-            instance_id: Instance ID
             runner: SandboxRunner instance
-            project_path: Path to project directory
             github_client: GitHubClient instance
             repo: Repository in owner/name format
             pr_number: Pull request number
         """
         super().__init__()
         # Add all built-in tools
-        self.add_tool(ExecuteCommandTool(container_manager, container_id))
-        self.add_tool(CheckoutCommitTool(container_manager, container_id, instance_id, runner))
-        self.add_tool(GitCommitTool(container_manager, container_id, instance_id, runner))
-        self.add_tool(ReadFileTool(instance_id, runner))
-        self.add_tool(WriteFileTool(instance_id, runner))
-        self.add_tool(EditFileTool(instance_id, runner))
-        self.add_tool(GlobTool(instance_id, runner))
-        self.add_tool(GrepTool(instance_id, runner))
-        self.add_tool(ReadProjectFileTool(project_path))
-        self.add_tool(ListProjectDirectoryTool(project_path))
+        self.add_tool(ExecuteCommandTool(runner))
+        self.add_tool(CheckoutCommitTool(runner))
+        self.add_tool(GitCommitTool(runner))
+        self.add_tool(ReadFileTool(runner))
+        self.add_tool(WriteFileTool(runner))
+        self.add_tool(EditFileTool(runner))
+        self.add_tool(GlobTool(runner))
+        self.add_tool(GrepTool(runner))
+        self.add_tool(ReadProjectFileTool(runner))
+        self.add_tool(ListProjectDirectoryTool(runner))
         # Add custom GitHub API tools
         self.add_tool(GetPullRequestDiffTool(github_client, repo, pr_number))
         self.add_tool(GetPullRequestCommitsTool(github_client, repo, pr_number))
@@ -564,16 +550,7 @@ Return:
             click.echo("  Worktrees created successfully!")
 
             # Create MCP server with all built-in tools + GitHub API tools
-            mcp_server = PRReviewMCPServer(
-                runner.container_manager,
-                runner.container_id,
-                runner.instance_id,
-                runner,
-                project_dir,
-                self.github,
-                repo_name,
-                pr_number,
-            )
+            mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
 
             result = runner.run_prompt(
                 prompt=agent_prompt,
