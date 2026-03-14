@@ -343,15 +343,26 @@ def create_run_sandbox_function(
             The keep_branches and custom_tools can be specified by subcommands.
         """
 
-        # Run prompt
-        return runner.run_prompt(
-            prompt,
-            output_schema,
-            keep_branches,
-            network,
-            verbose,
-            custom_tools,
-        )
+        try:
+            # Setup the sandbox
+            runner.setup(
+                keep_branches=keep_branches,
+                network=network,
+            )
+
+            # Run the prompt
+            result = runner.run_prompt(
+                prompt,
+                output_schema,
+                verbose,
+                custom_tools,
+            )
+
+            return result
+
+        finally:
+            # Always cleanup
+            runner.cleanup()
 
     return run_sandbox
 

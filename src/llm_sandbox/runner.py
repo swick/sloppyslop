@@ -113,6 +113,19 @@ class SandboxRunner:
         self.worktrees_base_dir: Optional[Path] = None
         self.created_worktrees: List[str] = []  # Track worktree names
 
+        # Runtime state
+        self.container_id: Optional[str] = None
+        self.keep_branches: List[str] = []
+        self.network_mode: str = "none"
+
+    def __del__(self):
+        """Destructor - ensure cleanup happens."""
+        try:
+            self.cleanup()
+        except Exception:
+            # Ignore errors during destruction
+            pass
+
     def _generate_instance_id(self) -> str:
         """
         Generate unique instance ID (timestamp + UUID).
@@ -192,101 +205,128 @@ class SandboxRunner:
             except Exception as e:
                 click.echo(f"Warning: Failed to remove instance directory: {e}")
 
-    def run_prompt(
+    def setup(
         self,
-        prompt: str,
-        output_schema: Dict[str, Any],
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
-        verbose: bool = False,
-        custom_tools: Optional[List] = None,
-    ) -> Dict[str, Any]:
+    ) -> None:
         """
-        Execute one-shot LLM prompt with structured output.
+        Setup the sandbox environment: create worktrees dir, get image, start container.
 
         Args:
-            prompt: User prompt for LLM
-            output_schema: JSON schema for structured output
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional)
-            verbose: Enable verbose output (optional)
-            custom_tools: Optional list of custom MCP tools to add (optional)
-
-        Returns:
-            Structured output from LLM
         """
         if keep_branches is None:
             keep_branches = []
+
+        # Store for cleanup
+        self.keep_branches = keep_branches
 
         # Use network from config if not specified
         if network is None:
             network = self.config.container.network
 
         # Convert network setting to podman format
-        network_mode = "none" if network == "isolated" else "bridge"
+        self.network_mode = "none" if network == "isolated" else "bridge"
 
-        container_id = None
+        # Step 1: Generate instance ID and create empty worktrees directory
+        self.instance_id = self._generate_instance_id()
+        self.worktrees_base_dir = (
+            self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
+        )
+        self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
+        click.echo(f"Instance ID: {self.instance_id}")
 
-        try:
-            # Step 1: Generate instance ID and create empty worktrees directory
-            self.instance_id = self._generate_instance_id()
-            self.worktrees_base_dir = (
-                self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
-            )
-            self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
-            click.echo(f"Instance ID: {self.instance_id}")
+        # Step 2: Get container image (build if necessary)
+        image_manager = Image(
+            self.config.image,
+            self.project_path,
+            self.container_manager,
+        )
+        image_tag = image_manager.get_image()
 
-            # Step 2: Get container image (build if necessary)
-            image_manager = Image(
-                self.config.image,
-                self.project_path,
-                self.container_manager,
-            )
-            image_tag = image_manager.get_image()
+        # Step 3: Create and start container
+        self.container_id = self.container_manager.create_container(
+            image_tag,
+            self.project_path,
+            self.worktrees_base_dir,
+            self.network_mode,
+        )
 
-            # Step 3: Create and start container
-            container_id = self.container_manager.create_container(
-                image_tag,
-                self.project_path,
-                self.worktrees_base_dir,
-                network_mode,
-            )
+        self.container_manager.start_container(self.container_id)
+        click.echo(f"Container started: {self.container_id[:12]}")
 
-            self.container_manager.start_container(container_id)
-            click.echo(f"Container started: {container_id[:12]}")
+    def run_prompt(
+        self,
+        prompt: str,
+        output_schema: Dict[str, Any],
+        verbose: bool = False,
+        custom_tools: Optional[List] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute LLM prompt with structured output.
 
-            # Step 4: Initialize MCP server with custom tools
-            mcp_server = ContainerMCPServer(
-                self.container_manager,
-                container_id,
-                self.instance_id,
-                self,
-                self.project_path,
-                custom_tools=custom_tools,
-            )
+        Must call setup() before calling this method.
 
-            # Step 5: Execute LLM prompt with structured output
-            click.echo("Executing LLM prompt...")
+        Args:
+            prompt: User prompt for LLM
+            output_schema: JSON schema for structured output
+            verbose: Enable verbose output (optional)
+            custom_tools: Optional list of custom MCP tools to add (optional)
 
-            llm_provider = create_llm_provider(
-                self.provider_name,
-                self.provider_config,
-            )
+        Returns:
+            Structured output from LLM
+        """
+        if not self.container_id or not self.instance_id:
+            raise RuntimeError("Must call setup() before run_prompt()")
 
-            result = llm_provider.generate_structured(
-                prompt,
-                mcp_server,
-                output_schema,
-                verbose=verbose,
-            )
+        # Initialize MCP server with custom tools
+        mcp_server = ContainerMCPServer(
+            self.container_manager,
+            self.container_id,
+            self.instance_id,
+            self,
+            self.project_path,
+            custom_tools=custom_tools,
+        )
 
-            return result
+        # Execute LLM prompt with structured output
+        click.echo("Executing LLM prompt...")
 
-        finally:
-            # Step 6: Cleanup
-            if container_id:
+        llm_provider = create_llm_provider(
+            self.provider_name,
+            self.provider_config,
+        )
+
+        result = llm_provider.generate_structured(
+            prompt,
+            mcp_server,
+            output_schema,
+            verbose=verbose,
+        )
+
+        return result
+
+    def cleanup(self) -> None:
+        """
+        Cleanup container and worktrees.
+
+        Safe to call multiple times.
+        """
+        # Cleanup container
+        if self.container_id:
+            try:
                 click.echo("Cleaning up container...")
-                self.container_manager.cleanup(container_id)
+                self.container_manager.cleanup(self.container_id)
+            except Exception as e:
+                click.echo(f"Warning: Failed to cleanup container: {e}")
+            finally:
+                self.container_id = None
 
+        # Cleanup worktrees
+        try:
             click.echo("Cleaning up worktrees...")
-            self._cleanup_worktrees(keep_branches)
+            self._cleanup_worktrees(self.keep_branches)
+        except Exception as e:
+            click.echo(f"Warning: Failed to cleanup worktrees: {e}")
