@@ -192,6 +192,7 @@ class SandboxRunner:
         self,
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
+        image: Optional[str] = None,
     ) -> None:
         """
         Setup the sandbox environment: create worktrees dir, get image, start container.
@@ -199,6 +200,7 @@ class SandboxRunner:
         Args:
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional)
+            image: Image name/tag override (optional, uses config if not specified)
         """
         if keep_branches is None:
             keep_branches = []
@@ -222,12 +224,17 @@ class SandboxRunner:
         click.echo(f"Instance ID: {self.instance_id}")
 
         # Step 2: Get container image (build if necessary)
-        image_manager = Image(
-            self.config.image,
-            self.project_path,
-            self.container_manager,
-        )
-        image_tag = image_manager.get_image()
+        if image:
+            # Use provided image directly
+            image_tag = image
+        else:
+            # Use image manager to get/build image from config
+            image_manager = Image(
+                self.config.image,
+                self.project_path,
+                self.container_manager,
+            )
+            image_tag = image_manager.get_image()
 
         # Step 3: Create and start container
         self.container_id = self.container_manager.create_container(

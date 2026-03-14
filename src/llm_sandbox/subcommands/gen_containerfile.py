@@ -111,7 +111,7 @@ Explore the project thoroughly before generating the Containerfile."""
 
         # Run in container with default image
         try:
-            runner.setup(network="enabled")  # Need network to read project files
+            runner.setup(network="enabled", image=Image.DEFAULT_IMAGE)
 
             # Create MCP server with project exploration tools
             mcp_server = GenContainerfileMCPServer(runner)
