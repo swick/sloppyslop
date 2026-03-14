@@ -403,6 +403,69 @@ class GetReviewFeedbackTool(MCPTool):
         }
 
 
+class AssignFeedbackProbabilityTool(MCPTool):
+    """Tool for assigning probability/confidence to review feedback items."""
+
+    def __init__(self, runner: "SandboxRunner"):
+        """
+        Initialize assign feedback probability tool.
+
+        Args:
+            runner: SandboxRunner instance
+        """
+        super().__init__(
+            name="assign_feedback_probability",
+            description="Assign a probability/confidence score to review feedback items based on your analysis. Use this after sub-agents have recorded their findings to indicate how confident you are that each finding is valid.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "feedback_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of feedback item indices to update (0-indexed positions in the feedback list)",
+                    },
+                    "probability": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Probability/confidence score (0.0 to 1.0) for these feedback items",
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "Explanation of why this probability was assigned",
+                    },
+                },
+                "required": ["feedback_indices", "probability"],
+            },
+        )
+        self.runner = runner
+
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Assign probability to feedback items."""
+        indices = arguments["feedback_indices"]
+        probability = arguments["probability"]
+        reasoning = arguments.get("reasoning", "")
+
+        updated_count = 0
+        errors = []
+
+        for idx in indices:
+            if idx < 0 or idx >= len(self.runner._review_feedback):
+                errors.append(f"Index {idx} out of range (0-{len(self.runner._review_feedback)-1})")
+                continue
+
+            self.runner._review_feedback[idx]["probability"] = probability
+            self.runner._review_feedback[idx]["probability_reasoning"] = reasoning
+            updated_count += 1
+
+        return {
+            "success": len(errors) == 0,
+            "updated_count": updated_count,
+            "errors": errors if errors else None,
+            "message": f"Updated probability for {updated_count} feedback item(s) to {probability:.2f}",
+        }
+
+
 class PRReviewMCPServer(MCPServer):
     """MCP Server for PR review with all built-in tools plus GitHub API tools."""
 
@@ -433,6 +496,7 @@ class PRReviewMCPServer(MCPServer):
         # Add PR review specific tools
         self.add_tool(RecordReviewFeedbackTool(runner))
         self.add_tool(GetReviewFeedbackTool(runner))
+        self.add_tool(AssignFeedbackProbabilityTool(runner))
         # Add custom GitHub API tools
         self.add_tool(GetPullRequestDiffTool(github_client, repo, pr_number))
         self.add_tool(GetPullRequestCommitsTool(github_client, repo, pr_number))
@@ -534,7 +598,7 @@ class PRReviewSubcommand(Subcommand):
         # Step 4: Single agent does everything
         click.echo("\nStarting review agent...")
 
-        agent_prompt = f"""You are a code review agent for PR #{pr_number}.
+        agent_prompt = f"""You are the orchestrator agent for PR #{pr_number} review.
 
 PR Information:
 - Title: {pr_info['title']}
@@ -546,114 +610,99 @@ Worktrees already checked out for you:
 - 'pr-head': Contains the PR changes (head: {pr_info['head_ref']})
 - 'pr-base': Contains the base branch (base: {pr_info['base_ref']})
 
-Your tasks:
+Your workflow:
 
-1. Read project documentation from pr-head worktree (if available):
-   - Try to read AGENTS.md (using read_file)
-   - Try to read CLAUDE.md (using read_file)
-   - These files may contain information about where review instruction files are located
-   - If these don't exist, that's fine - note that in your summary
-   - Read EACH instruction file you find using read_file(worktree="pr-head", path="...")
-   - Understand all the review criteria from all instruction files
-   - If no review instruction files exist, use general best practices
+1. Read project documentation and review instructions:
+   - Read AGENTS.md and CLAUDE.md from pr-head worktree (if available)
+   - Look for review instruction files as specified in those docs
+   - If not specified, search common patterns: review/, docs/review/, .github/review/
+   - Understand all review criteria from all instruction files
+   - Get PR changes summary using get_pull_request_commits() and get_pull_request_diff()
 
-2. Identify commits and changes in the PR:
-   - You can use get_pull_request_commits() to get the list of commits from GitHub API
-   - You can use get_pull_request_diff() to get the full PR diff from GitHub API
-   - For each commit, use git show to examine what changed (files, diffs, commit messages)
-   - Build a summary of all changes across all commits in the PR
+2. Spawn sub-agents for specific review tasks:
+   - Break down the review into specific tasks based on:
+     * Review instruction categories (if found)
+     * Common areas: security, performance, bugs, style, documentation
+     * Changed file types or modules
+   - Use spawn_agent() to create a sub-agent for each task
+   - Give each sub-agent:
+     * A clear, specific task description
+     * The relevant review criteria for that task
+     * Instructions to use record_review_feedback() to record findings
+   - Example tasks: "Review security aspects", "Review database changes", "Review API endpoints"
 
-4. Review ALL the changes in the PR according to ALL the criteria:
-   - Apply all criteria from all instruction files
-   - Use git commands or file tools to examine the changes
-   - Use read_file to examine specific files from pr-head and pr-base
-   - Focus on the changes between the two worktrees
-   - Generate suggestions for ANY files that violate any criteria
+3. Wait for sub-agents to complete:
+   - Use wait_for_agents() to wait for all spawned agents
+   - Sub-agents will record their findings using record_review_feedback()
 
-Review criteria to apply:
-- All specific instructions from review instruction files (if any exist)
-- Code quality and best practices
-- Potential bugs or edge cases
-- Performance improvements
-- Security concerns
-- Readability and maintainability
-- Consistency with existing code patterns
-- Alignment with project documentation
+4. Review and assign probabilities to findings:
+   - Use get_review_feedback() to retrieve all recorded findings
+   - Analyze each finding for validity and accuracy
+   - Use assign_feedback_probability() to assign confidence scores (0.0-1.0)
+   - Consider: Is the issue real? Is the suggested fix appropriate? Does it align with review criteria?
 
-For each suggestion, provide:
-- The file path (relative to repository root)
-- Line numbers in the pr-head version
-- Current code and suggested replacement
-- Clear reasoning based on the review criteria and which instruction file it relates to (if applicable)
+5. Return a summary:
+   - Summarize the review process and findings
+   - Report how many sub-agents were spawned and what tasks they performed
+   - Report total findings and their confidence distribution
+   - DO NOT include the detailed findings in output (they're in the feedback store)
 
-Return:
-- documentation_summary: Summary of AGENTS.md and CLAUDE.md (or "No project documentation found")
-- commits_summary: Summary of commits and changes found
-- review_instruction_files: List of review instruction file paths found (empty if none)
-- review_criteria_applied: Summary of all review criteria from all instruction files
-- suggestions: All review suggestions across all files"""
+The structured output should just be a high-level summary - the detailed findings are accessible via get_review_feedback()."""
 
         agent_schema = {
             "type": "object",
             "properties": {
-                "documentation_summary": {
+                "review_summary": {
                     "type": "string",
-                    "description": "Summary of project documentation (AGENTS.md, CLAUDE.md)",
+                    "description": "High-level summary of the review process and approach taken",
                 },
-                "commits_summary": {
-                    "type": "string",
-                    "description": "Summary of commits and changes found between pr-base and pr-head",
-                },
-                "review_instruction_files": {
+                "documentation_found": {
                     "type": "array",
-                    "description": "List of review instruction file paths from review/ and docs/review/ (empty if none)",
                     "items": {"type": "string"},
+                    "description": "List of documentation files found (AGENTS.md, CLAUDE.md, review instructions)",
                 },
-                "review_criteria_applied": {
+                "review_criteria_summary": {
                     "type": "string",
-                    "description": "Summary of all review criteria applied from all instruction files",
+                    "description": "Summary of review criteria applied from instruction files or general best practices",
                 },
-                "suggestions": {
+                "sub_agents_spawned": {
                     "type": "array",
-                    "description": "All review suggestions across all files",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file": {
-                                "type": "string",
-                                "description": "File path relative to repository root",
-                            },
-                            "line_start": {
-                                "type": "integer",
-                                "description": "Starting line number in pr-head",
-                            },
-                            "line_end": {
-                                "type": "integer",
-                                "description": "Ending line number in pr-head",
-                            },
-                            "current_code": {
-                                "type": "string",
-                                "description": "Current code snippet",
-                            },
-                            "suggested_code": {
-                                "type": "string",
-                                "description": "Suggested improved code",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Explanation based on review criteria",
-                            },
-                            "category": {
-                                "type": "string",
-                                "enum": ["bug", "performance", "security", "style", "refactor", "documentation"],
-                                "description": "Category of the suggestion",
-                            },
+                            "agent_id": {"type": "string"},
+                            "task_description": {"type": "string"},
                         },
-                        "required": ["file", "line_start", "line_end", "current_code", "suggested_code", "reason", "category"],
+                        "required": ["agent_id", "task_description"],
                     },
+                    "description": "List of sub-agents that were spawned and their tasks",
+                },
+                "findings_statistics": {
+                    "type": "object",
+                    "properties": {
+                        "total_findings": {"type": "integer"},
+                        "by_category": {
+                            "type": "object",
+                            "description": "Count of findings by category (bug, security, etc.)",
+                        },
+                        "by_severity": {
+                            "type": "object",
+                            "description": "Count of findings by severity (critical, high, medium, low)",
+                        },
+                        "high_confidence_count": {
+                            "type": "integer",
+                            "description": "Number of findings with probability >= 0.8",
+                        },
+                    },
+                    "required": ["total_findings"],
+                    "description": "Statistics about findings (detailed findings available via get_review_feedback)",
+                },
+                "overall_assessment": {
+                    "type": "string",
+                    "description": "Overall assessment of the PR quality and key takeaways",
                 },
             },
-            "required": ["documentation_summary", "commits_summary", "review_instruction_files", "review_criteria_applied", "suggestions"],
+            "required": ["review_summary", "documentation_found", "sub_agents_spawned", "findings_statistics", "overall_assessment"],
         }
 
         # Run single agent with custom tools
