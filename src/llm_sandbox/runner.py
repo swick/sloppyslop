@@ -117,6 +117,7 @@ class SandboxRunner:
         self.container_id: Optional[str] = None
         self.keep_branches: List[str] = []
         self.network_mode: str = "none"
+        self.cleaned_up: bool = False
 
     def __del__(self):
         """Destructor - ensure cleanup happens."""
@@ -151,27 +152,34 @@ class SandboxRunner:
         if not self.worktrees_base_dir or not self.instance_id:
             return
 
-        # Build branch mapping: branch_name -> full_branch_name
-        branch_mapping = {}
-        for worktree_name in self.created_worktrees:
-            branch_name = f"llm-container/{self.instance_id}/{worktree_name}"
-            branch_mapping[worktree_name] = branch_name
-
-        # Rename kept branches (remove llm-container/{instance_id}/ prefix)
+        # Step 1: Copy kept branches to new names BEFORE removing worktrees
+        # We create a copy with the target name, then later delete the original
         for branch_name in keep_branches:
             full_branch_name = f"llm-container/{self.instance_id}/{branch_name}"
             if branch_name in self.created_worktrees:
                 try:
+                    # Check if the branch actually exists
+                    branch_exists = False
+                    try:
+                        self.git_ops.repo.git.rev_parse("--verify", f"refs/heads/{full_branch_name}")
+                        branch_exists = True
+                    except Exception:
+                        pass
+
+                    if not branch_exists:
+                        click.echo(f"Warning: Branch {full_branch_name} does not exist, skipping")
+                        continue
+
                     click.echo(f"Keeping branch: {full_branch_name} → {branch_name}")
-                    # Use git branch -M (move/rename with force) to properly rename the branch
-                    # This handles refs correctly, including branches with slashes in the name
-                    self.git_ops.repo.git.branch("-M", full_branch_name, branch_name)
+                    # Create a copy of the branch with the new name (force overwrite if exists)
+                    self.git_ops.repo.git.branch("-f", branch_name, full_branch_name)
+
                 except Exception as e:
-                    click.echo(f"Warning: Failed to rename branch {full_branch_name}: {e}")
+                    click.echo(f"Warning: Failed to copy branch {full_branch_name}: {e}")
             else:
                 click.echo(f"Warning: Branch {branch_name} was not created in this session")
 
-        # Remove all worktrees
+        # Step 2: Now remove all worktrees
         for worktree_name in self.created_worktrees:
             worktree_path = self.worktrees_base_dir / worktree_name
             if worktree_path.exists():
@@ -313,6 +321,12 @@ class SandboxRunner:
 
         Safe to call multiple times.
         """
+        # Skip if already cleaned up
+        if self.cleaned_up:
+            return
+
+        self.cleaned_up = True
+
         # Cleanup container
         if self.container_id:
             try:

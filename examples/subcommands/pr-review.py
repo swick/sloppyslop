@@ -348,7 +348,6 @@ Your tasks:
 2. Identify commits and changes in the PR:
    - You can use get_pull_request_commits() to get the list of commits from GitHub API
    - You can use get_pull_request_diff() to get the full PR diff from GitHub API
-   - OR use execute_command to get commits: cd /worktrees/pr-head && git rev-list --ancestry-path $(cd /worktrees/pr-base && git rev-parse HEAD)..HEAD
    - For each commit, use git show to examine what changed (files, diffs, commit messages)
    - Build a summary of all changes across all commits in the PR
 
