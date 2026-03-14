@@ -39,6 +39,7 @@ class ContainerMCPServer(MCPServer):
         instance_id: str,
         runner: "SandboxRunner",
         project_path: Path,
+        custom_tools: Optional[List] = None,
     ):
         """
         Initialize container MCP server.
@@ -49,6 +50,7 @@ class ContainerMCPServer(MCPServer):
             instance_id: Unique instance ID for this run
             runner: Reference to SandboxRunner for tracking worktrees
             project_path: Path to project directory for read-only access
+            custom_tools: Optional list of custom MCP tools to add
         """
         super().__init__()
         execute_command_tool = ExecuteCommandTool(container_manager, container_id)
@@ -78,6 +80,11 @@ class ContainerMCPServer(MCPServer):
             read_project_file_tool.name: read_project_file_tool,
             list_project_directory_tool.name: list_project_directory_tool,
         }
+
+        # Add custom tools if provided
+        if custom_tools:
+            for tool in custom_tools:
+                self.tools[tool.name] = tool
 
 
 class SandboxRunner:
@@ -192,6 +199,7 @@ class SandboxRunner:
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
         verbose: bool = False,
+        custom_tools: Optional[List] = None,
     ) -> Dict[str, Any]:
         """
         Execute one-shot LLM prompt with structured output.
@@ -202,6 +210,7 @@ class SandboxRunner:
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional)
             verbose: Enable verbose output (optional)
+            custom_tools: Optional list of custom MCP tools to add (optional)
 
         Returns:
             Structured output from LLM
@@ -246,9 +255,14 @@ class SandboxRunner:
             self.container_manager.start_container(container_id)
             click.echo(f"Container started: {container_id[:12]}")
 
-            # Step 4: Initialize MCP server
+            # Step 4: Initialize MCP server with custom tools
             mcp_server = ContainerMCPServer(
-                self.container_manager, container_id, self.instance_id, self, self.project_path
+                self.container_manager,
+                container_id,
+                self.instance_id,
+                self,
+                self.project_path,
+                custom_tools=custom_tools,
             )
 
             # Step 5: Execute LLM prompt with structured output

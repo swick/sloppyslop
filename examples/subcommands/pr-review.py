@@ -1,14 +1,19 @@
 """Example subcommand: GitHub PR review with instruction-based criteria.
 
-This subcommand demonstrates a single-agent workflow:
+This subcommand demonstrates a single-agent workflow with custom MCP tools:
 1. Checks out PR head and base commits
 2. Reads project documentation (AGENTS.md, CLAUDE.md) if available
-3. Uses git history (git rev-list --ancestry-path) to identify commits in the PR
-4. Examines each commit (git show) to understand all changes
-5. Finds review instruction files in review/ and docs/review/ folders
-6. Reads ALL review instruction files and applies criteria to ALL PR changes
-7. Generates suggestions based on all criteria
-8. User approves suggestions and posts to GitHub
+3. Uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
+4. OR uses git history (git rev-list --ancestry-path) to identify commits in the PR
+5. Examines each commit (git show) to understand all changes
+6. Finds review instruction files in review/ and docs/review/ folders
+7. Reads ALL review instruction files and applies criteria to ALL PR changes
+8. Generates suggestions based on all criteria
+9. User approves suggestions and posts to GitHub
+
+Custom MCP Tools:
+- get_pull_request_commits: Fetches commit list from GitHub API
+- get_pull_request_diff: Fetches full PR diff from GitHub API
 
 The review/ and docs/review/ folders contain INSTRUCTIONS on how to review code,
 not the code to review. The actual code to review is identified through git history
@@ -30,11 +35,94 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 import click
 import requests
 
+from llm_sandbox.mcp_tools import MCPTool
 from llm_sandbox.subcommand import Subcommand
+
+
+class GetPullRequestDiffTool(MCPTool):
+    """Custom MCP tool for fetching GitHub PR diff."""
+
+    def __init__(self, github_client: "GitHubClient", repo: str, pr_number: int):
+        """
+        Initialize the PR diff tool.
+
+        Args:
+            github_client: GitHubClient instance
+            repo: Repository in owner/name format
+            pr_number: Pull request number
+        """
+        super().__init__(
+            name="get_pull_request_diff",
+            description="Get the full diff of the pull request from GitHub API. Returns the unified diff format showing all changes.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        self.github_client = github_client
+        self.repo = repo
+        self.pr_number = pr_number
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch the PR diff from GitHub API."""
+        try:
+            diff = self.github_client.get_pull_request_diff(self.repo, self.pr_number)
+            return {
+                "success": True,
+                "diff": diff,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to fetch PR diff: {str(e)}",
+            }
+
+
+class GetPullRequestCommitsTool(MCPTool):
+    """Custom MCP tool for fetching GitHub PR commits."""
+
+    def __init__(self, github_client: "GitHubClient", repo: str, pr_number: int):
+        """
+        Initialize the PR commits tool.
+
+        Args:
+            github_client: GitHubClient instance
+            repo: Repository in owner/name format
+            pr_number: Pull request number
+        """
+        super().__init__(
+            name="get_pull_request_commits",
+            description="Get the list of commits in the pull request from GitHub API. Returns commit SHAs, messages, authors, and timestamps.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        self.github_client = github_client
+        self.repo = repo
+        self.pr_number = pr_number
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch the PR commits from GitHub API."""
+        try:
+            commits = self.github_client.get_pull_request_commits(self.repo, self.pr_number)
+            return {
+                "success": True,
+                "commits": commits,
+                "count": len(commits),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to fetch PR commits: {str(e)}",
+            }
 
 
 class GitHubClient:
@@ -105,6 +193,56 @@ class GitHubClient:
 
         response = requests.post(url, headers=self.headers, json=comment_data)
         response.raise_for_status()
+
+    def get_pull_request_diff(self, repo: str, pr_number: int) -> str:
+        """
+        Get the full diff of a pull request.
+
+        Args:
+            repo: Repository in owner/name format
+            pr_number: Pull request number
+
+        Returns:
+            Unified diff format string
+        """
+        url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}"
+        headers = self.headers.copy()
+        headers["Accept"] = "application/vnd.github.v3.diff"
+
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.text
+
+    def get_pull_request_commits(self, repo: str, pr_number: int) -> list:
+        """
+        Get the list of commits in a pull request.
+
+        Args:
+            repo: Repository in owner/name format
+            pr_number: Pull request number
+
+        Returns:
+            List of commit dictionaries with metadata
+        """
+        url = f"{self.base_url}/repos/{repo}/pulls/{pr_number}/commits"
+        response = requests.get(url, headers=self.headers)
+        response.raise_for_status()
+
+        commits_data = response.json()
+        commits = []
+
+        for commit in commits_data:
+            commits.append({
+                "sha": commit["sha"],
+                "short_sha": commit["sha"][:7],
+                "message": commit["commit"]["message"],
+                "author": commit["commit"]["author"]["name"],
+                "author_email": commit["commit"]["author"]["email"],
+                "date": commit["commit"]["author"]["date"],
+                "committer": commit["commit"]["committer"]["name"],
+            })
+
+        return commits
 
 
 class PRReviewSubcommand(Subcommand):
@@ -178,7 +316,11 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error fetching PR info: {e}", err=True)
             sys.exit(1)
 
-        # Step 3: Single agent does everything
+        # Step 3: Create custom tools for GitHub PR data
+        pr_diff_tool = GetPullRequestDiffTool(self.github, repo_name, pr_number)
+        pr_commits_tool = GetPullRequestCommitsTool(self.github, repo_name, pr_number)
+
+        # Step 4: Single agent does everything
         click.echo("\nStarting review agent...")
 
         agent_prompt = f"""You are a code review agent for PR #{pr_number}.
@@ -200,8 +342,10 @@ Your tasks:
    - Try to read CLAUDE.md (using read_file)
    - If these don't exist, that's fine - note that in your summary
 
-3. Identify commits and changes in the PR using git history:
-   - Use execute_command to get commits: cd /worktrees/pr-head && git rev-list --ancestry-path $(cd /worktrees/pr-base && git rev-parse HEAD)..HEAD
+3. Identify commits and changes in the PR:
+   - You can use get_pull_request_commits() to get the list of commits from GitHub API
+   - You can use get_pull_request_diff() to get the full PR diff from GitHub API
+   - OR use execute_command to get commits: cd /worktrees/pr-head && git rev-list --ancestry-path $(cd /worktrees/pr-base && git rev-parse HEAD)..HEAD
    - For each commit, use git show to examine what changed (files, diffs, commit messages)
    - Build a summary of all changes across all commits in the PR
 
@@ -305,10 +449,11 @@ Return:
             "required": ["documentation_summary", "commits_summary", "review_instruction_files", "review_criteria_applied", "suggestions"],
         }
 
-        # Run single agent
+        # Run single agent with custom tools
         result = run_sandbox(
             prompt=agent_prompt,
             output_schema=agent_schema,
+            custom_tools=[pr_diff_tool, pr_commits_tool],
         )
 
         # Show results

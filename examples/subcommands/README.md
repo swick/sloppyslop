@@ -148,10 +148,107 @@ class MySubcommand(Subcommand):
 
 4. The `run_sandbox` function:
    - Pre-configured with `network` and `verbose` from CLI options
-   - Signature: `run_sandbox(prompt: str, output_schema: dict, keep_branches: list = None) -> dict`
+   - Signature: `run_sandbox(prompt: str, output_schema: dict, keep_branches: list = None, custom_tools: list = None) -> dict`
    - Subcommands can specify `keep_branches` as needed
+   - Subcommands can provide `custom_tools` (list of MCP tool instances) to extend available tools
    - The LLM can use `checkout_commit` tool to work with any commit/branch
    - Returns the structured output from the LLM
+
+## Creating Custom MCP Tools
+
+Subcommands can define custom MCP tools to extend the LLM's capabilities. Custom tools allow you to:
+- Add domain-specific operations (e.g., GitHub API calls)
+- Provide specialized data access
+- Implement custom validation or processing logic
+
+### Example: Custom Tool for GitHub API
+
+```python
+from llm_sandbox.mcp_tools import MCPTool
+from typing import Any, Dict
+
+class GetPullRequestInfoTool(MCPTool):
+    """Tool for fetching GitHub PR information."""
+
+    def __init__(self, github_token: str, repo: str):
+        """Initialize the tool with GitHub credentials."""
+        super().__init__(
+            name="get_pull_request_info",
+            description="Fetch detailed information about a GitHub pull request",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pr_number": {
+                        "type": "integer",
+                        "description": "Pull request number",
+                    },
+                },
+                "required": ["pr_number"],
+            },
+        )
+        self.github_token = github_token
+        self.repo = repo
+
+    def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the tool - fetch PR info from GitHub API."""
+        pr_number = arguments["pr_number"]
+
+        try:
+            # Make GitHub API call
+            import requests
+            url = f"https://api.github.com/repos/{self.repo}/pulls/{pr_number}"
+            headers = {
+                "Authorization": f"Bearer {self.github_token}",
+                "Accept": "application/vnd.github+json",
+            }
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+            return {
+                "success": True,
+                "title": data["title"],
+                "state": data["state"],
+                "author": data["user"]["login"],
+                "head_sha": data["head"]["sha"],
+                "base_sha": data["base"]["sha"],
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
+```
+
+### Using Custom Tools in Subcommands
+
+```python
+from llm_sandbox.mcp_tools import MCPTool
+
+class MySubcommand(Subcommand):
+    def execute(self, project_dir: Path, run_sandbox, **kwargs):
+        # Create custom tool instances
+        custom_tool = GetPullRequestInfoTool(
+            github_token=kwargs["token"],
+            repo="owner/repo",
+        )
+
+        # Pass custom tools to run_sandbox
+        result = run_sandbox(
+            prompt="Fetch PR #123 and analyze it",
+            output_schema={"type": "object", "properties": {...}},
+            custom_tools=[custom_tool],  # List of custom tools
+        )
+```
+
+### Custom Tool Guidelines
+
+- **Inherit from `MCPTool`**: All custom tools must extend the `MCPTool` base class
+- **Implement `execute()`**: This method receives the arguments and returns a result dictionary
+- **Return format**: Always return a dict with at least `{"success": bool}`. On error, include `"error": str`
+- **Parameters schema**: Use JSON Schema to define the tool's input parameters
+- **Stateless when possible**: Tools should generally be stateless or accept state in constructor
+- **Error handling**: Catch exceptions and return error messages instead of raising
 
 ## Tips
 
@@ -161,3 +258,4 @@ class MySubcommand(Subcommand):
 - Use `click.confirm()` for user approval steps
 - Check for tool prerequisites (like `gh` CLI) early
 - Provide clear next-step instructions to users
+- Use custom MCP tools for operations that don't fit standard file/git/command tools

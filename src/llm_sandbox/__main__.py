@@ -324,6 +324,7 @@ def create_run_sandbox_function(
         prompt: str,
         output_schema: dict,
         keep_branches: Optional[list] = None,
+        custom_tools: Optional[list] = None,
     ) -> dict:
         """
         Run the sandbox and return structured output.
@@ -332,13 +333,14 @@ def create_run_sandbox_function(
             prompt: User prompt for LLM
             output_schema: JSON schema for structured output
             keep_branches: List of branch names to keep (default: [])
+            custom_tools: Optional list of custom MCP tools to add (default: None)
 
         Returns:
             Structured output from LLM
 
         Note:
             The network and verbose are already configured from command line options.
-            The keep_branches can be specified by subcommands.
+            The keep_branches and custom_tools can be specified by subcommands.
         """
 
         # Run prompt
@@ -348,6 +350,7 @@ def create_run_sandbox_function(
             keep_branches,
             network,
             verbose,
+            custom_tools,
         )
 
     return run_sandbox
