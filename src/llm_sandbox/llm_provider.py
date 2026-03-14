@@ -16,6 +16,11 @@ def extract_json_from_text(text: str) -> str:
     """
     Extract JSON from text that may contain markdown code blocks or extra content.
 
+    Handles common patterns:
+    - ```json\\n{...}\\n```
+    - ```\\n{...}\\n```
+    - {JSON} with surrounding text
+
     Args:
         text: Text that may contain JSON
 
@@ -23,10 +28,15 @@ def extract_json_from_text(text: str) -> str:
         Extracted JSON string
     """
     # First, try to find JSON in markdown code blocks
-    json_block_pattern = r'```(?:json)?\s*\n(.*?)\n```'
+    # Match ```json or just ``` followed by content
+    # More flexible pattern that handles various newline situations
+    json_block_pattern = r'```(?:json)?\s*(.*?)```'
     match = re.search(json_block_pattern, text, re.DOTALL)
     if match:
-        return match.group(1).strip()
+        extracted = match.group(1).strip()
+        # If the extracted content looks like JSON, return it
+        if extracted.startswith('{') or extracted.startswith('['):
+            return extracted
 
     # Try to find JSON object boundaries
     # Look for content between first { and last }
@@ -35,6 +45,13 @@ def extract_json_from_text(text: str) -> str:
 
     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
         return text[first_brace:last_brace + 1]
+
+    # Also try array syntax
+    first_bracket = text.find('[')
+    last_bracket = text.rfind(']')
+
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        return text[first_bracket:last_bracket + 1]
 
     # Return as-is if no extraction patterns match
     return text.strip()
@@ -370,11 +387,11 @@ When you're done analyzing, provide your final answer in the structured JSON for
                                 click.echo(text)
                             click.echo(f"{'-'*60}")
 
-                        # For Vertex AI, sanitize the response to extract JSON
+                        # For Vertex AI, extract JSON from response (handles markdown code blocks, etc.)
+                        # Anthropic API with output_config should guarantee valid JSON
                         if self.backend == "vertex-ai":
                             json_text = extract_json_from_text(text)
                         else:
-                            # Anthropic API with output_config guarantees valid JSON
                             json_text = text
 
                         try:
