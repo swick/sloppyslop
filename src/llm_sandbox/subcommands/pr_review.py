@@ -518,12 +518,7 @@ Return:
             runner.setup(network=network)
 
             # Create checkout tool instance
-            checkout_tool = CheckoutCommitTool(
-                runner.container_manager,
-                runner.container_id,
-                runner.instance_id,
-                runner,
-            )
+            checkout_tool = CheckoutCommitTool(runner)
 
             # Pre-checkout worktrees for PR head and base
             click.echo("\nChecking out worktrees...")

@@ -19,8 +19,17 @@ class AnalyzerMCPServer(MCPServer):
             project_path: Path to project directory
         """
         super().__init__()
-        read_file_tool = ReadProjectFileTool(project_path)
-        list_directory_tool = ListProjectDirectoryTool(project_path)
+
+        # Create a minimal mock runner for the project tools
+        # These tools only need runner.project_path
+        class MinimalRunner:
+            def __init__(self, project_path: Path):
+                self.project_path = project_path
+
+        mock_runner = MinimalRunner(project_path)
+
+        read_file_tool = ReadProjectFileTool(mock_runner)
+        list_directory_tool = ListProjectDirectoryTool(mock_runner)
         self.tools = {
             read_file_tool.name: read_file_tool,
             list_directory_tool.name: list_directory_tool,
