@@ -552,7 +552,7 @@ Return:
             # Create MCP server with all built-in tools + GitHub API tools
             mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
 
-            result = runner.run_prompt(
+            result = runner.run_agent(
                 prompt=agent_prompt,
                 output_schema=agent_schema,
                 mcp_server=mcp_server,

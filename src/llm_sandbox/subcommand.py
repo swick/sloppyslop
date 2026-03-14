@@ -15,6 +15,14 @@ class Subcommand(ABC):
     and implements the required methods.
 
     Example:
+        from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ExecuteCommandTool
+
+        class AnalyzeMCPServer(MCPServer):
+            def __init__(self, runner):
+                super().__init__()
+                self.add_tool(ReadFileTool(runner))
+                self.add_tool(ExecuteCommandTool(runner))
+
         class MySubcommand(Subcommand):
             name = "analyze"
             help = "Analyze the project"
@@ -35,12 +43,14 @@ class Subcommand(ABC):
                 network = kwargs["network"]
                 verbose = kwargs["verbose"]
 
-                # Setup sandbox, run prompt, and cleanup
+                # Setup sandbox, run agent, and cleanup
                 try:
                     runner.setup(keep_branches=["my-branch"], network=network)
-                    result = runner.run_prompt(
+                    mcp_server = AnalyzeMCPServer(runner)
+                    result = runner.run_agent(
                         prompt=f"Analyze this project with depth {depth}",
                         output_schema={"type": "object", ...},
+                        mcp_server=mcp_server,
                         verbose=verbose,
                     )
                     click.echo(f"Analysis complete: {result}")
@@ -78,8 +88,8 @@ class Subcommand(ABC):
             project_dir: Project directory path
             runner: SandboxRunner instance with methods:
                 - setup(keep_branches: list = None, network: str = None): Setup environment
-                - run_prompt(prompt: str, output_schema: dict, verbose: bool = False,
-                           custom_tools: list = None) -> dict: Execute LLM prompt
+                - run_agent(prompt: str, output_schema: dict, mcp_server: MCPServer,
+                           verbose: bool = False) -> dict: Execute LLM agent with tools
                 - cleanup(): Cleanup container and worktrees
             **kwargs: Arguments from CLI including:
                 - network: Network mode from --network
@@ -90,8 +100,9 @@ class Subcommand(ABC):
             Any value (typically None or a result dict)
 
         Note:
-            Best practice is to call runner.setup(), runner.run_prompt(),
-            and runner.cleanup() in a try/finally block to ensure cleanup.
+            Best practice is to call runner.setup(), create an MCPServer,
+            call runner.run_agent(), and runner.cleanup() in a try/finally block
+            to ensure cleanup.
         """
         pass
 

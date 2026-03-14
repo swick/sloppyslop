@@ -143,7 +143,7 @@ class RunSubcommand(Subcommand):
             )
             # Create MCP server with all built-in tools
             mcp_server = RunMCPServer(runner)
-            result = runner.run_prompt(
+            result = runner.run_agent(
                 prompt=prompt,
                 output_schema=output_schema,
                 mcp_server=mcp_server,

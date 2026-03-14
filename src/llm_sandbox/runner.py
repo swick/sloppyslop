@@ -46,6 +46,7 @@ class SandboxRunner:
         self.container_id: Optional[str] = None
         self.worktrees_base_dir: Optional[Path] = None
         self.created_worktrees: List[str] = []  # Track worktree names
+        self.llm_provider: Optional[LLMProvider] = None
 
         # Internal state
         self._keep_branches: List[str] = []
@@ -244,7 +245,13 @@ class SandboxRunner:
         # We create a symlink: /host/path/.git -> /project/.git
         self._setup_git_symlink()
 
-    def run_prompt(
+        # Step 4: Create LLM provider
+        self.llm_provider = create_llm_provider(
+            self.provider_name,
+            self.provider_config,
+        )
+
+    def run_agent(
         self,
         prompt: str,
         output_schema: Dict[str, Any],
@@ -252,7 +259,7 @@ class SandboxRunner:
         verbose: bool = False,
     ) -> Dict[str, Any]:
         """
-        Execute LLM prompt with structured output.
+        Execute LLM agent with tools and structured output.
 
         Must call setup() before calling this method.
 
@@ -265,18 +272,13 @@ class SandboxRunner:
         Returns:
             Structured output from LLM
         """
-        if not self.container_id or not self.instance_id:
-            raise RuntimeError("Must call setup() before run_prompt()")
+        if not self.container_id or not self.instance_id or not self.llm_provider:
+            raise RuntimeError("Must call setup() before run_agent()")
 
-        # Execute LLM prompt with structured output
-        click.echo("Executing LLM prompt...")
+        # Execute LLM agent with tools
+        click.echo("Executing LLM agent...")
 
-        llm_provider = create_llm_provider(
-            self.provider_name,
-            self.provider_config,
-        )
-
-        result = llm_provider.generate_structured(
+        result = self.llm_provider.generate_structured(
             prompt,
             mcp_server,
             output_schema,
