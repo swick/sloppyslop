@@ -7,18 +7,13 @@ from typing import Optional
 
 import click
 
-from llm_sandbox.analyzer import ProjectAnalyzer
-from llm_sandbox.subcommands import RunSubcommand
+from llm_sandbox.subcommands import RunSubcommand, GenContainerfileSubcommand, PRReviewSubcommand
 from llm_sandbox.config import (
     AnthropicConfig,
-    BuildConfig,
     Config,
-    ImageConfig,
     VertexAIConfig,
     get_provider_config,
     load_config,
-    load_project_config,
-    save_project_config,
 )
 from llm_sandbox.container import ContainerManager
 from llm_sandbox.image import Image
@@ -98,103 +93,6 @@ def check(provider: Optional[str]):
     except Exception as e:
         click.echo(f"✗ Unexpected error: {e}", err=True)
         sys.exit(1)
-
-
-@cli.command(name="gen-containerfile")
-@click.argument("image_name", required=True)
-@click.option(
-    "--extra-prompt",
-    type=str,
-    help="Additional instructions to add to the generation prompt",
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Overwrite existing Containerfile configuration",
-)
-def gen_containerfile(image_name: str, extra_prompt: Optional[str], force: bool):
-    """Generate a Containerfile for the specified image environment."""
-    project_dir = Path.cwd()
-
-    click.echo(f"Generating Containerfile for: {image_name}")
-    click.echo(f"Project directory: {project_dir}")
-
-    # Check if project already has a Containerfile configuration
-    existing_project_config = load_project_config(project_dir)
-    if existing_project_config.image.build is not None and not force:
-        click.echo(
-            f"Error: Project already has a Containerfile configuration:\n"
-            f"  Containerfile: {existing_project_config.image.build.containerfile}\n"
-            f"\nUse --force to overwrite the existing configuration.",
-            err=True
-        )
-        sys.exit(1)
-
-    # Load config (merged global + project) and create LLM provider
-    config = load_config(project_dir)
-
-    try:
-        provider_name, provider_config = get_provider_config(config)
-        llm_provider = create_llm_provider(
-            provider_name,
-            provider_config,
-            base_system_prompt="You are an expert in containerization and build systems. You help users create appropriate Containerfiles for their projects based on their dependencies and requirements.",
-        )
-    except Exception as e:
-        click.echo(f"Error: LLM provider not configured: {e}", err=True)
-        click.echo("\nPlease configure your LLM provider first:", err=True)
-        click.echo("  llm-sandbox check", err=True)
-        sys.exit(1)
-
-    # Create analyzer with LLM provider
-    analyzer = ProjectAnalyzer(llm_provider)
-
-    # Generate containerfile
-    click.echo("\nGenerating Containerfile with LLM...")
-    containerfile_content = analyzer.generate_containerfile(
-        project_dir,
-        image_name,
-        extra_prompt,
-    )
-
-    # Show generated content
-    click.echo("\n" + "=" * 60)
-    click.echo("Generated Containerfile:")
-    click.echo("=" * 60)
-    click.echo(containerfile_content)
-    click.echo("=" * 60)
-
-    # Save containerfile
-    config_dir = project_dir / ".llm-sandbox"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    containerfile_path = config_dir / "Containerfile"
-    containerfile_path.write_text(containerfile_content)
-    click.echo(f"\n✓ Saved to: {containerfile_path.relative_to(project_dir)}")
-
-    # Load or create project config
-    project_config = load_project_config(project_dir)
-
-    # Update image configuration
-    build_config = BuildConfig(
-        containerfile=".llm-sandbox/Containerfile",
-        auto_rebuild=True,
-    )
-    image_config = ImageConfig(image=image_name, build=build_config)
-
-    # Update only the image field, preserve other settings
-    project_config.image = image_config
-
-    # Save updated config
-    save_project_config(project_dir, project_config)
-    click.echo(f"✓ Updated configuration: .llm-sandbox/config.yaml")
-    click.echo(f"  Image name: {image_name}")
-    click.echo(f"  Build from: .llm-sandbox/Containerfile")
-    click.echo(f"  Auto-rebuild: {build_config.auto_rebuild}")
-
-    click.echo(f"\nNext steps:")
-    click.echo(f"  llm-sandbox build             # Build the image")
-    click.echo(f"  llm-sandbox run --prompt 'Your prompt' --schema '{{...}}'")
-    click.echo(f"  llm-sandbox run --prompt-file prompt.txt --schema-file schema.json --keep-branch feature/foo")
 
 
 @cli.command()
@@ -382,6 +280,8 @@ def register_subcommand_class(subcommand_class):
 def register_builtin_subcommands():
     """Register built-in subcommands."""
     register_subcommand_class(RunSubcommand)
+    register_subcommand_class(GenContainerfileSubcommand)
+    register_subcommand_class(PRReviewSubcommand)
 
 
 def register_custom_subcommands():
