@@ -30,14 +30,15 @@ To use an example subcommand:
 ### pr-review.py
 
 A single-agent GitHub PR review workflow that:
-1. Checks out PR head and base commits
-2. Reads project documentation (AGENTS.md, CLAUDE.md)
-3. Identifies commits and changes in the PR using git history
-4. Finds and reads ALL review instruction files from `review/` and `docs/review/` folders
-5. Applies all review criteria to ALL PR changes
-6. Generates suggestions based on all criteria
-7. User approves suggestions interactively
-8. Posts accepted suggestions as **inline review comments** directly on the relevant lines
+1. Fetches PR information from GitHub API
+2. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
+3. Agent reads project documentation (AGENTS.md, CLAUDE.md)
+4. Agent identifies commits and changes in the PR using git history or GitHub API
+5. Agent finds and reads ALL review instruction files from `review/` and `docs/review/` folders
+6. Agent applies all review criteria to ALL PR changes
+7. Agent generates suggestions based on all criteria
+8. User approves suggestions interactively
+9. Posts accepted suggestions as **inline review comments** directly on the relevant lines
 
 **Important:**
 - The `review/` and `docs/review/` folders contain **review instructions** (how to review), not the files to review
@@ -62,10 +63,14 @@ llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
 ```
 
 **Single-Agent Workflow:**
-1. **Review agent performs all tasks:**
-   - Checks out worktrees for PR head and base branches
+1. **Pre-setup (Python code):**
+   - Fetches PR information from GitHub API
+   - Pre-checks out worktrees for PR head and base branches (pr-head and pr-base)
+
+2. **Review agent performs all tasks:**
+   - Uses pre-checked-out worktrees (pr-head and pr-base)
    - Reads AGENTS.md and CLAUDE.md for project context
-   - Uses git history (git rev-list, git show) to identify all commits and changes in the PR
+   - Uses git history (git rev-list, git show) or GitHub API to identify all commits and changes in the PR
    - Finds all review instruction files from `review/` and `docs/review/` folders
    - Reads ALL review instruction files to understand all criteria to apply
    - Examines all changes in the PR using git commands and file tools
@@ -73,11 +78,11 @@ llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
    - Generates suggestions following project documentation and review guidelines
    - Categories: bug/performance/security/style/refactor/documentation
 
-2. **User approval:**
+3. **User approval:**
    - All suggestions are shown to the user
    - User reviews and accepts/rejects each suggestion interactively
 
-3. **GitHub posting:**
+4. **GitHub posting:**
    - Accepted suggestions posted as inline comments with GitHub's suggestion feature
    - Summary comment includes documentation summary, review criteria applied, and stats
 

@@ -1,15 +1,16 @@
 """Example subcommand: GitHub PR review with instruction-based criteria.
 
 This subcommand demonstrates a single-agent workflow with custom MCP tools:
-1. Checks out PR head and base commits
-2. Reads project documentation (AGENTS.md, CLAUDE.md) if available
-3. Uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
-4. OR uses git history (git rev-list --ancestry-path) to identify commits in the PR
-5. Examines each commit (git show) to understand all changes
-6. Finds review instruction files in review/ and docs/review/ folders
-7. Reads ALL review instruction files and applies criteria to ALL PR changes
-8. Generates suggestions based on all criteria
-9. User approves suggestions and posts to GitHub
+1. Fetches PR information from GitHub API
+2. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
+3. Agent reads project documentation (AGENTS.md, CLAUDE.md) if available
+4. Agent uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
+5. OR agent uses git history (git rev-list --ancestry-path) to identify commits in the PR
+6. Agent examines each commit (git show) to understand all changes
+7. Agent finds review instruction files in review/ and docs/review/ folders
+8. Agent reads ALL review instruction files and applies criteria to ALL PR changes
+9. Agent generates suggestions based on all criteria
+10. User approves suggestions and posts to GitHub
 
 Custom MCP Tools:
 - get_pull_request_commits: Fetches commit list from GitHub API
@@ -40,7 +41,7 @@ from typing import Any, Dict
 import click
 import requests
 
-from llm_sandbox.mcp_tools import MCPTool
+from llm_sandbox.mcp_tools import MCPTool, CheckoutCommitTool
 from llm_sandbox.subcommand import Subcommand
 
 
@@ -333,32 +334,32 @@ PR Information:
 - Base branch: {pr_info['base_ref']}
 - Author: {pr_info['author']}
 
+Worktrees already checked out for you:
+- 'pr-head': Contains the PR changes (head: {pr_info['head_ref']})
+- 'pr-base': Contains the base branch (base: {pr_info['base_ref']})
+
 Your tasks:
 
-1. Check out two worktrees:
-   - checkout_commit(commit="{pr_info['head_ref']}", worktree_name="pr-head")
-   - checkout_commit(commit="{pr_info['base_ref']}", worktree_name="pr-base")
-
-2. Read project documentation from pr-head worktree (if available):
+1. Read project documentation from pr-head worktree (if available):
    - Try to read AGENTS.md (using read_file)
    - Try to read CLAUDE.md (using read_file)
    - If these don't exist, that's fine - note that in your summary
 
-3. Identify commits and changes in the PR:
+2. Identify commits and changes in the PR:
    - You can use get_pull_request_commits() to get the list of commits from GitHub API
    - You can use get_pull_request_diff() to get the full PR diff from GitHub API
    - OR use execute_command to get commits: cd /worktrees/pr-head && git rev-list --ancestry-path $(cd /worktrees/pr-base && git rev-parse HEAD)..HEAD
    - For each commit, use git show to examine what changed (files, diffs, commit messages)
    - Build a summary of all changes across all commits in the PR
 
-4. Find and read review instruction files from pr-head worktree:
+3. Find and read review instruction files from pr-head worktree:
    - Use glob to find files in: review/ directory
    - Use glob to find files in: docs/review/ directory
    - Read EACH instruction file using read_file(worktree="pr-head", path="...")
    - Understand all the review criteria from all instruction files
    - If no review instruction files exist, use general best practices
 
-5. Review ALL the changes in the PR according to ALL the criteria:
+4. Review ALL the changes in the PR according to ALL the criteria:
    - Apply all criteria from all instruction files
    - Use git commands or file tools to examine the changes
    - Use read_file to examine specific files from pr-head and pr-base
@@ -453,7 +454,39 @@ Return:
 
         # Run single agent with custom tools
         try:
+            # Setup the sandbox environment
             runner.setup(network=network)
+
+            # Create checkout tool instance
+            checkout_tool = CheckoutCommitTool(
+                runner.container_manager,
+                runner.container_id,
+                runner.instance_id,
+                runner,
+            )
+
+            # Pre-checkout worktrees for PR head and base
+            click.echo("\nChecking out worktrees...")
+            click.echo(f"  Creating worktree 'pr-head' from {pr_info['head_ref']}...")
+            head_result = checkout_tool.execute({
+                "commit": pr_info['head_ref'],
+                "worktree_name": "pr-head",
+            })
+            if not head_result["success"]:
+                click.echo(f"Error: {head_result['error']}", err=True)
+                sys.exit(1)
+
+            click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
+            base_result = checkout_tool.execute({
+                "commit": pr_info['base_ref'],
+                "worktree_name": "pr-base",
+            })
+            if not base_result["success"]:
+                click.echo(f"Error: {base_result['error']}", err=True)
+                sys.exit(1)
+
+            click.echo("  Worktrees created successfully!")
+
             result = runner.run_prompt(
                 prompt=agent_prompt,
                 output_schema=agent_schema,
