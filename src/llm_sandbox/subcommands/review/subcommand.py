@@ -486,47 +486,49 @@ Examples:
         # Create diff generator if needed
         diff_generator = FeedbackDiffGenerator(store.project_dir) if show_diff else None
 
-        # Display header
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Review: {review_id}")
-        click.echo(f"{'='*60}")
-
-        # Target info
-        if review.target_info and review.target_info.get("type"):
-            target_type = review.target_info["type"]
-            click.echo(f"\nTarget: {target_type}")
-            if target_type == "github_pr":
-                pr_number = review.target_info.get("pr_number")
-                repo_name = review.target_info.get("repo_name")
-                if pr_number and repo_name:
-                    click.echo(f"  PR: #{pr_number} ({repo_name})")
-            elif target_type == "local":
-                if review.base_ref and review.head_ref:
-                    click.echo(f"  Range: {review.base_ref}..{review.head_ref}")
-
-        # Summary
-        if review.summary:
+        # Only show review header if not filtering by specific suggestion IDs
+        if not matching_suggestion_ids:
+            # Display header
             click.echo(f"\n{'='*60}")
-            click.echo("Summary")
+            click.echo(f"Review: {review_id}")
             click.echo(f"{'='*60}")
-            # Show first 300 chars
-            summary_text = review.summary
-            if len(summary_text) > 300:
-                click.echo(summary_text[:300] + "...")
-            else:
-                click.echo(summary_text)
 
-        # Statistics
-        stats = review.get_statistics()
-        click.echo(f"\n{'='*60}")
-        click.echo("Statistics")
-        click.echo(f"{'='*60}")
-        click.echo(f"Total findings: {stats['total']}")
-        click.echo(f"Unique findings: {stats['unique']}")
-        click.echo(f"Duplicates marked: {stats['duplicates']}")
-        click.echo(f"Ignored: {stats['ignored']}")
-        if not show_all and stats['duplicates'] > 0:
-            click.echo(f"\nShowing unique findings only (use --all to show {stats['duplicates']} duplicates)")
+            # Target info
+            if review.target_info and review.target_info.get("type"):
+                target_type = review.target_info["type"]
+                click.echo(f"\nTarget: {target_type}")
+                if target_type == "github_pr":
+                    pr_number = review.target_info.get("pr_number")
+                    repo_name = review.target_info.get("repo_name")
+                    if pr_number and repo_name:
+                        click.echo(f"  PR: #{pr_number} ({repo_name})")
+                elif target_type == "local":
+                    if review.base_ref and review.head_ref:
+                        click.echo(f"  Range: {review.base_ref}..{review.head_ref}")
+
+            # Summary
+            if review.summary:
+                click.echo(f"\n{'='*60}")
+                click.echo("Summary")
+                click.echo(f"{'='*60}")
+                # Show first 300 chars
+                summary_text = review.summary
+                if len(summary_text) > 300:
+                    click.echo(summary_text[:300] + "...")
+                else:
+                    click.echo(summary_text)
+
+            # Statistics
+            stats = review.get_statistics()
+            click.echo(f"\n{'='*60}")
+            click.echo("Statistics")
+            click.echo(f"{'='*60}")
+            click.echo(f"Total findings: {stats['total']}")
+            click.echo(f"Unique findings: {stats['unique']}")
+            click.echo(f"Duplicates marked: {stats['duplicates']}")
+            click.echo(f"Ignored: {stats['ignored']}")
+            if not show_all and stats['duplicates'] > 0:
+                click.echo(f"\nShowing unique findings only (use --all to show {stats['duplicates']} duplicates)")
 
         # Group feedback by commit
         from collections import defaultdict
@@ -566,31 +568,42 @@ Examples:
 
         # Display suggestions by commit
         if by_commit or no_commit:
-            click.echo(f"\n{'='*60}")
-            if show_all:
-                click.echo(f"All Suggestions by Commit ({total_displayed} items)")
-            else:
-                click.echo(f"Suggestions by Commit ({total_displayed} unique, {duplicates_skipped} duplicates hidden)")
-            click.echo(f"{'='*60}")
+            # Only show header if not filtering by specific suggestion IDs
+            if not matching_suggestion_ids:
+                click.echo(f"\n{'='*60}")
+                if show_all:
+                    click.echo(f"All Suggestions by Commit ({total_displayed} items)")
+                else:
+                    click.echo(f"Suggestions by Commit ({total_displayed} unique, {duplicates_skipped} duplicates hidden)")
+                click.echo(f"{'='*60}")
+
+            # Track whether we've shown the first item (for separator placement)
+            first_item = True
 
             # Show commits with suggestions
             for commit_sha, items in sorted(by_commit.items()):
                 short_sha = commit_sha[:7] if len(commit_sha) >= 7 else commit_sha
                 click.echo(f"\n[{short_sha}] ({len(items)} suggestions):")
                 for item in items:
-                    self._display_feedback_item(item, diff_generator)
+                    self._display_feedback_item(item, diff_generator, is_first=first_item)
+                    first_item = False
 
             # Show items without commit info
             if no_commit:
                 click.echo(f"\n[no commit] ({len(no_commit)} suggestions):")
                 for item in no_commit:
-                    self._display_feedback_item(item, diff_generator)
+                    self._display_feedback_item(item, diff_generator, is_first=first_item)
+                    first_item = False
         else:
-            click.echo(f"\n{'='*60}")
-            click.echo("No suggestions (all filtered)")
-            click.echo(f"{'='*60}")
+            if matching_suggestion_ids:
+                click.echo("No matching suggestions found")
+            else:
+                click.echo(f"\n{'='*60}")
+                click.echo("No suggestions (all filtered)")
+                click.echo(f"{'='*60}")
 
-        click.echo()  # Empty line at end
+        if not matching_suggestion_ids:
+            click.echo()  # Empty line at end
 
     def _parse_commit_filters(self, commit_filters: tuple, review: Review, project_dir: Path) -> set:
         """Parse commit filters into set of matching commit SHAs.
@@ -645,12 +658,13 @@ Examples:
 
         return matching
 
-    def _display_feedback_item(self, item: FeedbackItem, diff_generator: Optional[FeedbackDiffGenerator]):
+    def _display_feedback_item(self, item: FeedbackItem, diff_generator: Optional[FeedbackDiffGenerator], is_first: bool = True):
         """Display a single feedback item, with optional diff.
 
         Args:
             item: FeedbackItem to display
             diff_generator: Optional diff generator for showing changes
+            is_first: Whether this is the first item being displayed (default: True)
         """
         short_id = item.get_short_id()
 
@@ -660,28 +674,37 @@ Examples:
             reason_short = reason_short.replace('\n', ' ').strip()
             click.echo(f"  [{short_id}] {item.file}:{item.line_start} [{item.category}] {reason_short}")
         else:
+            # Separator before item (except first)
+            if not is_first:
+                click.echo("═" * 80)
+
             # Detailed format: show full reason and diff
-            click.echo(f"\n  [{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
-            click.echo(f"    Severity: {item.severity}")
+            click.echo(f"\n[{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
+            if item.commit:
+                short_commit = item.commit[:7] if len(item.commit) >= 7 else item.commit
+                click.echo(f"Commit: {short_commit}")
+            click.echo(f"Severity: {item.severity}")
             if item.probability is not None:
-                click.echo(f"    Confidence: {item.probability:.2f}")
-            click.echo(f"\n    Reason:")
+                click.echo(f"Confidence: {item.probability:.2f}")
+
+            # Newline before reason
+            click.echo()
+
+            # Reason text (indented by 4 spaces)
             for line in item.reason.split('\n'):
-                click.echo(f"      {line}")
+                click.echo(f"    {line}")
 
             # Generate and show diff
             try:
                 diff_text = diff_generator.generate_diff(item)
                 if diff_text:
-                    click.echo(f"\n    Diff:")
+                    click.echo()  # Blank line before diff
                     for line in diff_text.split('\n'):
                         self._display_diff_line(line)
                 else:
-                    click.echo(f"\n    (No diff available)")
+                    click.echo("\n(No diff available)")
             except Exception as e:
-                click.echo(f"\n    (Error generating diff: {e})")
-
-            click.echo()  # Blank line between items
+                click.echo(f"\n(Error generating diff: {e})")
 
     def _display_diff_line(self, line: str):
         """Display a diff line with appropriate coloring.
@@ -689,20 +712,18 @@ Examples:
         Args:
             line: Diff line to display
         """
-        indent = "      "
-
         if line.startswith('+++') or line.startswith('---'):
             # File headers (bold)
-            click.secho(f"{indent}{line}", bold=True)
+            click.secho(line, bold=True)
         elif line.startswith('@@'):
             # Hunk headers (cyan)
-            click.secho(f"{indent}{line}", fg='cyan')
+            click.secho(line, fg='cyan')
         elif line.startswith('+'):
             # Additions (green)
-            click.secho(f"{indent}{line}", fg='green')
+            click.secho(line, fg='green')
         elif line.startswith('-'):
             # Deletions (red)
-            click.secho(f"{indent}{line}", fg='red')
+            click.secho(line, fg='red')
         else:
             # Context lines (no color)
-            click.echo(f"{indent}{line}")
+            click.echo(line)
