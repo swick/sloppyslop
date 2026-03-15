@@ -8,7 +8,7 @@ from typing import Optional
 
 import click
 
-from llm_sandbox.subcommands import RunSubcommand, GenContainerfileSubcommand, PRReviewSubcommand
+from llm_sandbox.subcommands import RunSubcommand, GenContainerfileSubcommand, ReviewSubcommand
 from llm_sandbox.config import (
     AnthropicConfig,
     Config,
@@ -274,7 +274,7 @@ def register_builtin_subcommands():
     """Register built-in subcommands."""
     register_subcommand_class(RunSubcommand)
     register_subcommand_class(GenContainerfileSubcommand)
-    register_subcommand_class(PRReviewSubcommand)
+    register_subcommand_class(ReviewSubcommand)
 
 
 def register_custom_subcommands():
