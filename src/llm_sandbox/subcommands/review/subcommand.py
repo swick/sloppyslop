@@ -510,15 +510,17 @@ class ReviewSubcommand(Subcommand):
             if item.duplicate_of is not None or item.ignore:
                 continue  # Skip duplicates and ignored items
 
+            # Backward compatibility: handle old reviews without commit
+            if not item.commit:
+                no_commit.append(item)
+                continue
+
             # Apply commit filter if specified
             if matching_commits is not None:
-                if not item.commit or item.commit not in matching_commits:
+                if item.commit not in matching_commits:
                     continue  # Skip items that don't match filter
 
-            if item.commit:
-                by_commit[item.commit].append(item)
-            else:
-                no_commit.append(item)
+            by_commit[item.commit].append(item)
 
         # Display suggestions by commit
         if by_commit or no_commit:

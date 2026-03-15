@@ -114,6 +114,10 @@ class RecordReviewFeedbackTool(MCPTool):
                         "type": "string",
                         "description": "File path relative to repository root",
                     },
+                    "commit": {
+                        "type": "string",
+                        "description": "Git commit SHA of the version the file refers to",
+                    },
                     "line_start": {
                         "type": "integer",
                         "description": "Starting line number (1-indexed)",
@@ -145,23 +149,62 @@ class RecordReviewFeedbackTool(MCPTool):
                         "description": "Severity level (optional, defaults to 'medium')",
                         "default": "medium",
                     },
-                    "commit": {
-                        "type": "string",
-                        "description": "Git commit SHA where this issue was introduced or exists (optional)",
-                    },
                 },
-                "required": ["file", "line_start", "line_end", "reason", "category"],
+                "required": ["file", "commit", "line_start", "line_end", "reason", "category"],
             },
         )
         self.runner = runner
 
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
-        """Record review feedback."""
+        """Record review feedback with validation."""
+        file = arguments["file"]
+        commit = arguments["commit"]
+        line_start = arguments["line_start"]
+        line_end = arguments["line_end"]
+
+        # Validate commit is in the review
+        if hasattr(self.runner, '_review_commits') and commit not in self.runner._review_commits:
+            return {
+                "success": False,
+                "error": f"Commit '{commit[:7]}' is not in the review. Use get_review_commits to see valid commits.",
+            }
+
+        # Validate file exists at that commit and lines are in-bound
+        try:
+            # Get file content at commit
+            file_content = self.runner.git_ops.repo.git.show(f"{commit}:{file}")
+            lines = file_content.splitlines()
+            total_lines = len(lines)
+
+            # Validate line numbers
+            if line_start < 1:
+                return {
+                    "success": False,
+                    "error": f"line_start must be >= 1 (got {line_start})",
+                }
+            if line_end > total_lines:
+                return {
+                    "success": False,
+                    "error": f"line_end {line_end} exceeds file length ({total_lines} lines) in {file} at {commit[:7]}",
+                }
+            if line_start > line_end:
+                return {
+                    "success": False,
+                    "error": f"line_start ({line_start}) must be <= line_end ({line_end})",
+                }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"File '{file}' does not exist at commit {commit[:7]} or cannot be read: {str(e)}",
+            }
+
+        # Create and store feedback item
         feedback_item = FeedbackItem(
-            file=arguments["file"],
-            line_start=arguments["line_start"],
-            line_end=arguments["line_end"],
-            commit=arguments.get("commit", ""),
+            file=file,
+            commit=commit,
+            line_start=line_start,
+            line_end=line_end,
             current_code=arguments.get("current_code", ""),
             suggested_code=arguments.get("suggested_code", ""),
             reason=arguments["reason"],
@@ -173,7 +216,7 @@ class RecordReviewFeedbackTool(MCPTool):
 
         return {
             "success": True,
-            "message": f"Recorded feedback for {arguments['file']}:{arguments['line_start']}-{arguments['line_end']}",
+            "message": f"Recorded feedback for {file}:{line_start}-{line_end} at commit {commit[:7]}",
             "total_feedback_items": len(self.runner._review_feedback),
         }
 
@@ -507,6 +550,7 @@ Your workflow:
    - Use git diff or get_review_diff to see what changed
    - Use git log or get_review_commits to understand the commits
    - Focus your review on the diff itself - the actual lines that changed
+   - Note: get_review_commits returns a list with commit SHAs - use these when recording feedback
 
 3. Spawn sub-agents for specific review tasks:
 
@@ -529,6 +573,7 @@ Your workflow:
    - Use spawn_agent MCP tool
    - Do not let them create new sub-agents (inheritable=False is already set)
    - Give them clear instructions to use record_review_feedback to record findings
+   - Tell them they MUST provide the commit SHA when recording feedback (use commits from get_review_commits)
    - For review file agents: provide the file path and tell them to read it
    - Remind them to focus on HIGH SIGNAL issues only
    - Tell them to self-validate their findings before recording them
@@ -666,6 +711,10 @@ The structured output should just be a high-level summary - the detailed finding
                 sys.exit(1)
 
             click.echo("  Worktrees created successfully!")
+
+            # Get valid commits for validation
+            commits = review_target.get_commits()
+            runner._review_commits = {c["sha"] for c in commits}
 
             # Create MCP server with all built-in tools + review tools
             mcp_server = PRReviewMCPServer(runner, review_target)
