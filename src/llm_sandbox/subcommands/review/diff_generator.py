@@ -64,7 +64,8 @@ class FeedbackDiffGenerator:
             n=context_lines
         )
 
-        diff_text = '\n'.join(diff)
+        # Lines already have newlines from keepends=True, so just join without adding more
+        diff_text = ''.join(diff).rstrip('\n')
 
         # Return None if diff is empty (no actual changes)
         if not diff_text.strip():

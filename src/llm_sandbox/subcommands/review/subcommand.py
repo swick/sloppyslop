@@ -1,48 +1,4 @@
-"""Code review subcommand with support for GitHub PRs and local commits.
-
-This subcommand demonstrates a multi-agent review workflow with an abstraction layer:
-1. For GitHub PRs: Fetches PR info and head branch from GitHub API
-2. For local reviews: Uses provided base and head refs directly
-3. Pre-checks out head and base commits into worktrees (review-head and review-base)
-4. Agent reads project documentation (AGENTS.md, CLAUDE.md) if available
-5. Agent uses review tools (get_review_commits, get_review_diff) to fetch data
-   - For GitHub PRs: Data fetched from GitHub API via ReviewTarget
-   - For local: Agent uses git commands directly
-6. Agent examines commits and changes
-7. Agent finds review instruction files in review/ and docs/review/ folders
-8. Agent reads ALL review instruction files and applies criteria to ALL changes
-9. Agent spawns sub-agents for specific review tasks
-10. Sub-agents record findings, orchestrator assigns probabilities and identifies duplicates
-11. Review is saved to .llm-sandbox/reviews/ directory with unique ID
-
-Review Tools:
-- get_review_commits: Get commit list (from GitHub API or git commands)
-- get_review_diff: Get full diff (from GitHub API or git commands)
-
-The review/ and docs/review/ folders contain INSTRUCTIONS on how to review code,
-not the code to review. The actual code to review is identified through git history
-between review-base and review-head.
-
-If no review instruction files exist, uses general best practices review criteria.
-
-Reviews are stored in .llm-sandbox/reviews/ directory as YAML files with unique IDs.
-
-Usage:
-    # List available reviews (default action)
-    llm-sandbox review
-    llm-sandbox review list
-
-    # Create a new review
-    llm-sandbox review create --pr 123
-    llm-sandbox review create --base main --head feature
-    llm-sandbox review create --pr 123 --id my-review-id
-
-    # Remove a review
-    llm-sandbox review remove --id <review-id>
-
-Authentication (for GitHub PRs):
-    Set GH_TOKEN environment variable or use --with-token option
-"""
+"""Code review subcommand with support for GitHub PRs and local commits."""
 
 import asyncio
 import os
@@ -77,26 +33,57 @@ class ReviewSubcommand(Subcommand):
     """Code review with instruction-based criteria using multi-agent workflow."""
 
     name = "review"
-    help = "Code review: orchestrator agent reads docs, spawns review agents, applies review instructions"
+    help = """AI-powered code review for GitHub PRs and local commits.
+
+\b
+Supports multiple actions:
+  list   - List all saved reviews (default)
+  create - Run a new review (--pr for GitHub, --base/--head for local)
+  show   - Display a saved review with optional filtering
+  post   - Post a review to GitHub PR
+  remove - Delete a saved review
+
+\b
+Examples:
+  llm-sandbox review list
+  llm-sandbox review create --pr 123
+  llm-sandbox review create --base main --head feature
+  llm-sandbox review show my-review
+  llm-sandbox review show my-review --diff
+  llm-sandbox review show my-review --commit abc123      # Filter by commit
+  llm-sandbox review show my-review --commit main..feature
+  llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
+  llm-sandbox review post my-review"""
 
     def add_arguments(self, command):
         """Add custom arguments."""
-        # Sub-sub-command (positional, optional, defaults to 'list')
+        # Action argument
         command.params.append(
             click.Argument(
                 ["action"],
                 required=False,
                 default="list",
                 type=click.Choice(["list", "create", "remove", "post", "show"], case_sensitive=False),
+                metavar="ACTION",
             )
         )
 
-        # Review ID (for remove, optional for create)
+        # Review ID (positional for show/post, option for create/remove)
+        command.params.append(
+            click.Argument(
+                ["review_id"],
+                required=False,
+                type=str,
+                metavar="[REVIEW_ID]",
+            )
+        )
+
+        # Keep --id as fallback/alternative
         command.params.append(
             click.Option(
                 ["--id"],
                 type=str,
-                help="Review ID (required for remove, optional for create - auto-generated if not provided)",
+                help="Review ID for remove action (required); optional for create (auto-generated if omitted)",
             )
         )
 
@@ -105,45 +92,60 @@ class ReviewSubcommand(Subcommand):
             click.Option(
                 ["--pr"],
                 type=int,
-                help="GitHub PR number to review (for create)",
+                help="GitHub PR number to review (for create action)",
             )
         )
         command.params.append(
             click.Option(
                 ["--base"],
                 type=str,
-                help="Base commit/branch for local review (for create, requires --head)",
+                help="Base commit/branch for local review (for create action, requires --head)",
             )
         )
         command.params.append(
             click.Option(
                 ["--head"],
                 type=str,
-                help="Head commit/branch for local review (for create, requires --base)",
+                help="Head commit/branch for local review (for create action, requires --base)",
             )
         )
         command.params.append(
             click.Option(
                 ["--with-token"],
                 type=str,
-                help="GitHub token (defaults to GH_TOKEN environment variable)",
+                help="GitHub token for create/post actions (default: $GH_TOKEN)",
             )
         )
 
-        # Show options - commit filters
+        # Suggestion ID filters (for show command)
         command.params.append(
             click.Argument(
-                ["commits"],
-                nargs=-1,  # Accept multiple arguments
+                ["suggestion_ids"],
+                nargs=-1,
                 required=False,
                 type=str,
+                metavar="[SUGGESTION_ID...]",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--commit"],
+                type=str,
+                help="Filter suggestions by commit SHA or range (for show action; e.g., abc123 or main..feature)",
             )
         )
         command.params.append(
             click.Option(
                 ["--diff"],
                 is_flag=True,
-                help="Show unified diffs for each suggestion (for show command)",
+                help="Display unified diffs for each suggestion (for show action)",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--all"],
+                is_flag=True,
+                help="Include duplicate findings (for show action; default: unique only)",
             )
         )
 
@@ -153,6 +155,16 @@ class ReviewSubcommand(Subcommand):
         """Execute review command, routing to appropriate sub-sub-command."""
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
+
+        # For show/post, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post"):
+            positional_id = kwargs.get("review_id")
+            option_id = kwargs.get("id")
+            if positional_id:
+                kwargs["id"] = positional_id
+            elif not option_id:
+                click.echo(f"Error: review ID is required for {action}", err=True)
+                sys.exit(1)
 
         if action == "list":
             self._list_reviews(store, **kwargs)
@@ -380,8 +392,9 @@ class ReviewSubcommand(Subcommand):
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
         project_dir = store.project_dir
 
+        # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: --id is required for post", err=True)
+            click.echo("Error: review ID is required for post", err=True)
             sys.exit(1)
 
         # Load the review
@@ -441,11 +454,18 @@ class ReviewSubcommand(Subcommand):
     def _show_review(self, store: ReviewStore, **kwargs):
         """Show a review with summary and suggestions by commit."""
         review_id = kwargs.get("id")
-        commit_filters = kwargs.get("commits", ())  # Tuple of commit filters
+        suggestion_ids = kwargs.get("suggestion_ids", ())  # Tuple of suggestion IDs
+        commit_filter = kwargs.get("commit")  # Single commit or range string
         show_diff = kwargs.get("diff", False)
+        show_all = kwargs.get("all", False)
 
+        # If suggestion IDs are specified, show diff by default
+        if suggestion_ids and not show_diff:
+            show_diff = True
+
+        # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: --id is required for show", err=True)
+            click.echo("Error: review ID is required for show", err=True)
             sys.exit(1)
 
         # Load the review
@@ -455,8 +475,13 @@ class ReviewSubcommand(Subcommand):
             click.echo(f"Error: Review '{review_id}' not found.", err=True)
             sys.exit(1)
 
-        # Parse commit filters to get set of matching commits
-        matching_commits = self._parse_commit_filters(commit_filters, review, store.project_dir) if commit_filters else None
+        # Build filters
+        matching_commits = None
+        if commit_filter:
+            # Parse commit filter string as a single commit or range
+            matching_commits = self._parse_commit_filters((commit_filter,), review, store.project_dir)
+
+        matching_suggestion_ids = set(suggestion_ids) if suggestion_ids else None
 
         # Create diff generator if needed
         diff_generator = FeedbackDiffGenerator(store.project_dir) if show_diff else None
@@ -498,17 +523,31 @@ class ReviewSubcommand(Subcommand):
         click.echo(f"{'='*60}")
         click.echo(f"Total findings: {stats['total']}")
         click.echo(f"Unique findings: {stats['unique']}")
-        click.echo(f"Duplicates: {stats['duplicates']}")
+        click.echo(f"Duplicates marked: {stats['duplicates']}")
         click.echo(f"Ignored: {stats['ignored']}")
+        if not show_all and stats['duplicates'] > 0:
+            click.echo(f"\nShowing unique findings only (use --all to show {stats['duplicates']} duplicates)")
 
         # Group feedback by commit
         from collections import defaultdict
         by_commit = defaultdict(list)
         no_commit = []
+        duplicates_skipped = 0
 
         for item in review.feedback:
-            if item.duplicate_of is not None or item.ignore:
-                continue  # Skip duplicates and ignored items
+            # Always skip ignored items
+            if item.ignore:
+                continue
+
+            # Skip duplicates unless --all is specified
+            if not show_all and item.duplicate_of is not None:
+                duplicates_skipped += 1
+                continue
+
+            # Apply suggestion ID filter if specified
+            if matching_suggestion_ids is not None:
+                if item.get_short_id() not in matching_suggestion_ids:
+                    continue  # Skip items that don't match suggestion ID filter
 
             # Backward compatibility: handle old reviews without commit
             if not item.commit:
@@ -518,14 +557,20 @@ class ReviewSubcommand(Subcommand):
             # Apply commit filter if specified
             if matching_commits is not None:
                 if item.commit not in matching_commits:
-                    continue  # Skip items that don't match filter
+                    continue  # Skip items that don't match commit filter
 
             by_commit[item.commit].append(item)
+
+        # Count total items being displayed
+        total_displayed = sum(len(items) for items in by_commit.values()) + len(no_commit)
 
         # Display suggestions by commit
         if by_commit or no_commit:
             click.echo(f"\n{'='*60}")
-            click.echo("Suggestions by Commit")
+            if show_all:
+                click.echo(f"All Suggestions by Commit ({total_displayed} items)")
+            else:
+                click.echo(f"Suggestions by Commit ({total_displayed} unique, {duplicates_skipped} duplicates hidden)")
             click.echo(f"{'='*60}")
 
             # Show commits with suggestions
@@ -607,14 +652,16 @@ class ReviewSubcommand(Subcommand):
             item: FeedbackItem to display
             diff_generator: Optional diff generator for showing changes
         """
+        short_id = item.get_short_id()
+
         if diff_generator is None:
-            # Compact format: one line summary
+            # Compact format: one line summary with ID
             reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
             reason_short = reason_short.replace('\n', ' ').strip()
-            click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+            click.echo(f"  [{short_id}] {item.file}:{item.line_start} [{item.category}] {reason_short}")
         else:
             # Detailed format: show full reason and diff
-            click.echo(f"\n  • {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
+            click.echo(f"\n  [{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
             click.echo(f"    Severity: {item.severity}")
             if item.probability is not None:
                 click.echo(f"    Confidence: {item.probability:.2f}")

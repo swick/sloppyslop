@@ -242,6 +242,19 @@ class FeedbackItem:
     # User override (optional, set during editing)
     ignore: bool = False
 
+    def get_short_id(self) -> str:
+        """Generate a short unique ID for this feedback item.
+
+        Returns:
+            6-character hex string based on file, line range, and commit
+        """
+        import hashlib
+
+        # Create a stable hash from key attributes
+        content = f"{self.file}:{self.line_start}:{self.line_end}:{self.commit}"
+        hash_obj = hashlib.sha256(content.encode())
+        return hash_obj.hexdigest()[:6]
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         result = {
