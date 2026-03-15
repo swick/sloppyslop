@@ -602,10 +602,7 @@ Examples:
             # Only show header if not filtering by specific suggestion IDs
             if not matching_suggestion_ids:
                 click.echo(f"\n{'='*60}")
-                if show_all:
-                    click.echo(f"All Suggestions by Commit ({total_displayed} items)")
-                else:
-                    click.echo(f"Suggestions by Commit ({total_displayed} unique, {duplicates_skipped} duplicates hidden)")
+                click.echo(f"Suggestions by Commit")
                 click.echo(f"{'='*60}")
 
             # Track whether we've shown the first item (for separator placement)
