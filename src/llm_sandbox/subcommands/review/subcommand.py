@@ -976,13 +976,7 @@ Examples:
         click.echo(f"\n{'='*60}")
         click.echo(f"Interactive Review: {review_id}")
         click.echo(f"{'='*60}")
-        click.echo(f"\nReviewing {len(active_feedback)} active suggestions")
-        click.echo("\nCommands:")
-        click.echo("  - e - Edit the diff interactively")
-        click.echo("  - d - Dismiss (mark as ignored)")
-        click.echo("  - a - Accept (move to next, default)")
-        click.echo("  - q - Quit and save changes")
-        click.echo()
+        click.echo(f"\nReviewing {len(active_feedback)} active suggestions\n")
 
         modified = False
         for i, item in enumerate(active_feedback, 1):
@@ -997,10 +991,10 @@ Examples:
             while True:
                 click.echo()
                 action = click.prompt(
-                    "Action",
+                    "Action ([e]dit, [d]ismiss, [a]ccept, [q]uit)",
                     type=click.Choice(['e', 'd', 'a', 'q'], case_sensitive=False),
                     default='a',
-                    show_choices=True
+                    show_choices=False
                 )
 
                 if action == 'q':

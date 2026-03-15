@@ -110,6 +110,21 @@ class FeedbackDiffGenerator:
         # Split suggested code into lines (without line endings)
         suggested_lines = item.suggested_code.splitlines()
 
+        # Trim identical lines from the beginning of suggested code
+        # to avoid duplicates with lines before the replaced range
+        while (start_idx > 0 and suggested_lines and
+               start_idx - 1 < len(original_lines) and
+               original_lines[start_idx - 1] == suggested_lines[0]):
+            suggested_lines = suggested_lines[1:]
+            start_idx -= 1
+
+        # Trim identical lines from the end of suggested code
+        # to avoid duplicates with lines after the replaced range
+        while (end_idx < len(original_lines) and suggested_lines and
+               original_lines[end_idx] == suggested_lines[-1]):
+            suggested_lines = suggested_lines[:-1]
+            end_idx += 1
+
         # Build modified content: before + suggested + after
         # suggested_code replaces lines from line_start to line_end (inclusive)
         modified_lines = (
