@@ -2,7 +2,7 @@
 
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import git
 
@@ -165,3 +165,88 @@ class GitOperations:
                 f"Files: {', '.join(files)}\n"
                 f"Worktree: {worktree_path}"
             ) from e
+
+    def get_diff(self, base_ref: str, head_ref: str) -> str:
+        """
+        Get the diff between two refs.
+
+        Args:
+            base_ref: Base commit/branch reference
+            head_ref: Head commit/branch reference
+
+        Returns:
+            Unified diff format string
+
+        Raises:
+            RuntimeError: If diff cannot be obtained
+        """
+        try:
+            # Use git diff with three-dot notation (merge base)
+            diff = self.repo.git.diff(f"{base_ref}...{head_ref}")
+            return diff
+        except git.GitCommandError as e:
+            raise RuntimeError(f"Failed to get diff: {e.stderr}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to get diff: {str(e)}") from e
+
+    def get_commits(self, base_ref: str, head_ref: str) -> List["git.Commit"]:
+        """
+        Get the list of commits between two refs.
+
+        Args:
+            base_ref: Base commit/branch reference
+            head_ref: Head commit/branch reference
+
+        Returns:
+            List of git.Commit objects
+
+        Raises:
+            RuntimeError: If commits cannot be obtained
+        """
+        try:
+            # Get commits from base_ref to head_ref (two-dot notation)
+            commit_range = f"{base_ref}..{head_ref}"
+            return list(self.repo.iter_commits(commit_range))
+        except git.GitCommandError as e:
+            raise RuntimeError(f"Failed to get commits: {e.stderr}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to get commits: {str(e)}") from e
+
+    def fetch_ref(self, remote: str, refspec: str) -> None:
+        """
+        Fetch a ref from a remote.
+
+        Args:
+            remote: Remote name (e.g., 'origin')
+            refspec: Refspec to fetch (e.g., 'pull/123/head:pr-123')
+
+        Raises:
+            RuntimeError: If fetch fails
+        """
+        try:
+            self.repo.git.fetch(remote, refspec)
+        except git.GitCommandError as e:
+            raise RuntimeError(f"Failed to fetch {refspec} from {remote}: {e.stderr}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch {refspec} from {remote}: {str(e)}") from e
+
+    def get_remote_url(self, remote_name: str = "origin") -> str:
+        """
+        Get the URL of a remote.
+
+        Args:
+            remote_name: Name of the remote (default: 'origin')
+
+        Returns:
+            Remote URL string
+
+        Raises:
+            RuntimeError: If remote URL cannot be retrieved
+        """
+        try:
+            remote = self.repo.remote(remote_name)
+            return remote.url
+        except ValueError as e:
+            raise RuntimeError(f"Remote '{remote_name}' not found") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to get remote URL: {str(e)}") from e

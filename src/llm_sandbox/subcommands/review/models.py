@@ -303,7 +303,13 @@ class Review:
     feedback: List[FeedbackItem]  # List of feedback items
     base_ref: str = ""  # Base commit/branch reference
     head_ref: str = ""  # Head commit/branch reference
+    target_info: Dict[str, Any] = None  # Target info with 'type' key (github_pr, local, etc.)
     metadata: Optional[ReviewMetadata] = None  # Agent result metadata
+
+    def __post_init__(self):
+        """Initialize mutable defaults."""
+        if self.target_info is None:
+            self.target_info = {}
 
     def filter_feedback(self, probability_threshold: float = 0.5) -> List[FeedbackItem]:
         """Filter feedback by probability and exclude duplicates."""
@@ -333,12 +339,14 @@ class Review:
         """Serialize review to YAML format."""
         docs = []
 
-        # Review info (base_ref and head_ref)
+        # Review info (base_ref, head_ref, target info)
         review_info = {}
         if self.base_ref:
             review_info["base_ref"] = self.base_ref
         if self.head_ref:
             review_info["head_ref"] = self.head_ref
+        if self.target_info:
+            review_info["target_info"] = self.target_info
         if review_info:
             docs.append({"review_info": review_info})
 
@@ -373,6 +381,7 @@ class Review:
         feedback = []
         base_ref = ""
         head_ref = ""
+        target_info = {}
 
         for doc in documents:
             if doc is None or not isinstance(doc, dict):
@@ -383,6 +392,7 @@ class Review:
                 review_info = doc['review_info']
                 base_ref = review_info.get('base_ref', '')
                 head_ref = review_info.get('head_ref', '')
+                target_info = review_info.get('target_info', {})
             # Check if this is summary
             elif 'summary' in doc and len(doc) == 1:
                 summary = doc['summary']
@@ -393,4 +403,11 @@ class Review:
             else:
                 feedback.append(FeedbackItem.from_dict(doc))
 
-        return cls(summary=summary, feedback=feedback, base_ref=base_ref, head_ref=head_ref, metadata=metadata)
+        return cls(
+            summary=summary,
+            feedback=feedback,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            target_info=target_info,
+            metadata=metadata
+        )

@@ -33,7 +33,7 @@ class GetReviewDiffTool(MCPTool):
         """
         super().__init__(
             name="get_review_diff",
-            description="Get the full diff of the code changes being reviewed. Returns the unified diff format showing all changes. For GitHub PRs, this fetches from the GitHub API. For local reviews, use git commands instead.",
+            description="Get the full diff of the code changes being reviewed. Returns the unified diff format showing all changes. For GitHub PRs, this fetches from the GitHub API. For local reviews, this runs git diff locally.",
             parameters={
                 "type": "object",
                 "properties": {},
@@ -46,11 +46,6 @@ class GetReviewDiffTool(MCPTool):
         """Fetch the diff from the review target."""
         try:
             diff = self.review_target.get_diff()
-            if diff is None:
-                return {
-                    "success": False,
-                    "error": "Diff not available from review target. Use git commands to get diff (e.g., git diff base..head).",
-                }
             return {
                 "success": True,
                 "diff": diff,
@@ -74,7 +69,7 @@ class GetReviewCommitsTool(MCPTool):
         """
         super().__init__(
             name="get_review_commits",
-            description="Get the list of commits in the code review. Returns commit SHAs, messages, authors, and timestamps. For GitHub PRs, this fetches from the GitHub API. For local reviews, use git commands instead.",
+            description="Get the list of commits in the code review. Returns commit SHAs, messages, authors, and timestamps. For GitHub PRs, this fetches from the GitHub API. For local reviews, this runs git log locally.",
             parameters={
                 "type": "object",
                 "properties": {},
@@ -87,11 +82,6 @@ class GetReviewCommitsTool(MCPTool):
         """Fetch the commits from the review target."""
         try:
             commits = self.review_target.get_commits()
-            if commits is None:
-                return {
-                    "success": False,
-                    "error": "Commits not available from review target. Use git commands to get commits (e.g., git log base..head).",
-                }
             return {
                 "success": True,
                 "commits": commits,
@@ -418,6 +408,7 @@ class ReviewWorkflow:
             feedback=all_feedback,
             base_ref=base_ref,
             head_ref=head_ref,
+            target_info=review_target.to_info(),
             metadata=metadata
         )
 

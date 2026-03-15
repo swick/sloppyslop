@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import click
 import requests
 
+from llm_sandbox.git_ops import GitOperations
 from .models import Review, FeedbackItem
 
 
@@ -32,18 +33,35 @@ class ReviewTarget(ABC):
         pass
 
     @abstractmethod
-    def fetch_if_needed(self, project_dir: Path) -> None:
-        """Fetch remote refs if needed (e.g., PR from GitHub)."""
+    def fetch_if_needed(self) -> None:
+        """Fetch remote refs if needed (e.g., PR from GitHub).
+
+        Uses self.project_dir for repository operations.
+        """
         pass
 
     @abstractmethod
-    def get_diff(self) -> Optional[str]:
-        """Get the full diff for the review. Returns None if not available."""
+    def get_diff(self) -> str:
+        """Get the full diff for the review.
+
+        Returns:
+            Unified diff format string showing all changes
+
+        Raises:
+            RuntimeError: If diff cannot be obtained
+        """
         pass
 
     @abstractmethod
-    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
-        """Get the list of commits in the review. Returns None if not available."""
+    def get_commits(self) -> List[Dict[str, Any]]:
+        """Get the list of commits in the review.
+
+        Returns:
+            List of commit dictionaries with metadata (sha, message, author, etc.)
+
+        Raises:
+            RuntimeError: If commits cannot be obtained
+        """
         pass
 
     @abstractmethod
@@ -56,13 +74,53 @@ class ReviewTarget(ABC):
         """Publish the review to the target (e.g., post to GitHub)."""
         pass
 
+    @abstractmethod
+    def _to_info_impl(self) -> Dict[str, Any]:
+        """Serialize target-specific info (without 'type' key). Implemented by subclasses."""
+        pass
+
+    def to_info(self) -> Dict[str, Any]:
+        """Serialize target to dict for storage. Automatically includes 'type' key."""
+        info = self._to_info_impl()
+
+        # Determine type string based on class
+        if isinstance(self, LocalReviewTarget):
+            info['type'] = 'local'
+        elif isinstance(self, GitHubPRTarget):
+            info['type'] = 'github_pr'
+        else:
+            raise NotImplementedError(f"Unknown target type: {type(self).__name__}")
+
+        return info
+
+    @classmethod
+    def from_info(cls, info: Dict[str, Any], **kwargs) -> "ReviewTarget":
+        """Deserialize target from info dict. Factory method that dispatches to subclasses.
+
+        Args:
+            info: Serialized target info (must include 'type' key)
+            **kwargs: Additional runtime arguments needed by specific targets (e.g., token, project_dir)
+
+        Returns:
+            Appropriate ReviewTarget subclass instance
+        """
+        target_type = info.get("type")
+        if target_type == "local":
+            return LocalReviewTarget.from_info(info, **kwargs)
+        elif target_type == "github_pr":
+            return GitHubPRTarget.from_info(info, **kwargs)
+        else:
+            raise ValueError(f"Unknown target type: {target_type}")
+
 
 class LocalReviewTarget(ReviewTarget):
     """Review target for local commits/branches."""
 
-    def __init__(self, base_ref: str, head_ref: str):
+    def __init__(self, base_ref: str, head_ref: str, project_dir: Path):
         self.base_ref = base_ref
         self.head_ref = head_ref
+        self.project_dir = project_dir
+        self.git_ops = GitOperations(project_dir)
 
     def get_base_ref(self) -> str:
         return self.base_ref
@@ -73,25 +131,66 @@ class LocalReviewTarget(ReviewTarget):
     def get_description(self) -> str:
         return f"{self.base_ref}..{self.head_ref}"
 
-    def fetch_if_needed(self, project_dir: Path) -> None:
+    def fetch_if_needed(self) -> None:
         # Local refs, nothing to fetch
         pass
 
-    def get_diff(self) -> Optional[str]:
-        # For local reviews, diff should be obtained via git commands
-        # Agent can use execute_command tool
-        return None
+    def get_diff(self) -> str:
+        """Get the full diff using GitPython."""
+        return self.git_ops.get_diff(self.base_ref, self.head_ref)
 
-    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
-        # For local reviews, commits should be obtained via git commands
-        # Agent can use execute_command tool
-        return None
+    def get_commits(self) -> List[Dict[str, Any]]:
+        """Get the list of commits using GitPython."""
+        # Get commit objects from GitOperations
+        commit_objects = self.git_ops.get_commits(self.base_ref, self.head_ref)
+
+        # Translate to dict format
+        commits = []
+        for commit in commit_objects:
+            commits.append({
+                "sha": commit.hexsha,
+                "short_sha": commit.hexsha[:7],
+                "message": commit.message.strip(),
+                "author": commit.author.name,
+                "author_email": commit.author.email,
+                "date": commit.authored_datetime.isoformat(),
+                "committer": commit.committer.name,
+            })
+
+        return commits
 
     def can_publish(self) -> bool:
         return False
 
     def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
         raise NotImplementedError("Cannot publish local reviews to remote")
+
+    def _to_info_impl(self) -> Dict[str, Any]:
+        """Serialize to dict. Includes base_ref/head_ref for completeness."""
+        return {
+            "base_ref": self.base_ref,
+            "head_ref": self.head_ref,
+        }
+
+    @classmethod
+    def from_info(cls, info: Dict[str, Any], project_dir: Path = None, **kwargs) -> "LocalReviewTarget":
+        """Reconstruct LocalReviewTarget from info dict.
+
+        Args:
+            info: Serialized target info
+            project_dir: Project directory (required)
+
+        Returns:
+            LocalReviewTarget instance
+        """
+        if project_dir is None:
+            raise ValueError("project_dir is required to create LocalReviewTarget")
+
+        return cls(
+            base_ref=info["base_ref"],
+            head_ref=info["head_ref"],
+            project_dir=project_dir,
+        )
 
 
 class GitHubPRTarget(ReviewTarget):
@@ -101,6 +200,7 @@ class GitHubPRTarget(ReviewTarget):
         self.pr_number = pr_number
         self.token = token
         self.project_dir = project_dir
+        self.git_ops = GitOperations(project_dir)
         self.github_client = None
         self.repo_name = None
         self.pr_info = None
@@ -109,14 +209,14 @@ class GitHubPRTarget(ReviewTarget):
     def get_description(self) -> str:
         return f"PR #{self.pr_number}"
 
-    def fetch_if_needed(self, project_dir: Path) -> None:
+    def fetch_if_needed(self) -> None:
         """Fetch PR information and head branch from GitHub."""
         self.github_client = GitHubClient(self.token)
 
         # Get repository name
         click.echo("Fetching repository information...")
         try:
-            self.repo_name = self._get_repo_name(project_dir)
+            self.repo_name = self._get_repo_name(self.project_dir)
             click.echo(f"  Repository: {self.repo_name}")
         except Exception as e:
             click.echo(f"Error getting repository: {e}", err=True)
@@ -139,16 +239,11 @@ class GitHubPRTarget(ReviewTarget):
         self.pr_head_branch = f"fetch/pr-{self.pr_number}/{self.pr_info['head_ref']}"
 
         try:
-            subprocess.run(
-                ["git", "fetch", "origin", f"pull/{self.pr_number}/head:{self.pr_head_branch}"],
-                cwd=project_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            refspec = f"pull/{self.pr_number}/head:{self.pr_head_branch}"
+            self.git_ops.fetch_ref("origin", refspec)
             click.echo(f"  Fetched PR head: {self.pr_head_branch}")
-        except subprocess.CalledProcessError as e:
-            click.echo(f"Error fetching PR head: {e.stderr}", err=True)
+        except RuntimeError as e:
+            click.echo(f"Error fetching PR head: {e}", err=True)
             sys.exit(1)
 
     def get_base_ref(self) -> str:
@@ -161,7 +256,7 @@ class GitHubPRTarget(ReviewTarget):
             raise RuntimeError("Must call fetch_if_needed() first")
         return self.pr_head_branch
 
-    def get_diff(self) -> Optional[str]:
+    def get_diff(self) -> str:
         """Get the full PR diff from GitHub API."""
         if not self.github_client or not self.repo_name:
             raise RuntimeError("Must call fetch_if_needed() first")
@@ -169,10 +264,9 @@ class GitHubPRTarget(ReviewTarget):
         try:
             return self.github_client.get_pull_request_diff(self.repo_name, self.pr_number)
         except Exception as e:
-            click.echo(f"Warning: Failed to fetch PR diff from GitHub: {e}", err=True)
-            return None
+            raise RuntimeError(f"Failed to fetch PR diff from GitHub: {e}")
 
-    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
+    def get_commits(self) -> List[Dict[str, Any]]:
         """Get the list of commits from GitHub API."""
         if not self.github_client or not self.repo_name:
             raise RuntimeError("Must call fetch_if_needed() first")
@@ -180,8 +274,7 @@ class GitHubPRTarget(ReviewTarget):
         try:
             return self.github_client.get_pull_request_commits(self.repo_name, self.pr_number)
         except Exception as e:
-            click.echo(f"Warning: Failed to fetch PR commits from GitHub: {e}", err=True)
-            return None
+            raise RuntimeError(f"Failed to fetch PR commits from GitHub: {e}")
 
     def can_publish(self) -> bool:
         return True
@@ -268,14 +361,7 @@ class GitHubPRTarget(ReviewTarget):
     def _get_repo_name(self, project_dir: Path) -> str:
         """Get GitHub repository owner/name from git remote."""
         try:
-            result = subprocess.run(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            remote_url = result.stdout.strip()
+            remote_url = self.git_ops.get_remote_url("origin")
 
             # Parse GitHub URL
             if "github.com" in remote_url:
@@ -284,8 +370,8 @@ class GitHubPRTarget(ReviewTarget):
                     return match.group(1)
 
             raise ValueError(f"Could not parse GitHub repository from: {remote_url}")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to get git remote: {e.stderr}")
+        except RuntimeError as e:
+            raise RuntimeError(f"Failed to get git remote: {e}")
         except Exception as e:
             raise RuntimeError(f"Failed to determine repository: {e}")
 
@@ -302,6 +388,39 @@ class GitHubPRTarget(ReviewTarget):
             "*This review was generated by llm-sandbox with LLM assistance*",
         ]
         return "\n".join(parts)
+
+    def _to_info_impl(self) -> Dict[str, Any]:
+        """Serialize to dict with PR number and repo name."""
+        return {
+            "pr_number": self.pr_number,
+            "repo_name": self.repo_name,
+        }
+
+    @classmethod
+    def from_info(cls, info: Dict[str, Any], token: str = None, project_dir: Path = None, **kwargs) -> "GitHubPRTarget":
+        """Reconstruct GitHubPRTarget from info dict.
+
+        Args:
+            info: Serialized target info
+            token: GitHub API token (required)
+            project_dir: Project directory (required)
+
+        Returns:
+            GitHubPRTarget instance
+        """
+        if token is None:
+            raise ValueError("token is required to create GitHubPRTarget")
+        if project_dir is None:
+            raise ValueError("project_dir is required to create GitHubPRTarget")
+
+        target = cls(
+            pr_number=info["pr_number"],
+            token=token,
+            project_dir=project_dir,
+        )
+        # Set repo_name directly (normally set by fetch_if_needed)
+        target.repo_name = info["repo_name"]
+        return target
 
     def _format_inline_comment(self, suggestion: FeedbackItem) -> str:
         """Format a single suggestion as an inline comment."""

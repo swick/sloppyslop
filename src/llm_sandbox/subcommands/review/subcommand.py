@@ -239,14 +239,14 @@ class ReviewSubcommand(Subcommand):
                 sys.exit(1)
             review_target = GitHubPRTarget(pr_number, token, project_dir)
         else:
-            review_target = LocalReviewTarget(base_commit, head_commit)
+            review_target = LocalReviewTarget(base_commit, head_commit, project_dir)
 
         click.echo(f"\n{'='*60}")
         click.echo(f"Multi-Agent Code Review: {review_target.get_description()}")
         click.echo(f"{'='*60}\n")
 
         # Fetch remote data if needed (PR mode)
-        review_target.fetch_if_needed(project_dir)
+        review_target.fetch_if_needed()
 
         # Run review workflow
         workflow = ReviewWorkflow()
