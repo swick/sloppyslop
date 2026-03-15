@@ -1,6 +1,5 @@
 """Interactive editor for review suggestions."""
 
-import difflib
 import os
 import re
 import subprocess
@@ -90,7 +89,7 @@ class ReviewEditor:
 
             # Check if file was modified
             if edited_content == original_content:
-                click.echo("No changes made")
+                click.echo("No changes made to editor file")
                 return False
 
             # Parse the edited diff (remove comment lines)
@@ -99,14 +98,40 @@ class ReviewEditor:
                 click.echo("No valid diff found in edited file")
                 return False
 
-            # Apply the edited diff and update the suggestion
-            self._apply_edited_diff(item, edited_diff)
+            # Store original state for comparison
+            original_suggested_code = item.suggested_code
+            original_range = (item.line_start, item.line_end)
+
+            # Apply both diffs and compare the full resulting files
+            original_file_content = self.git_ops.repo.git.show(f"{item.commit}:{item.file}")
+            original_result = self._apply_unified_diff(original_file_content, diff_text)
+            edited_result = self._apply_unified_diff(original_file_content, edited_diff)
+
+            # Check if the FULL FILE result changed
+            full_file_changed = (original_result != edited_result)
+
+            # Apply the edited diff and regenerate the suggestion
+            self._apply_edited_diff(item, edited_diff, original_diff=diff_text)
+
+            # Check if the extracted suggestion changed
+            code_changed = item.suggested_code != original_suggested_code
+            range_changed = (item.line_start, item.line_end) != original_range
 
             # Update the review
             self.review.feedback[item_index] = item
 
-            click.echo(f"✓ Updated suggestion {suggestion_id}")
-            return True
+            if full_file_changed or code_changed or range_changed:
+                click.echo(f"✓ Updated suggestion {suggestion_id}")
+                if range_changed:
+                    click.echo(f"  Range: {original_range[0]}-{original_range[1]} → {item.line_start}-{item.line_end}")
+                if code_changed:
+                    old_lines = len(original_suggested_code.splitlines()) if original_suggested_code else 0
+                    new_lines = len(item.suggested_code.splitlines())
+                    click.echo(f"  Suggested code: {old_lines} → {new_lines} lines")
+                return True
+            else:
+                click.echo(f"No changes to suggestion {suggestion_id}")
+                return False
 
         finally:
             # Clean up temp file
@@ -146,12 +171,13 @@ class ReviewEditor:
 
         return diff_text
 
-    def _apply_edited_diff(self, item: FeedbackItem, edited_diff: str) -> None:
+    def _apply_edited_diff(self, item: FeedbackItem, edited_diff: str, original_diff: Optional[str] = None) -> None:
         """Apply edited diff and update the suggestion.
 
         Args:
             item: FeedbackItem to update
             edited_diff: Edited unified diff text
+            original_diff: Original diff (for comparison/debugging)
 
         Raises:
             RuntimeError: If diff cannot be applied
@@ -172,31 +198,42 @@ class ReviewEditor:
 
         new_lines = new_content.splitlines()
 
-        # Find the range of changed lines
-        first_changed, last_changed = self._find_changed_range(original_lines, new_lines)
+        # Find the range to replace in original and what to extract from new
+        first_orig, last_orig, first_new, last_new = self._find_changed_range(original_lines, new_lines)
 
-        if first_changed is None or last_changed is None:
+        if first_orig is None:
             raise RuntimeError("No changes detected in edited diff")
 
-        # Extract the suggested code (changed lines)
-        suggested_lines = new_lines[first_changed:last_changed + 1]
+        # Trim identical lines from the beginning
+        while first_orig <= last_orig and first_new <= last_new:
+            if original_lines[first_orig] == new_lines[first_new]:
+                first_orig += 1
+                first_new += 1
+            else:
+                break
+
+        # Trim identical lines from the end
+        while first_orig <= last_orig and first_new <= last_new:
+            if original_lines[last_orig] == new_lines[last_new]:
+                last_orig -= 1
+                last_new -= 1
+            else:
+                break
+
+        # Check if we trimmed everything (no actual changes)
+        if first_orig > last_orig and first_new > last_new:
+            raise RuntimeError("No effective changes after trimming identical lines")
+
+        # Extract the suggested code (changed lines from the NEW file)
+        suggested_lines = new_lines[first_new:last_new + 1]
 
         if not suggested_lines:
             raise RuntimeError("No suggested lines extracted from diff")
 
-        # Store old values for debug output
-        old_start = item.line_start
-        old_end = item.line_end
-        old_code_lines = len(item.suggested_code.splitlines()) if item.suggested_code else 0
-
-        # Update suggestion
+        # Update suggestion - use ORIGINAL file range, not new file range
         item.suggested_code = '\n'.join(suggested_lines)
-        item.line_start = first_changed + 1
-        item.line_end = last_changed + 1
-
-        # Debug output
-        click.echo(f"  Old range: {item.file}:{old_start}-{old_end} ({old_code_lines} lines)")
-        click.echo(f"  New range: {item.file}:{item.line_start}-{item.line_end} ({len(suggested_lines)} lines)")
+        item.line_start = first_orig + 1  # 1-based
+        item.line_end = last_orig + 1     # 1-based (inclusive)
 
     def _apply_unified_diff(self, original: str, diff: str) -> str:
         """Apply a unified diff to original content using difflib-style parsing.
@@ -281,14 +318,20 @@ class ReviewEditor:
         return '\n'.join(result_lines)
 
     def _find_changed_range(self, original_lines: list, new_lines: list) -> tuple:
-        """Find the range of changed lines.
+        """Find the range to replace in original file and what to replace it with.
+
+        We need to find:
+        - first_orig, last_orig: range in ORIGINAL file to replace
+        - The suggested code is extracted from NEW file such that:
+          original[:first_orig] + suggested + original[last_orig+1:] == new
 
         Args:
             original_lines: Original file lines
             new_lines: Modified file lines
 
         Returns:
-            Tuple of (first_changed_idx, last_changed_idx) or (None, None) if no changes
+            Tuple of (first_orig_idx, last_orig_idx, first_new_idx, last_new_idx)
+            where orig range gets replaced with new range, or (None, None, None, None) if no changes
         """
         # Find first changed line from top
         first_changed = None
@@ -305,12 +348,9 @@ class ReviewEditor:
                 first_changed = min_len
             else:
                 # No changes at all
-                return (None, None)
+                return (None, None, None, None)
 
-        # Find last changed line from bottom
-        last_changed = len(new_lines) - 1
-
-        # Work backwards from the end to find where changes stop
+        # Find last changed line from bottom (work backwards from both ends)
         orig_idx = len(original_lines) - 1
         new_idx = len(new_lines) - 1
 
@@ -319,6 +359,7 @@ class ReviewEditor:
                 break
             orig_idx -= 1
             new_idx -= 1
-            last_changed = new_idx
 
-        return (first_changed, last_changed)
+        # Range in original to replace: first_changed to orig_idx (inclusive)
+        # Range in new to extract: first_changed to new_idx (inclusive)
+        return (first_changed, orig_idx, first_changed, new_idx)
