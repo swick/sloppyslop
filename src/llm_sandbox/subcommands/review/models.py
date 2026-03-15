@@ -7,20 +7,6 @@ from typing import Any, Dict, List, Literal, Optional
 import yaml
 
 
-# Custom string class for literal block scalar style in YAML
-class LiteralString(str):
-    pass
-
-
-def literal_presenter(dumper, data):
-    """Present strings as literal block scalars (|)."""
-    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
-
-
-# Register the representer
-yaml.add_representer(LiteralString, literal_presenter)
-
-
 class ReviewStore:
     """Manages storage and retrieval of reviews."""
 
@@ -224,9 +210,8 @@ class FeedbackItem:
     # Commit information (optional)
     commit: str = ""
 
-    # Code snippets (optional)
-    current_code: str = ""
-    suggested_code: str = ""
+    # Suggested code (optional)
+    suggested_code: str = ""  # Replacement for lines line_start through line_end (inclusive)
 
     # Severity (optional, default: medium)
     severity: Literal["critical", "high", "medium", "low", "info"] = "medium"
@@ -258,18 +243,16 @@ class FeedbackItem:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         result = {
+            "id": self.get_short_id(),  # Short unique ID for this suggestion
             "file": self.file,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "reason": self.reason,
             "category": self.category,
+            "commit": self.commit,  # Always include commit (now required)
         }
 
         # Add optional fields only if they have values
-        if self.commit:
-            result["commit"] = self.commit
-        if self.current_code:
-            result["current_code"] = self.current_code
         if self.suggested_code:
             result["suggested_code"] = self.suggested_code
         if self.severity != "medium":
@@ -297,7 +280,6 @@ class FeedbackItem:
             reason=data["reason"],
             category=data["category"],
             commit=data.get("commit", ""),
-            current_code=data.get("current_code", ""),
             suggested_code=data.get("suggested_code", ""),
             severity=data.get("severity", "medium"),
             probability=data.get("probability"),
@@ -365,7 +347,7 @@ class Review:
 
         # Summary
         if self.summary:
-            docs.append({"summary": LiteralString(self.summary)})
+            docs.append({"summary": self.summary})
 
         # Metadata
         if self.metadata:
@@ -373,13 +355,7 @@ class Review:
 
         # Feedback items
         for item in self.feedback:
-            item_dict = item.to_dict()
-            # Use literal block style for code
-            if item_dict.get('current_code'):
-                item_dict['current_code'] = LiteralString(item_dict['current_code'])
-            if item_dict.get('suggested_code'):
-                item_dict['suggested_code'] = LiteralString(item_dict['suggested_code'])
-            docs.append(item_dict)
+            docs.append(item.to_dict())
 
         # Serialize all documents
         return yaml.dump_all(docs, default_flow_style=False, allow_unicode=True, sort_keys=False, width=100)

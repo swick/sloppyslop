@@ -120,19 +120,15 @@ class RecordReviewFeedbackTool(MCPTool):
                     },
                     "line_start": {
                         "type": "integer",
-                        "description": "Starting line number (1-indexed)",
+                        "description": "Starting line number (1-indexed) of the code to replace",
                     },
                     "line_end": {
                         "type": "integer",
-                        "description": "Ending line number (1-indexed)",
-                    },
-                    "current_code": {
-                        "type": "string",
-                        "description": "Current code snippet that needs review",
+                        "description": "Ending line number (1-indexed) of the code to replace (inclusive)",
                     },
                     "suggested_code": {
                         "type": "string",
-                        "description": "Suggested improved code (can be empty if just a comment)",
+                        "description": "Replacement code for lines line_start through line_end (inclusive). This code will replace the entire range. Can be empty to suggest deletion.",
                     },
                     "reason": {
                         "type": "string",
@@ -205,7 +201,6 @@ class RecordReviewFeedbackTool(MCPTool):
             commit=commit,
             line_start=line_start,
             line_end=line_end,
-            current_code=arguments.get("current_code", ""),
             suggested_code=arguments.get("suggested_code", ""),
             reason=arguments["reason"],
             category=arguments["category"],
@@ -574,6 +569,9 @@ Your workflow:
    - Do not let them create new sub-agents (inheritable=False is already set)
    - Give them clear instructions to use record_review_feedback to record findings
    - Tell them they MUST provide the commit SHA when recording feedback (use commits from get_review_commits)
+   - Tell them that suggested_code REPLACES lines line_start through line_end (inclusive)
+     - Do NOT include context lines before or after in suggested_code
+     - Only include the exact replacement code
    - For review file agents: provide the file path and tell them to read it
    - Remind them to focus on HIGH SIGNAL issues only
    - Tell them to self-validate their findings before recording them

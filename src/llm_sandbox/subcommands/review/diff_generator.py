@@ -44,8 +44,8 @@ class FeedbackDiffGenerator:
             # If we can't get the file at that commit, return None
             return None
 
-        # Split into lines
-        original_lines = file_content.splitlines(keepends=True)
+        # Split into lines (without line endings - difflib will handle them)
+        original_lines = file_content.splitlines()
 
         # Validate line numbers
         if item.line_start < 1 or item.line_end > len(original_lines):
@@ -64,8 +64,8 @@ class FeedbackDiffGenerator:
             n=context_lines
         )
 
-        # Lines already have newlines from keepends=True, so just join without adding more
-        diff_text = ''.join(diff).rstrip('\n')
+        # Join diff lines with newlines
+        diff_text = '\n'.join(diff)
 
         # Return None if diff is empty (no actual changes)
         if not diff_text.strip():
@@ -97,25 +97,21 @@ class FeedbackDiffGenerator:
         """Apply suggested changes to original lines.
 
         Args:
-            original_lines: List of original file lines (with line endings)
+            original_lines: List of original file lines (without line endings)
             item: FeedbackItem with line range and suggested code
 
         Returns:
-            List of modified lines
+            List of modified lines (without line endings)
         """
         # Convert to 0-based indexing
         start_idx = item.line_start - 1
         end_idx = item.line_end
 
-        # Split suggested code into lines, preserving line endings
-        suggested_lines = item.suggested_code.splitlines(keepends=True)
-
-        # Ensure last line has newline if original did
-        if suggested_lines and not suggested_lines[-1].endswith('\n'):
-            if end_idx < len(original_lines) or (start_idx < len(original_lines) and original_lines[start_idx].endswith('\n')):
-                suggested_lines[-1] += '\n'
+        # Split suggested code into lines (without line endings)
+        suggested_lines = item.suggested_code.splitlines()
 
         # Build modified content: before + suggested + after
+        # suggested_code replaces lines from line_start to line_end (inclusive)
         modified_lines = (
             original_lines[:start_idx] +
             suggested_lines +
