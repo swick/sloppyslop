@@ -20,7 +20,7 @@ class FeedbackDiffGenerator:
         self.project_dir = project_dir
         self.git_ops = GitOperations(project_dir)
 
-    def generate_diff(self, item: FeedbackItem, context_lines: int = 3) -> Optional[str]:
+    def generate_diff(self, item: FeedbackItem, context_lines: int = 7) -> Optional[str]:
         """Generate a unified diff for a feedback item.
 
         Args:
