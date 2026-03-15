@@ -44,6 +44,21 @@ from typing import Any, Dict, List, Optional
 
 import click
 import requests
+import yaml
+
+
+# Custom string class for literal block scalar style in YAML
+class LiteralString(str):
+    pass
+
+
+def literal_presenter(dumper, data):
+    """Present strings as literal block scalars (|)."""
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+
+
+# Register the representer
+yaml.add_representer(LiteralString, literal_presenter)
 
 from llm_sandbox import AgentConfig
 from llm_sandbox.mcp_tools import (
@@ -269,153 +284,140 @@ class ReviewFeedbackEditor:
     """Handles serialization and editing of review feedback."""
 
     @staticmethod
-    def serialize(feedback: List[Dict[str, Any]]) -> str:
+    def serialize(feedback: List[Dict[str, Any]], summary: Optional[str] = None) -> str:
         """
-        Serialize feedback into human-editable text format.
+        Serialize feedback into human-editable YAML format.
 
         Args:
             feedback: List of feedback items
+            summary: Optional review summary comment
 
         Returns:
-            Text representation of feedback
+            Multi-document YAML representation of feedback
         """
         lines = []
-        lines.append("# PR Review Feedback")
+        lines.append("# PR Review Feedback - Multi-Document YAML")
         lines.append("# Edit this file to modify review suggestions")
-        lines.append("# Lines starting with # are comments and will be ignored")
         lines.append("#")
         lines.append("# How to ignore/delete suggestions:")
-        lines.append("# - Delete the '## Suggestion N' header line")
+        lines.append("# - Delete the entire YAML document (between --- separators)")
+        lines.append("# - Delete the index line (e.g., '#   3. file.py:10-20 ...')")
         lines.append("# - OR add 'ignore: true' to the suggestion")
         lines.append("#")
-        lines.append("# Format:")
-        lines.append("# - Edit fields to modify suggestion")
-        lines.append("# - Keep at least: file, line_start, line_end, reason, category")
-        lines.append("")
         lines.append("# Suggestion Index:")
 
         # Add suggestion index/table of contents
         for i, item in enumerate(feedback):
             prob = item.get('probability', 1.0)
+            dup_marker = " [DUPLICATE]" if 'duplicate_of' in item else ""
             lines.append(f"#   {i + 1}. {item['file']}:{item['line_start']}-{item['line_end']} "
-                        f"[{item['category']}, {item.get('severity', 'medium')}, p={prob:.2f}]")
-        lines.append("")
-        lines.append("# ============================================================")
+                        f"[{item['category']}, {item.get('severity', 'medium')}, p={prob:.2f}]{dup_marker}")
         lines.append("")
 
-        for i, item in enumerate(feedback):
-            lines.append(f"## Suggestion {i + 1}")
-            lines.append(f"file: {item['file']}")
-            lines.append(f"line_start: {item['line_start']}")
-            lines.append(f"line_end: {item['line_end']}")
-            lines.append(f"category: {item['category']}")
-            lines.append(f"severity: {item.get('severity', 'medium')}")
-            lines.append(f"probability: {item.get('probability', 1.0)}")
-            if item.get('probability_reasoning'):
-                lines.append(f"probability_reasoning: {item['probability_reasoning']}")
-            lines.append(f"reason: {item['reason']}")
+        # Add review summary as first YAML document if provided
+        if summary:
+            lines.append("---")
+            lines.append("# Review Summary Comment")
+            lines.append("# Edit the 'summary' field below to customize the GitHub comment")
+            summary_doc = {"_type": "review_summary", "summary": LiteralString(summary)}
+            summary_yaml = yaml.dump(
+                summary_doc,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+                width=100
+            )
+            lines.append(summary_yaml.rstrip())
 
-            if item.get('current_code'):
-                lines.append("current_code: |")
-                for code_line in item['current_code'].split('\n'):
-                    lines.append(f"  {code_line}")
+        # Serialize each feedback item as a YAML document
+        for item in feedback:
+            lines.append("---")
 
-            if item.get('suggested_code'):
-                lines.append("suggested_code: |")
-                for code_line in item['suggested_code'].split('\n'):
-                    lines.append(f"  {code_line}")
+            # Wrap multiline string fields with LiteralString for literal block style
+            item_copy = item.copy()
+            if 'current_code' in item_copy and item_copy['current_code']:
+                item_copy['current_code'] = LiteralString(item_copy['current_code'])
+            if 'suggested_code' in item_copy and item_copy['suggested_code']:
+                item_copy['suggested_code'] = LiteralString(item_copy['suggested_code'])
 
-            lines.append("")  # Empty line between suggestions
+            # Use yaml.dump with proper configuration for readability
+            yaml_str = yaml.dump(
+                item_copy,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+                width=100
+            )
+            lines.append(yaml_str.rstrip())
 
         return "\n".join(lines)
 
     @staticmethod
-    def deserialize(text: str) -> List[Dict[str, Any]]:
+    def deserialize(text: str) -> tuple[Optional[str], List[Dict[str, Any]]]:
         """
-        Deserialize text back into feedback items.
+        Deserialize multi-document YAML back into feedback items.
 
         Args:
-            text: Text representation of feedback
+            text: Multi-document YAML representation of feedback
 
         Returns:
-            List of feedback items (excluding ignored ones)
+            Tuple of (summary, feedback_list) where summary is Optional[str] and feedback_list excludes ignored items
         """
         feedback = []
-        current_item = None
-        current_field = None
-        multiline_content = []
+        summary = None
 
-        for line in text.split('\n'):
-            # Skip comments and empty lines when not in multiline
-            if not current_field and (line.strip().startswith('#') or not line.strip()):
-                continue
+        try:
+            # Parse suggestion index to get valid suggestion numbers
+            # Format: "#   1. file.py:10-20 [category, severity, p=0.95]"
+            valid_indices = set()
+            for line in text.split('\n'):
+                # Match index lines like "#   1. file.py:..."
+                match = re.match(r'^\#\s+(\d+)\.\s+', line)
+                if match:
+                    valid_indices.add(int(match.group(1)))
 
-            # Check for new suggestion header
-            if line.startswith('## Suggestion'):
-                # Save previous item if exists and not ignored
-                if current_item:
-                    # Check if item should be ignored
-                    ignore = current_item.get('ignore', '').lower() in ['true', 'yes', '1']
-                    if not ignore:
-                        # Remove the ignore field before adding
-                        current_item.pop('ignore', None)
-                        feedback.append(current_item)
-                current_item = {}
-                current_field = None
-                continue
+            # Load all YAML documents
+            documents = list(yaml.safe_load_all(text))
 
-            if current_item is None:
-                continue
+            # Process each document
+            doc_index = 0  # Track position for non-summary documents
+            for doc in documents:
+                if doc is None:
+                    continue
 
-            # Handle multiline fields (ending)
-            if current_field and not line.startswith('  ') and ':' in line:
-                # Save multiline content
-                if multiline_content:
-                    current_item[current_field] = '\n'.join(multiline_content)
-                    multiline_content = []
-                current_field = None
+                if not isinstance(doc, dict):
+                    continue
 
-            # Parse field: value
-            if ':' in line and not current_field:
-                field, value = line.split(':', 1)
-                field = field.strip()
-                value = value.strip()
+                # Check if this is the review summary document
+                if doc.get('_type') == 'review_summary':
+                    summary = doc.get('summary')
+                    continue
 
-                # Check for multiline field
-                if value == '|':
-                    current_field = field
-                    multiline_content = []
-                else:
-                    # Single-line field
-                    if field in ['line_start', 'line_end']:
-                        current_item[field] = int(value)
-                    elif field == 'probability':
-                        current_item[field] = float(value)
-                    elif field == 'ignore':
-                        # Keep as string for now, will check later
-                        current_item[field] = value
-                    else:
-                        current_item[field] = value
-            elif current_field and line.startswith('  '):
-                # Multiline content
-                multiline_content.append(line[2:])  # Remove indent
+                # Track position for feedback documents
+                doc_index += 1
 
-        # Save last item if exists and not ignored
-        if current_item:
-            # Save any remaining multiline content
-            if current_field and multiline_content:
-                current_item[current_field] = '\n'.join(multiline_content)
-            # Check if item should be ignored
-            ignore = current_item.get('ignore', '').lower() in ['true', 'yes', '1']
-            if not ignore:
-                # Remove the ignore field before adding
-                current_item.pop('ignore', None)
-                feedback.append(current_item)
+                # Skip if index line was deleted (not in valid_indices)
+                # But only check if we found any index lines (to handle old files)
+                if valid_indices and doc_index not in valid_indices:
+                    continue
 
-        return feedback
+                # Check if item should be ignored via 'ignore: true'
+                ignore = doc.get('ignore', False)
+                if isinstance(ignore, str):
+                    ignore = ignore.lower() in ['true', 'yes', '1']
+
+                if not ignore:
+                    # Remove the ignore field before adding
+                    doc.pop('ignore', None)
+                    feedback.append(doc)
+
+        except yaml.YAMLError as e:
+            raise ValueError(f"Failed to parse YAML: {e}")
+
+        return summary, feedback
 
     @staticmethod
-    def save_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None) -> tuple[str, Path]:
+    def save_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> tuple[str, Path]:
         """
         Save feedback to a file.
 
@@ -423,6 +425,7 @@ class ReviewFeedbackEditor:
             feedback: List of feedback items
             project_dir: Project directory path
             feedback_id: Optional ID to use (generates new one if not provided)
+            summary: Optional review summary to include in file
 
         Returns:
             Tuple of (feedback_id, file_path)
@@ -434,12 +437,12 @@ class ReviewFeedbackEditor:
         review_dir = project_dir / ".llm-sandbox" / "pr-review"
         review_dir.mkdir(parents=True, exist_ok=True)
 
-        review_file = review_dir / f"{feedback_id}.txt"
-        review_file.write_text(ReviewFeedbackEditor.serialize(feedback))
+        review_file = review_dir / f"{feedback_id}.yaml"
+        review_file.write_text(ReviewFeedbackEditor.serialize(feedback, summary=summary))
         return feedback_id, review_file
 
     @staticmethod
-    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[List[Dict[str, Any]]]:
+    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[tuple[Optional[str], List[Dict[str, Any]]]]:
         """
         Load feedback from a file or ID.
 
@@ -448,31 +451,28 @@ class ReviewFeedbackEditor:
             project_dir: Project directory path
 
         Returns:
-            List of feedback items, or None if not found/invalid
+            Tuple of (summary, feedback_list), or None if not found/invalid
         """
         # Check if it's a full path
         file_path = Path(feedback_id_or_path)
         if not file_path.exists():
-            # Try as ID in project directory first
+            # Try as ID in project directory
             review_dir = project_dir / ".llm-sandbox" / "pr-review"
-            file_path = review_dir / f"{feedback_id_or_path}.txt"
-
-            if not file_path.exists():
-                # Fallback to temp directory for backward compatibility
-                file_path = Path(tempfile.gettempdir()) / f"pr_review_{feedback_id_or_path}.txt"
+            file_path = review_dir / f"{feedback_id_or_path}.yaml"
 
         if not file_path.exists():
             return None
 
         try:
             text = file_path.read_text()
-            return ReviewFeedbackEditor.deserialize(text)
+            summary, feedback = ReviewFeedbackEditor.deserialize(text)
+            return summary, feedback
         except Exception as e:
             click.echo(f"Error loading feedback from {file_path}: {e}", err=True)
             return None
 
     @staticmethod
-    def edit_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    def edit_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> Optional[tuple[Optional[str], List[Dict[str, Any]]]]:
         """
         Open feedback in editor for human modification.
 
@@ -480,12 +480,24 @@ class ReviewFeedbackEditor:
             feedback: List of feedback items
             project_dir: Project directory path
             feedback_id: Optional ID to use (generates new one if not provided)
+            summary: Optional review summary to include in file
 
         Returns:
-            Modified feedback list, or None if user cancelled
+            Tuple of (summary, feedback_list), or None if user cancelled
         """
-        # Save feedback to file
-        feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id)
+        # Check if we're editing an existing file
+        review_dir = project_dir / ".llm-sandbox" / "pr-review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+
+        if feedback_id:
+            review_file = review_dir / f"{feedback_id}.yaml"
+            if not review_file.exists():
+                # File doesn't exist yet, create it
+                feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id, summary=summary)
+            # else: File exists, don't overwrite it - just use it as-is
+        else:
+            # No ID provided, create new file
+            feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id, summary=summary)
 
         # Print file location
         click.echo(f"\n{'='*60}")
@@ -512,7 +524,7 @@ class ReviewFeedbackEditor:
                 # Read modified content
                 try:
                     modified_text = review_file.read_text()
-                    modified_feedback = ReviewFeedbackEditor.deserialize(modified_text)
+                    modified_summary, modified_feedback = ReviewFeedbackEditor.deserialize(modified_text)
                 except Exception as e:
                     click.echo(f"Error parsing edited feedback: {e}", err=True)
                     choice = click.prompt(
@@ -536,24 +548,21 @@ class ReviewFeedbackEditor:
                 click.echo("\nWhat would you like to do?")
                 click.echo("  [p] Post review to GitHub")
                 click.echo("  [e] Edit again")
-                click.echo("  [s] Save and exit without posting")
-                click.echo("  [x] Exit without saving")
+                click.echo("  [q] Quit without posting")
 
                 choice = click.prompt(
                     "Choose an option",
-                    type=click.Choice(['p', 'e', 's', 'x'], case_sensitive=False),
+                    type=click.Choice(['p', 'e', 'q'], case_sensitive=False),
                     default='p'
                 )
 
                 if choice == 'p':
-                    return modified_feedback
-                elif choice == 's':
-                    # Save and exit
-                    review_file.write_text(ReviewFeedbackEditor.serialize(modified_feedback))
+                    # File already saved by editor, just return for posting
+                    return modified_summary, modified_feedback
+                elif choice == 'q':
+                    # File already saved by editor, just quit
                     click.echo(f"\nFeedback saved to: {review_file}")
                     click.echo(f"ID: {feedback_id}")
-                    return None
-                elif choice == 'x':
                     return None
                 # else 'e' - loop continues
 
@@ -700,19 +709,19 @@ class GetReviewFeedbackTool(MCPTool):
         }
 
 
-class AssignFeedbackProbabilityTool(MCPTool):
-    """Tool for assigning probability/confidence to review feedback items."""
+class UpdateFeedbackTool(MCPTool):
+    """Tool for updating review feedback items (probability, duplicates, etc)."""
 
     def __init__(self, runner: "SandboxRunner"):
         """
-        Initialize assign feedback probability tool.
+        Initialize update feedback tool.
 
         Args:
             runner: SandboxRunner instance
         """
         super().__init__(
-            name="assign_feedback_probability",
-            description="Assign a probability/confidence score to review feedback items based on your analysis. Use this after sub-agents have recorded their findings to indicate how confident you are that each finding is valid.",
+            name="update_feedback",
+            description="Update review feedback items: assign probability/confidence scores, mark duplicates, or both. Use this after analyzing feedback to indicate confidence levels and identify duplicate issues.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -725,41 +734,81 @@ class AssignFeedbackProbabilityTool(MCPTool):
                         "type": "number",
                         "minimum": 0.0,
                         "maximum": 1.0,
-                        "description": "Probability/confidence score (0.0 to 1.0) for these feedback items",
+                        "description": "Optional: Probability/confidence score (0.0 to 1.0) to assign to these items",
                     },
-                    "reasoning": {
+                    "probability_reasoning": {
                         "type": "string",
-                        "description": "Explanation of why this probability was assigned",
+                        "description": "Optional: Explanation of why this probability was assigned",
+                    },
+                    "duplicate_of": {
+                        "type": "integer",
+                        "description": "Optional: Index of the primary/best feedback item that these are duplicates of (0-indexed)",
+                    },
+                    "duplicate_reasoning": {
+                        "type": "string",
+                        "description": "Optional: Explanation of why these items are duplicates",
                     },
                 },
-                "required": ["feedback_indices", "probability"],
+                "required": ["feedback_indices"],
             },
         )
         self.runner = runner
 
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
-        """Assign probability to feedback items."""
+        """Update feedback items."""
         indices = arguments["feedback_indices"]
-        probability = arguments["probability"]
-        reasoning = arguments.get("reasoning", "")
+        probability = arguments.get("probability")
+        probability_reasoning = arguments.get("probability_reasoning", "")
+        duplicate_of = arguments.get("duplicate_of")
+        duplicate_reasoning = arguments.get("duplicate_reasoning", "")
 
         updated_count = 0
         errors = []
 
+        # Validate duplicate_of index if provided
+        if duplicate_of is not None:
+            if duplicate_of < 0 or duplicate_of >= len(self.runner._review_feedback):
+                return {
+                    "success": False,
+                    "error": f"duplicate_of index {duplicate_of} out of range (0-{len(self.runner._review_feedback)-1})",
+                }
+
+        # Update items
         for idx in indices:
             if idx < 0 or idx >= len(self.runner._review_feedback):
                 errors.append(f"Index {idx} out of range (0-{len(self.runner._review_feedback)-1})")
                 continue
 
-            self.runner._review_feedback[idx]["probability"] = probability
-            self.runner._review_feedback[idx]["probability_reasoning"] = reasoning
+            # Check if marking as duplicate of itself
+            if duplicate_of is not None and idx == duplicate_of:
+                errors.append(f"Index {idx} cannot be marked as duplicate of itself")
+                continue
+
+            # Update probability if provided
+            if probability is not None:
+                self.runner._review_feedback[idx]["probability"] = probability
+                self.runner._review_feedback[idx]["probability_reasoning"] = probability_reasoning
+
+            # Mark as duplicate if provided
+            if duplicate_of is not None:
+                self.runner._review_feedback[idx]["duplicate_of"] = duplicate_of
+                self.runner._review_feedback[idx]["duplicate_reasoning"] = duplicate_reasoning
+
             updated_count += 1
+
+        # Build message
+        message_parts = []
+        if probability is not None:
+            message_parts.append(f"probability={probability:.2f}")
+        if duplicate_of is not None:
+            message_parts.append(f"duplicate_of={duplicate_of}")
+        message = f"Updated {updated_count} feedback item(s)" + (f" ({', '.join(message_parts)})" if message_parts else "")
 
         return {
             "success": len(errors) == 0,
             "updated_count": updated_count,
             "errors": errors if errors else None,
-            "message": f"Updated probability for {updated_count} feedback item(s) to {probability:.2f}",
+            "message": message,
         }
 
 
@@ -787,7 +836,7 @@ class PRReviewMCPServer(MCPServer):
         # Add PR review specific tools
         self.add_tool(RecordReviewFeedbackTool(runner))
         self.add_tool(GetReviewFeedbackTool(runner))
-        self.add_tool(AssignFeedbackProbabilityTool(runner))
+        self.add_tool(UpdateFeedbackTool(runner))
         # Add custom GitHub API tools
         self.add_tool(GetPullRequestDiffTool(github_client, repo, pr_number))
         self.add_tool(GetPullRequestCommitsTool(github_client, repo, pr_number))
@@ -841,6 +890,104 @@ class PRReviewSubcommand(Subcommand):
         load_review = kwargs.get("load_review")
         review_id = kwargs.get("review_id")
 
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Multi-Agent GitHub PR Review: #{pr_number}")
+        click.echo(f"{'='*60}\n")
+
+        # Branch 1: Load from existing file
+        if load_review:
+            loaded_summary, all_feedback = self._load_review_from_file(load_review, project_dir)
+            repo_name, pr_info = self._fetch_pr_metadata(project_dir, pr_number, token)
+            result = None
+            stats = None
+            # Use --load-review value as review_id if no --review-id was specified
+            if not review_id:
+                review_id = load_review
+        # Branch 2: Generate fresh review with LLM
+        else:
+            repo_name, pr_info, pr_head_branch = self._fetch_and_prepare_pr(project_dir, pr_number, token)
+            result, all_feedback, stats = self._run_review_workflow(
+                runner, repo_name, pr_number, pr_info, pr_head_branch, network, verbose
+            )
+            loaded_summary = None  # Will be generated after filtering
+
+        # Common path: filter, edit, and post
+        sorted_feedback = self._filter_and_display_feedback(all_feedback, result, stats)
+
+        if not sorted_feedback:
+            click.echo("\nNo high-confidence suggestions. All files look good!")
+            return
+
+        # Generate summary for new reviews after we have sorted_feedback count
+        if not load_review:
+            loaded_summary = self._build_summary_text(pr_number, result, stats, len(all_feedback), 0.5, len(sorted_feedback))
+
+        edit_result = self._edit_feedback_interactive(sorted_feedback, project_dir, review_id, loaded_summary)
+
+        if edit_result is None:
+            click.echo("\nReview cancelled. No review will be posted.")
+            return
+
+        final_summary, accepted_suggestions = edit_result
+
+        if len(accepted_suggestions) == 0:
+            click.echo("\nNo suggestions remaining after editing. No review will be posted.")
+            return
+
+        self._post_review_to_github(
+            repo_name, pr_number, pr_info, accepted_suggestions,
+            final_summary
+        )
+
+    def _load_review_from_file(self, load_review: str, project_dir: Path):
+        """Load review feedback from existing file."""
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Loading Review from File/ID")
+        click.echo(f"{'='*60}\n")
+        click.echo(f"Loading from: {load_review}")
+
+        result = ReviewFeedbackEditor.load_feedback(load_review, project_dir)
+
+        if result is None:
+            click.echo(f"Error: Could not load review from '{load_review}'", err=True)
+            click.echo("Make sure the file exists or the ID is correct.", err=True)
+            sys.exit(1)
+
+        summary, all_feedback = result
+        click.echo(f"Loaded {len(all_feedback)} suggestions")
+        if summary:
+            click.echo(f"Loaded review summary")
+        return summary, all_feedback
+
+    def _fetch_pr_metadata(self, project_dir: Path, pr_number: int, token: str):
+        """Fetch minimal PR metadata needed for posting (when loading from file)."""
+        if not token:
+            click.echo(
+                "Error: GitHub token required to post review.\n"
+                "\n"
+                "Set GH_TOKEN environment variable or use --with-token option:\n"
+                "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
+                "  or\n"
+                "  llm-sandbox pr-review --pr 123 --with-token ghp_xxxxxxxxxxxx",
+                err=True
+            )
+            sys.exit(1)
+
+        self.github = GitHubClient(token)
+
+        click.echo("\nFetching PR metadata...")
+        try:
+            repo_name = self._get_repo_name(project_dir)
+            pr_info = self.github.get_pull_request(repo_name, pr_number)
+            click.echo(f"  Repository: {repo_name}")
+            click.echo(f"  PR #{pr_number}: {pr_info['title']}")
+            return repo_name, pr_info
+        except Exception as e:
+            click.echo(f"Error fetching PR metadata: {e}", err=True)
+            sys.exit(1)
+
+    def _fetch_and_prepare_pr(self, project_dir: Path, pr_number: int, token: str):
+        """Fetch full PR info and prepare for review."""
         if not token:
             click.echo(
                 "Error: GitHub token not found.\n"
@@ -853,14 +1000,9 @@ class PRReviewSubcommand(Subcommand):
             )
             sys.exit(1)
 
-        # Initialize GitHub API client
         self.github = GitHubClient(token)
 
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Multi-Agent GitHub PR Review: #{pr_number}")
-        click.echo(f"{'='*60}\n")
-
-        # Step 1: Get repository info
+        # Get repository info
         click.echo("Fetching repository information...")
         try:
             repo_name = self._get_repo_name(project_dir)
@@ -869,7 +1011,7 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error getting repository: {e}", err=True)
             sys.exit(1)
 
-        # Step 2: Fetch PR info using GitHub API
+        # Fetch PR info
         click.echo("Fetching PR information...")
         try:
             pr_info = self.github.get_pull_request(repo_name, pr_number)
@@ -881,15 +1023,11 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error fetching PR info: {e}", err=True)
             sys.exit(1)
 
-        # Step 3: Fetch PR head from GitHub into local branch
+        # Fetch PR head
         click.echo("\nFetching PR commits...")
-
-        # Create branch name with fetch/pr-{id}/{branch} pattern
         pr_head_branch = f"fetch/pr-{pr_number}/{pr_info['head_ref']}"
 
         try:
-            # Fetch the PR head (this will also fetch the necessary base commits)
-            # GitHub exposes PRs at refs/pull/<number>/head
             subprocess.run(
                 ["git", "fetch", "origin", f"pull/{pr_number}/head:{pr_head_branch}"],
                 cwd=project_dir,
@@ -902,10 +1040,11 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error fetching PR head: {e.stderr}", err=True)
             sys.exit(1)
 
-        # Step 4: Single agent does everything
-        click.echo("\nStarting review agent...")
+        return repo_name, pr_info, pr_head_branch
 
-        agent_prompt = f"""You are the orchestrator agent for PR #{pr_number} review.
+    def _build_agent_prompt(self, pr_number: int, pr_info: dict) -> str:
+        """Build the agent prompt for PR review."""
+        return f"""You are the orchestrator agent for PR #{pr_number} review.
 
 PR Information:
 - Title: {pr_info['title']}
@@ -944,21 +1083,31 @@ Your workflow:
    - Use wait_for_agents MCP tool to wait for all spawned agents
    - Sub-agents will record their findings using the record_review_feedback MCP tool
 
-4. Review and assign probabilities to findings:
+4. Review, assign probabilities, and identify duplicates:
    - Use get_review_feedback MCP tool to retrieve all recorded findings
    - Analyze each finding for validity and accuracy
-   - Use assign_feedback_probability MCP tool to assign confidence scores (0.0-1.0)
-   - Consider: Is the issue real? Is the suggested fix appropriate? Does it align with review criteria?
+   - Use update_feedback MCP tool to:
+     * Assign confidence scores (0.0-1.0) with probability_reasoning
+     * Mark duplicate findings (multiple sub-agents may identify the same issue)
+   - For probability assignment:
+     * Consider: Is the issue real? Is the suggested fix appropriate? Does it align with review criteria?
+   - For duplicate detection:
+     * Look for findings that point to the same file/line range
+     * Look for findings that describe the same problem (even if worded differently)
+     * Choose the best/most detailed one as primary (duplicate_of)
+     * Mark others as duplicates with duplicate_reasoning
 
 5. Return a summary:
    - Summarize the review process and findings
    - Report how many sub-agents were spawned and what tasks they performed
-   - Report total findings and their confidence distribution
+   - Report total findings, duplicates identified, and confidence distribution
    - DO NOT include the detailed findings in output (they're in the feedback store)
 
 The structured output should just be a high-level summary - the detailed findings are accessible via the get_review_feedback MCP tool."""
 
-        agent_schema = {
+    def _build_agent_schema(self) -> dict:
+        """Build the output schema for agent."""
+        return {
             "type": "object",
             "properties": {
                 "review_summary": {
@@ -990,6 +1139,14 @@ The structured output should just be a high-level summary - the detailed finding
                     "type": "object",
                     "properties": {
                         "total_findings": {"type": "integer"},
+                        "duplicates_count": {
+                            "type": "integer",
+                            "description": "Number of duplicate findings identified and marked",
+                        },
+                        "unique_findings": {
+                            "type": "integer",
+                            "description": "Number of unique findings after removing duplicates",
+                        },
                         "by_category": {
                             "type": "object",
                             "description": "Count of findings by category (bug, security, etc.)",
@@ -1014,81 +1171,84 @@ The structured output should just be a high-level summary - the detailed finding
             "required": ["review_summary", "documentation_found", "sub_agents_spawned", "findings_statistics", "overall_assessment"],
         }
 
-        # Check if we should load from file instead of running agent
-        if load_review:
-            click.echo(f"\n{'='*60}")
-            click.echo(f"Loading Review from File/ID")
-            click.echo(f"{'='*60}\n")
-            click.echo(f"Loading from: {load_review}")
+    def _run_review_workflow(self, runner, repo_name: str, pr_number: int, pr_info: dict,
+                            pr_head_branch: str, network: str, verbose: bool):
+        """Run the full review workflow with LLM agent."""
+        click.echo("\nStarting review agent...")
 
-            all_feedback = ReviewFeedbackEditor.load_feedback(load_review, project_dir)
+        agent_prompt = self._build_agent_prompt(pr_number, pr_info)
+        agent_schema = self._build_agent_schema()
 
-            if all_feedback is None:
-                click.echo(f"Error: Could not load review from '{load_review}'", err=True)
-                click.echo("Make sure the file exists or the ID is correct.", err=True)
-                sys.exit(1)
+        # Run agent
+        result, all_feedback = asyncio.run(self._execute_async(
+            runner, pr_head_branch, pr_info, repo_name, pr_number,
+            agent_prompt, agent_schema, network, verbose
+        ))
 
-            click.echo(f"Loaded {len(all_feedback)} suggestions")
+        # Display results
+        self._display_agent_results(result)
 
-            # Skip to editing step
-            result = None
-            stats = None
-        else:
-            # Run single agent with custom tools using async context manager
-            result, all_feedback = asyncio.run(self._execute_async(
-                runner,
-                pr_head_branch,
-                pr_info,
-                repo_name,
-                pr_number,
-                agent_prompt,
-                agent_schema,
-                network,
-                verbose
-            ))
+        stats = result["findings_statistics"]
+        return result, all_feedback, stats
 
-            # Show results
-            click.echo(f"\n{'='*60}")
-            click.echo("Review Agent Results")
-            click.echo(f"{'='*60}")
-            click.echo(f"\nReview Summary:")
-            click.echo(result["review_summary"])
-            click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
-            if result["documentation_found"]:
-                for file in result["documentation_found"]:
-                    click.echo(f"  - {file}")
-            click.echo(f"\nReview Criteria:")
-            click.echo(result["review_criteria_summary"])
+    def _display_agent_results(self, result: dict):
+        """Display the agent's review results."""
+        click.echo(f"\n{'='*60}")
+        click.echo("Review Agent Results")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nReview Summary:")
+        click.echo(result["review_summary"])
 
-            click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
-            for agent in result["sub_agents_spawned"]:
-                click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
+        click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
+        if result["documentation_found"]:
+            for file in result["documentation_found"]:
+                click.echo(f"  - {file}")
 
-            click.echo(f"\nFindings Statistics:")
-            stats = result["findings_statistics"]
-            click.echo(f"  Total findings: {stats['total_findings']}")
-            if "by_category" in stats:
-                click.echo(f"  By category: {stats['by_category']}")
-            if "by_severity" in stats:
-                click.echo(f"  By severity: {stats['by_severity']}")
-            if "high_confidence_count" in stats:
-                click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+        click.echo(f"\nReview Criteria:")
+        click.echo(result["review_criteria_summary"])
 
-            click.echo(f"\nOverall Assessment:")
-            click.echo(result["overall_assessment"])
+        click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
+        for agent in result["sub_agents_spawned"]:
+            click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
 
-        # Filter out low-probability items (threshold: 0.5)
+        click.echo(f"\nFindings Statistics:")
+        stats = result["findings_statistics"]
+        click.echo(f"  Total findings: {stats['total_findings']}")
+        if "duplicates_count" in stats:
+            click.echo(f"  Duplicates marked: {stats['duplicates_count']}")
+        if "unique_findings" in stats:
+            click.echo(f"  Unique findings: {stats['unique_findings']}")
+        if "by_category" in stats:
+            click.echo(f"  By category: {stats['by_category']}")
+        if "by_severity" in stats:
+            click.echo(f"  By severity: {stats['by_severity']}")
+        if "high_confidence_count" in stats:
+            click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+
+        click.echo(f"\nOverall Assessment:")
+        click.echo(result["overall_assessment"])
+
+    def _filter_and_display_feedback(self, all_feedback: list, result: Optional[dict], stats: Optional[dict]):
+        """Filter feedback by probability and duplicates, display statistics."""
         probability_threshold = 0.5
+
+        # Count duplicates
+        duplicates_count = len([f for f in all_feedback if 'duplicate_of' in f])
+
+        # Filter: probability >= threshold AND not duplicate
         filtered_feedback = [
             f for f in all_feedback
             if f.get("probability", 1.0) >= probability_threshold
+            and 'duplicate_of' not in f
         ]
 
         click.echo(f"\n{'='*60}")
         click.echo(f"Filtering Feedback")
         click.echo(f"{'='*60}")
         click.echo(f"Total findings recorded: {len(all_feedback)}")
-        click.echo(f"After filtering (probability ≥ {probability_threshold}): {len(filtered_feedback)}")
+        click.echo(f"Duplicates marked: {duplicates_count}")
+        click.echo(f"Unique findings: {len(all_feedback) - duplicates_count}")
+        click.echo(f"After filtering (probability ≥ {probability_threshold}, excluding duplicates): {len(filtered_feedback)}")
 
         # Sort by probability (highest first)
         sorted_feedback = sorted(
@@ -1101,37 +1261,34 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo(f"Review Complete - {len(sorted_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
 
-        if not sorted_feedback:
-            click.echo("\nNo high-confidence suggestions. All files look good!")
-            return
+        return sorted_feedback
 
-        # Step 5: Open editor for review and modification
+    def _edit_feedback_interactive(self, sorted_feedback: list, project_dir: Path, review_id: Optional[str], summary: Optional[str] = None):
+        """Open editor for user to review and modify feedback."""
         click.echo(f"\n{'='*60}")
         click.echo("Opening editor for review suggestions")
         click.echo(f"{'='*60}\n")
-        click.echo("You can now edit the suggestions in your editor.")
-        click.echo("- Remove entire suggestion blocks to delete them")
-        click.echo("- Modify fields to adjust suggestions")
+        click.echo("You can now edit the suggestions in your editor (YAML format).")
+        click.echo("To remove suggestions:")
+        click.echo("  - Delete entire YAML documents (between --- separators)")
+        click.echo("  - Delete index lines (e.g., '#   3. file.py:10-20 ...')")
+        click.echo("  - Add 'ignore: true' to a document")
+        click.echo("To modify suggestions:")
+        click.echo("  - Edit any field in the YAML document")
+        click.echo("  - Edit the review summary in the first YAML document")
         click.echo("- Save and close when done\n")
 
-        # Open editor (use custom ID if --review-id was specified)
-        accepted_suggestions = ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id)
+        return ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id, summary=summary)
 
-        if accepted_suggestions is None:
-            click.echo("\nReview cancelled. No review will be posted.")
-            return
-
-        if len(accepted_suggestions) == 0:
-            click.echo("\nNo suggestions remaining after editing. No review will be posted.")
-            return
-
-        # Step 6: Prepare summary comment
+    def _build_summary_text(self, pr_number: int, result: Optional[dict], stats: Optional[dict],
+                           total_feedback_count: int, probability_threshold: float, sorted_feedback_count: int) -> str:
+        """Build the summary text for the review."""
         if result:
             # Generated with LLM - include detailed summary
             doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
             agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
 
-            summary = f"""Code review completed for PR #{pr_number}.
+            return f"""Code review completed for PR #{pr_number}.
 
 Review approach:
 {result['review_summary'][:300]}{"..." if len(result['review_summary']) > 300 else ""}
@@ -1146,68 +1303,41 @@ Sub-agents used:
 
 Findings:
 - Total findings: {stats['total_findings']}
+- Duplicates marked: {stats.get('duplicates_count', 0)}
+- Unique findings: {stats.get('unique_findings', stats['total_findings'])}
 - High confidence (≥0.8): {stats.get('high_confidence_count', 'N/A')}
-- After filtering (≥{probability_threshold}): {len(sorted_feedback)}
+- After filtering (≥{probability_threshold}, excluding duplicates): {sorted_feedback_count}
 
 Overall assessment:
-{result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}
-
-Accepted suggestions: {len(accepted_suggestions)}"""
+{result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}"""
         else:
             # Loaded from file - simple summary
-            summary = f"""Code review completed for PR #{pr_number}.
+            return f"""Code review completed for PR #{pr_number}.
 
-Review loaded from saved file.
+Review loaded from saved file."""
 
-Total suggestions: {len(accepted_suggestions)}"""
+    def _post_review_to_github(self, repo_name: str, pr_number: int, pr_info: dict,
+                              accepted_suggestions: list, summary: Optional[str]):
+        """Post review summary and inline comments to GitHub."""
+        # Summary has already been edited in the YAML file
 
-        summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
+        # Format summary for GitHub (if provided)
+        if summary:
+            summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
 
-        # Let user review/edit the summary comment
-        click.echo(f"\n{'='*60}")
-        click.echo("Review Summary Comment")
-        click.echo(f"{'='*60}\n")
-        click.echo(summary_body)
-        click.echo(f"\n{'='*60}")
+            # Show summary
+            click.echo(f"\n{'='*60}")
+            click.echo("Review Summary Comment")
+            click.echo(f"{'='*60}\n")
+            click.echo(summary_body)
+            click.echo(f"\n{'='*60}")
 
-        # Ask what to do with the summary
-        click.echo("\nOptions:")
-        click.echo("  [a] Accept summary")
-        click.echo("  [e] Edit summary")
-        click.echo("  [s] Skip summary")
-
-        post_summary = True
-        choice = click.prompt("Choose an option", type=click.Choice(['a', 'e', 's'], case_sensitive=False), default='a')
-
-        if choice == 'e':
-            click.echo("\nEnter your edited summary (press Ctrl+D or Ctrl+Z when done):")
-            click.echo("(Each line you type will be added to the summary)\n")
-            lines = []
-            try:
-                while True:
-                    line = input()
-                    lines.append(line)
-            except EOFError:
-                pass
-
-            if lines:
-                summary_body = "\n".join(lines)
-                click.echo(f"\n{'='*60}")
-                click.echo("Updated Summary:")
-                click.echo(f"{'='*60}\n")
-                click.echo(summary_body)
-                click.echo(f"\n{'='*60}")
-
-        if choice == 's':
-            post_summary = False
-            click.echo("\nSummary comment will be skipped")
-
-        # Final confirmation before posting everything
+        # Final confirmation before posting
         click.echo(f"\n{'='*60}")
         click.echo("Ready to Post Review")
         click.echo(f"{'='*60}")
         click.echo(f"\nThis will post to PR #{pr_number}:")
-        if post_summary:
+        if summary:
             click.echo(f"  • 1 summary comment")
         click.echo(f"  • {len(accepted_suggestions)} inline suggestions")
         click.echo()
@@ -1221,8 +1351,8 @@ Total suggestions: {len(accepted_suggestions)}"""
         click.echo(f"Posting review to GitHub")
         click.echo(f"{'='*60}\n")
 
-        # Post summary comment if not skipped
-        if post_summary:
+        # Post summary comment if provided
+        if summary:
             try:
                 self.github.post_issue_comment(repo_name, pr_number, summary_body)
                 click.echo(f"✓ Posted review summary")
