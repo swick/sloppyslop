@@ -13,7 +13,7 @@ This subcommand demonstrates a multi-agent review workflow with an abstraction l
 8. Agent reads ALL review instruction files and applies criteria to ALL changes
 9. Agent spawns sub-agents for specific review tasks
 10. Sub-agents record findings, orchestrator assigns probabilities and identifies duplicates
-11. User approves suggestions and posts to GitHub (or saves locally)
+11. Review output is written to YAML file
 
 Review Tools:
 - get_review_commits: Get commit list (from GitHub API or git commands)
@@ -28,6 +28,7 @@ If no review instruction files exist, uses general best practices review criteri
 Usage:
     llm-sandbox pr-review --pr 123                    # Review GitHub PR
     llm-sandbox pr-review --base main --head feature  # Review local commits
+    llm-sandbox pr-review --pr 123 -o review.yaml     # Specify output file
 
 Authentication (for GitHub PRs):
     Set GH_TOKEN environment variable or use --with-token option
@@ -197,6 +198,56 @@ class Review:
             "ignored": ignored,
             "unique": len(self.feedback) - duplicates - ignored,
         }
+
+    def to_yaml(self) -> str:
+        """Serialize review to YAML format."""
+        docs = []
+
+        # Summary
+        if self.summary:
+            docs.append({"summary": LiteralString(self.summary)})
+
+        # Metadata
+        if self.metadata:
+            docs.append({"metadata": self.metadata.to_dict()})
+
+        # Feedback items
+        for item in self.feedback:
+            item_dict = item.to_dict()
+            # Use literal block style for code
+            if item_dict.get('current_code'):
+                item_dict['current_code'] = LiteralString(item_dict['current_code'])
+            if item_dict.get('suggested_code'):
+                item_dict['suggested_code'] = LiteralString(item_dict['suggested_code'])
+            docs.append(item_dict)
+
+        # Serialize all documents
+        return yaml.dump_all(docs, default_flow_style=False, allow_unicode=True, sort_keys=False, width=100)
+
+    @classmethod
+    def from_yaml(cls, text: str) -> "Review":
+        """Deserialize review from YAML format."""
+        documents = list(yaml.safe_load_all(text))
+
+        summary = None
+        metadata = None
+        feedback = []
+
+        for doc in documents:
+            if doc is None or not isinstance(doc, dict):
+                continue
+
+            # Check if this is summary
+            if 'summary' in doc and len(doc) == 1:
+                summary = doc['summary']
+            # Check if this is metadata
+            elif 'metadata' in doc and len(doc) == 1:
+                metadata = ReviewMetadata.from_dict(doc['metadata'])
+            # Otherwise it's a feedback item
+            else:
+                feedback.append(FeedbackItem.from_dict(doc))
+
+        return cls(summary=summary, feedback=feedback, metadata=metadata)
 
 
 @dataclass
@@ -819,297 +870,6 @@ class GitHubClient:
         return commits
 
 
-class ReviewFeedbackEditor:
-    """Handles serialization and editing of review feedback."""
-
-    @staticmethod
-    def serialize(feedback: List["FeedbackItem"], summary: Optional[str] = None) -> str:
-        """
-        Serialize feedback into human-editable YAML format.
-
-        Args:
-            feedback: List of feedback items
-            summary: Optional review summary comment
-
-        Returns:
-            Multi-document YAML representation of feedback
-        """
-        lines = []
-        lines.append("# PR Review Feedback - Multi-Document YAML")
-        lines.append("# Edit this file to modify review suggestions")
-        lines.append("#")
-        lines.append("# How to ignore/delete suggestions:")
-        lines.append("# - Delete the entire YAML document (between --- separators)")
-        lines.append("# - Delete the index line (e.g., '#   3. file.py:10-20 ...')")
-        lines.append("# - OR add 'ignore: true' to the suggestion")
-        lines.append("#")
-        lines.append("# Suggestion Index:")
-
-        # Add suggestion index/table of contents
-        for i, item in enumerate(feedback):
-            prob = item.probability if item.probability is not None else 1.0
-            dup_marker = " [DUPLICATE]" if item.duplicate_of is not None else ""
-            lines.append(f"#   {i + 1}. {item.file}:{item.line_start}-{item.line_end} "
-                        f"[{item.category}, {item.severity}, p={prob:.2f}]{dup_marker}")
-        lines.append("")
-
-        # Add review summary as first YAML document if provided
-        if summary:
-            lines.append("---")
-            lines.append("# Review Summary Comment")
-            lines.append("# Edit the 'summary' field below to customize the GitHub comment")
-            summary_doc = {"_type": "review_summary", "summary": LiteralString(summary)}
-            summary_yaml = yaml.dump(
-                summary_doc,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                width=100
-            )
-            lines.append(summary_yaml.rstrip())
-
-        # Serialize each feedback item as a YAML document
-        for item in feedback:
-            lines.append("---")
-
-            # Convert to dict and wrap multiline string fields with LiteralString
-            item_dict = item.to_dict()
-            if item_dict.get('current_code'):
-                item_dict['current_code'] = LiteralString(item_dict['current_code'])
-            if item_dict.get('suggested_code'):
-                item_dict['suggested_code'] = LiteralString(item_dict['suggested_code'])
-
-            # Use yaml.dump with proper configuration for readability
-            yaml_str = yaml.dump(
-                item_dict,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-                width=100
-            )
-            lines.append(yaml_str.rstrip())
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def deserialize(text: str) -> tuple[Optional[str], List["FeedbackItem"]]:
-        """
-        Deserialize multi-document YAML back into feedback items.
-
-        Args:
-            text: Multi-document YAML representation of feedback
-
-        Returns:
-            Tuple of (summary, feedback_list) where summary is Optional[str] and feedback_list excludes ignored items
-        """
-        feedback = []
-        summary = None
-
-        try:
-            # Parse suggestion index to get valid suggestion numbers
-            # Format: "#   1. file.py:10-20 [category, severity, p=0.95]"
-            valid_indices = set()
-            for line in text.split('\n'):
-                # Match index lines like "#   1. file.py:..."
-                match = re.match(r'^\#\s+(\d+)\.\s+', line)
-                if match:
-                    valid_indices.add(int(match.group(1)))
-
-            # Load all YAML documents
-            documents = list(yaml.safe_load_all(text))
-
-            # Process each document
-            doc_index = 0  # Track position for non-summary documents
-            for doc in documents:
-                if doc is None:
-                    continue
-
-                if not isinstance(doc, dict):
-                    continue
-
-                # Check if this is the review summary document
-                if doc.get('_type') == 'review_summary':
-                    summary = doc.get('summary')
-                    continue
-
-                # Track position for feedback documents
-                doc_index += 1
-
-                # Skip if index line was deleted (not in valid_indices)
-                # But only check if we found any index lines (to handle old files)
-                if valid_indices and doc_index not in valid_indices:
-                    continue
-
-                # Check if item should be ignored via 'ignore: true'
-                ignore = doc.get('ignore', False)
-                if isinstance(ignore, str):
-                    ignore = ignore.lower() in ['true', 'yes', '1']
-
-                if not ignore:
-                    # Remove the ignore field and create FeedbackItem
-                    doc.pop('ignore', None)
-                    feedback.append(FeedbackItem.from_dict(doc))
-
-        except yaml.YAMLError as e:
-            raise ValueError(f"Failed to parse YAML: {e}")
-
-        return summary, feedback
-
-    @staticmethod
-    def save_feedback(feedback: List["FeedbackItem"], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> tuple[str, Path]:
-        """
-        Save feedback to a file.
-
-        Args:
-            feedback: List of feedback items
-            project_dir: Project directory path
-            feedback_id: Optional ID to use (generates new one if not provided)
-            summary: Optional review summary to include in file
-
-        Returns:
-            Tuple of (feedback_id, file_path)
-        """
-        if not feedback_id:
-            feedback_id = str(uuid.uuid4())[:8]
-
-        # Save to project directory instead of temp
-        review_dir = project_dir / ".llm-sandbox" / "pr-review"
-        review_dir.mkdir(parents=True, exist_ok=True)
-
-        review_file = review_dir / f"{feedback_id}.yaml"
-        review_file.write_text(ReviewFeedbackEditor.serialize(feedback, summary=summary))
-        return feedback_id, review_file
-
-    @staticmethod
-    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[tuple[Optional[str], List["FeedbackItem"]]]:
-        """
-        Load feedback from a file or ID.
-
-        Args:
-            feedback_id_or_path: Either a feedback ID or full file path
-            project_dir: Project directory path
-
-        Returns:
-            Tuple of (summary, feedback_list), or None if not found/invalid
-        """
-        # Check if it's a full path
-        file_path = Path(feedback_id_or_path)
-        if not file_path.exists():
-            # Try as ID in project directory
-            review_dir = project_dir / ".llm-sandbox" / "pr-review"
-            file_path = review_dir / f"{feedback_id_or_path}.yaml"
-
-        if not file_path.exists():
-            return None
-
-        try:
-            text = file_path.read_text()
-            summary, feedback = ReviewFeedbackEditor.deserialize(text)
-            return summary, feedback
-        except Exception as e:
-            click.echo(f"Error loading feedback from {file_path}: {e}", err=True)
-            return None
-
-    @staticmethod
-    def edit_feedback(feedback: List["FeedbackItem"], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> Optional[tuple[Optional[str], List["FeedbackItem"]]]:
-        """
-        Open feedback in editor for human modification.
-
-        Args:
-            feedback: List of feedback items
-            project_dir: Project directory path
-            feedback_id: Optional ID to use (generates new one if not provided)
-            summary: Optional review summary to include in file
-
-        Returns:
-            Tuple of (summary, feedback_list), or None if user cancelled
-        """
-        # Check if we're editing an existing file
-        review_dir = project_dir / ".llm-sandbox" / "pr-review"
-        review_dir.mkdir(parents=True, exist_ok=True)
-
-        if feedback_id:
-            review_file = review_dir / f"{feedback_id}.yaml"
-            if not review_file.exists():
-                # File doesn't exist yet, create it
-                feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id, summary=summary)
-            # else: File exists, don't overwrite it - just use it as-is
-        else:
-            # No ID provided, create new file
-            feedback_id, review_file = ReviewFeedbackEditor.save_feedback(feedback, project_dir, feedback_id, summary=summary)
-
-        # Print file location
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Review Feedback Saved")
-        click.echo(f"{'='*60}")
-        click.echo(f"File: {review_file}")
-        click.echo(f"ID: {feedback_id}")
-        click.echo(f"\nYou can reload this review later with:")
-        click.echo(f"  llm-sandbox pr-review --pr <number> --load-review {feedback_id}")
-        click.echo(f"{'='*60}\n")
-
-        # Get editor from environment, default to vi
-        editor = os.environ.get('EDITOR', 'vi')
-
-        try:
-            while True:
-                # Open editor
-                try:
-                    subprocess.run([editor, str(review_file)], check=True)
-                except subprocess.CalledProcessError:
-                    click.echo(f"Error: Editor '{editor}' failed", err=True)
-                    return None
-
-                # Read modified content
-                try:
-                    modified_text = review_file.read_text()
-                    modified_summary, modified_feedback = ReviewFeedbackEditor.deserialize(modified_text)
-                except Exception as e:
-                    click.echo(f"Error parsing edited feedback: {e}", err=True)
-                    choice = click.prompt(
-                        "What would you like to do?",
-                        type=click.Choice(['edit', 'cancel'], case_sensitive=False),
-                        default='edit'
-                    )
-                    if choice == 'cancel':
-                        return None
-                    continue
-
-                # Show summary of changes
-                click.echo(f"\n{'='*60}")
-                click.echo(f"Feedback Summary")
-                click.echo(f"{'='*60}")
-                click.echo(f"Original suggestions: {len(feedback)}")
-                click.echo(f"After editing: {len(modified_feedback)}")
-                click.echo(f"Deleted: {len(feedback) - len(modified_feedback)}")
-
-                # Ask what to do next
-                click.echo("\nWhat would you like to do?")
-                click.echo("  [p] Post review to GitHub")
-                click.echo("  [e] Edit again")
-                click.echo("  [q] Quit without posting")
-
-                choice = click.prompt(
-                    "Choose an option",
-                    type=click.Choice(['p', 'e', 'q'], case_sensitive=False),
-                    default='p'
-                )
-
-                if choice == 'p':
-                    # File already saved by editor, just return for posting
-                    return modified_summary, modified_feedback
-                elif choice == 'q':
-                    # File already saved by editor, just quit
-                    click.echo(f"\nFeedback saved to: {review_file}")
-                    click.echo(f"ID: {feedback_id}")
-                    return None
-                # else 'e' - loop continues
-
-        except KeyboardInterrupt:
-            click.echo("\n\nInterrupted. Feedback saved for later use.")
-            return None
-
-
 class RecordReviewFeedbackTool(MCPTool):
     """Tool for recording review feedback during PR analysis."""
 
@@ -1422,16 +1182,10 @@ class PRReviewSubcommand(Subcommand):
         )
         command.params.append(
             click.Option(
-                ["--load-review"],
-                type=str,
-                help="Load review from file ID or path instead of generating new review",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--review-id"],
-                type=str,
-                help="Use specified ID for review file (auto-generated if not provided)",
+                ["--output", "-o"],
+                type=click.Path(path_type=Path),
+                default=None,
+                help="Output file for review YAML (default: review-{timestamp}.yaml)",
             )
         )
         return command
@@ -1444,8 +1198,7 @@ class PRReviewSubcommand(Subcommand):
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
         network = kwargs["network"]
         verbose = kwargs["verbose"]
-        load_review = kwargs.get("load_review")
-        review_id = kwargs.get("review_id")
+        output_file = kwargs.get("output")
 
         # Validate arguments
         if pr_number and (base_commit or head_commit):
@@ -1481,18 +1234,11 @@ class PRReviewSubcommand(Subcommand):
         click.echo(f"Multi-Agent Code Review: {review_target.get_description()}")
         click.echo(f"{'='*60}\n")
 
-        # Branch 1: Load from existing file
-        if load_review:
-            review = self._load_review_from_file(load_review, project_dir)
-            # Use --load-review value as review_id if no --review-id was specified
-            if not review_id:
-                review_id = load_review
-        # Branch 2: Generate fresh review with LLM
-        else:
-            # Fetch remote data if needed (PR mode)
-            review_target.fetch_if_needed(project_dir)
+        # Fetch remote data if needed (PR mode)
+        review_target.fetch_if_needed(project_dir)
 
-            review = self._run_review_workflow(runner, review_target, network, verbose)
+        # Run review workflow
+        review = self._run_review_workflow(runner, review_target, network, verbose)
 
         # Filter and display feedback
         sorted_feedback = review.filter_feedback(probability_threshold=0.5)
@@ -1502,52 +1248,29 @@ class PRReviewSubcommand(Subcommand):
             click.echo("\nNo high-confidence suggestions. All files look good!")
             return
 
-        # Generate summary if not already present
-        if not review.summary:
-            review.summary = self._build_summary_text(review_target, review, sorted_feedback)
+        # Generate summary
+        review.summary = self._build_summary_text(review_target, review, sorted_feedback)
 
-        # Edit feedback interactively
-        edited_review = self._edit_feedback_interactive(review, sorted_feedback, project_dir, review_id)
+        # Update feedback list to only include filtered items
+        review.feedback = sorted_feedback
 
-        if edited_review is None:
-            click.echo("\nReview cancelled. No review will be posted.")
-            return
+        # Generate output filename if not specified
+        if not output_file:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = Path(f"review-{timestamp}.yaml")
 
-        if len(edited_review.feedback) == 0:
-            click.echo("\nNo suggestions remaining after editing. No review will be posted.")
-            return
+        # Write YAML output
+        yaml_content = review.to_yaml()
+        output_file.write_text(yaml_content)
 
-        # Publish review if target supports it
-        if review_target.can_publish():
-            review_target.publish_review(edited_review)
-        else:
-            click.echo(f"\n{'='*60}")
-            click.echo("Review Complete (Local Mode)")
-            click.echo(f"{'='*60}")
-            click.echo(f"\nReview completed for {review_target.get_description()}")
-            click.echo(f"Total suggestions: {len(edited_review.feedback)}")
-            click.echo(f"\nReview saved to file (use --load-review to reload)")
-
-    def _load_review_from_file(self, load_review: str, project_dir: Path) -> Review:
-        """Load review feedback from existing file."""
         click.echo(f"\n{'='*60}")
-        click.echo(f"Loading Review from File/ID")
-        click.echo(f"{'='*60}\n")
-        click.echo(f"Loading from: {load_review}")
+        click.echo("Review Complete")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nReview completed for {review_target.get_description()}")
+        click.echo(f"Total suggestions: {len(review.feedback)}")
+        click.echo(f"\n✓ Review saved to: {output_file}")
 
-        result = ReviewFeedbackEditor.load_feedback(load_review, project_dir)
-
-        if result is None:
-            click.echo(f"Error: Could not load review from '{load_review}'", err=True)
-            click.echo("Make sure the file exists or the ID is correct.", err=True)
-            sys.exit(1)
-
-        summary, all_feedback = result
-        click.echo(f"Loaded {len(all_feedback)} suggestions")
-        if summary:
-            click.echo(f"Loaded review summary")
-
-        return Review(summary=summary, feedback=all_feedback)
 
     def _build_agent_prompt(self, review_target: str, base_ref: str, head_ref: str) -> str:
         """Build the agent prompt for code review."""
@@ -1794,28 +1517,6 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
 
-    def _edit_feedback_interactive(self, review: Review, sorted_feedback: List["FeedbackItem"], project_dir: Path, review_id: Optional[str]) -> Optional[Review]:
-        """Open editor for user to review and modify feedback."""
-        click.echo(f"\n{'='*60}")
-        click.echo("Opening editor for review suggestions")
-        click.echo(f"{'='*60}\n")
-        click.echo("You can now edit the suggestions in your editor (YAML format).")
-        click.echo("To remove suggestions:")
-        click.echo("  - Delete entire YAML documents (between --- separators)")
-        click.echo("  - Delete index lines (e.g., '#   3. file.py:10-20 ...')")
-        click.echo("  - Add 'ignore: true' to a document")
-        click.echo("To modify suggestions:")
-        click.echo("  - Edit any field in the YAML document")
-        click.echo("  - Edit the review summary in the first YAML document")
-        click.echo("- Save and close when done\n")
-
-        result = ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id, summary=review.summary)
-
-        if result is None:
-            return None
-
-        final_summary, accepted_suggestions = result
-        return Review(summary=final_summary, feedback=accepted_suggestions, metadata=review.metadata)
 
     def _build_summary_text(self, review_target: ReviewTarget, review: Review, sorted_feedback: List["FeedbackItem"]) -> str:
         """Build the summary text for the review."""
