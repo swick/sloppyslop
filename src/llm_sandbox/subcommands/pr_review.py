@@ -42,9 +42,9 @@ import sys
 import uuid
 import tempfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import click
 import requests
@@ -70,36 +70,214 @@ yaml.add_representer(LiteralString, literal_presenter)
 # ============================================================================
 
 @dataclass
+class SpawnedAgent:
+    """Represents a sub-agent that was spawned during review."""
+
+    agent_id: str
+    task_description: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "agent_id": self.agent_id,
+            "task_description": self.task_description,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SpawnedAgent":
+        """Create from dictionary."""
+        return cls(
+            agent_id=data["agent_id"],
+            task_description=data["task_description"],
+        )
+
+
+@dataclass
+class FindingsStatistics:
+    """Statistics about review findings."""
+
+    total_findings: int
+    duplicates_count: Optional[int] = None
+    unique_findings: Optional[int] = None
+    by_category: Optional[Dict[str, int]] = None
+    by_severity: Optional[Dict[str, int]] = None
+    high_confidence_count: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        result = {"total_findings": self.total_findings}
+        if self.duplicates_count is not None:
+            result["duplicates_count"] = self.duplicates_count
+        if self.unique_findings is not None:
+            result["unique_findings"] = self.unique_findings
+        if self.by_category is not None:
+            result["by_category"] = self.by_category
+        if self.by_severity is not None:
+            result["by_severity"] = self.by_severity
+        if self.high_confidence_count is not None:
+            result["high_confidence_count"] = self.high_confidence_count
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FindingsStatistics":
+        """Create from dictionary."""
+        return cls(
+            total_findings=data["total_findings"],
+            duplicates_count=data.get("duplicates_count"),
+            unique_findings=data.get("unique_findings"),
+            by_category=data.get("by_category"),
+            by_severity=data.get("by_severity"),
+            high_confidence_count=data.get("high_confidence_count"),
+        )
+
+
+@dataclass
+class ReviewMetadata:
+    """Metadata from the review agent's execution."""
+
+    review_summary: str
+    documentation_found: List[str]
+    review_criteria_summary: str
+    sub_agents_spawned: List[SpawnedAgent]
+    findings_statistics: FindingsStatistics
+    overall_assessment: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "review_summary": self.review_summary,
+            "documentation_found": self.documentation_found,
+            "review_criteria_summary": self.review_criteria_summary,
+            "sub_agents_spawned": [a.to_dict() for a in self.sub_agents_spawned],
+            "findings_statistics": self.findings_statistics.to_dict(),
+            "overall_assessment": self.overall_assessment,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ReviewMetadata":
+        """Create from dictionary."""
+        return cls(
+            review_summary=data["review_summary"],
+            documentation_found=data["documentation_found"],
+            review_criteria_summary=data["review_criteria_summary"],
+            sub_agents_spawned=[SpawnedAgent.from_dict(a) for a in data["sub_agents_spawned"]],
+            findings_statistics=FindingsStatistics.from_dict(data["findings_statistics"]),
+            overall_assessment=data["overall_assessment"],
+        )
+
+
+@dataclass
 class Review:
     """Container for code review results."""
 
     summary: Optional[str]  # Review summary text
-    feedback: List[Dict[str, Any]]  # List of feedback items
-    metadata: Optional[Dict[str, Any]] = None  # Agent result metadata (stats, etc)
+    feedback: List["FeedbackItem"]  # List of feedback items
+    metadata: Optional["ReviewMetadata"] = None  # Agent result metadata
 
-    def filter_feedback(self, probability_threshold: float = 0.5) -> List[Dict[str, Any]]:
+    def filter_feedback(self, probability_threshold: float = 0.5) -> List["FeedbackItem"]:
         """Filter feedback by probability and exclude duplicates."""
-        # Count duplicates
-        duplicates_count = len([f for f in self.feedback if 'duplicate_of' in f])
-
         # Filter: keep items with probability >= threshold AND not marked as duplicate
         filtered = [
             f for f in self.feedback
-            if f.get("probability", 1.0) >= probability_threshold
-            and 'duplicate_of' not in f
+            if (f.probability is None or f.probability >= probability_threshold)
+            and f.duplicate_of is None
+            and not f.ignore
         ]
 
-        # Sort by probability (highest first)
-        return sorted(filtered, key=lambda x: x.get("probability", 1.0), reverse=True)
+        # Sort by probability (highest first, None values last)
+        return sorted(filtered, key=lambda x: x.probability if x.probability is not None else 0.0, reverse=True)
 
     def get_statistics(self) -> Dict[str, int]:
         """Get review statistics."""
-        duplicates = len([f for f in self.feedback if 'duplicate_of' in f])
+        duplicates = len([f for f in self.feedback if f.duplicate_of is not None])
+        ignored = len([f for f in self.feedback if f.ignore])
         return {
             "total": len(self.feedback),
             "duplicates": duplicates,
-            "unique": len(self.feedback) - duplicates,
+            "ignored": ignored,
+            "unique": len(self.feedback) - duplicates - ignored,
         }
+
+
+@dataclass
+class FeedbackItem:
+    """Represents a single review feedback item."""
+
+    # Location information (required)
+    file: str
+    line_start: int
+    line_end: int
+
+    # Content (required)
+    reason: str
+    category: Literal["bug", "performance", "security", "style", "refactor", "documentation", "best-practice"]
+
+    # Code snippets (optional)
+    current_code: str = ""
+    suggested_code: str = ""
+
+    # Severity (optional, default: medium)
+    severity: Literal["critical", "high", "medium", "low", "info"] = "medium"
+
+    # Confidence/validation (optional, added by orchestrator)
+    probability: Optional[float] = None
+    probability_reasoning: str = ""
+
+    # Duplicate tracking (optional, added by orchestrator)
+    duplicate_of: Optional[int] = None
+    duplicate_reasoning: str = ""
+
+    # User override (optional, set during editing)
+    ignore: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        result = {
+            "file": self.file,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "reason": self.reason,
+            "category": self.category,
+        }
+
+        # Add optional fields only if they have values
+        if self.current_code:
+            result["current_code"] = self.current_code
+        if self.suggested_code:
+            result["suggested_code"] = self.suggested_code
+        if self.severity != "medium":
+            result["severity"] = self.severity
+        if self.probability is not None:
+            result["probability"] = self.probability
+        if self.probability_reasoning:
+            result["probability_reasoning"] = self.probability_reasoning
+        if self.duplicate_of is not None:
+            result["duplicate_of"] = self.duplicate_of
+        if self.duplicate_reasoning:
+            result["duplicate_reasoning"] = self.duplicate_reasoning
+        if self.ignore:
+            result["ignore"] = self.ignore
+
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FeedbackItem":
+        """Create from dictionary."""
+        return cls(
+            file=data["file"],
+            line_start=data["line_start"],
+            line_end=data["line_end"],
+            reason=data["reason"],
+            category=data["category"],
+            current_code=data.get("current_code", ""),
+            suggested_code=data.get("suggested_code", ""),
+            severity=data.get("severity", "medium"),
+            probability=data.get("probability"),
+            probability_reasoning=data.get("probability_reasoning", ""),
+            duplicate_of=data.get("duplicate_of"),
+            duplicate_reasoning=data.get("duplicate_reasoning", ""),
+            ignore=data.get("ignore", False),
+        )
 
 
 class ReviewTarget(ABC):
@@ -133,11 +311,6 @@ class ReviewTarget(ABC):
     @abstractmethod
     def get_commits(self) -> Optional[List[Dict[str, Any]]]:
         """Get the list of commits in the review. Returns None if not available."""
-        pass
-
-    @abstractmethod
-    def get_mcp_tools(self, runner) -> List:
-        """Get target-specific MCP tools for the agent."""
         pass
 
     @abstractmethod
@@ -180,10 +353,6 @@ class LocalReviewTarget(ReviewTarget):
         # For local reviews, commits should be obtained via git commands
         # Agent can use execute_command tool
         return None
-
-    def get_mcp_tools(self, runner) -> List:
-        # No special tools for local reviews - agent uses git commands
-        return []
 
     def can_publish(self) -> bool:
         return False
@@ -281,16 +450,6 @@ class GitHubPRTarget(ReviewTarget):
             click.echo(f"Warning: Failed to fetch PR commits from GitHub: {e}", err=True)
             return None
 
-    def get_mcp_tools(self, runner) -> List:
-        """Get generic review tools that use this target."""
-        if not self.github_client or not self.repo_name:
-            raise RuntimeError("Must call fetch_if_needed() first")
-
-        return [
-            GetReviewDiffTool(self),
-            GetReviewCommitsTool(self),
-        ]
-
     def can_publish(self) -> bool:
         return True
 
@@ -348,12 +507,12 @@ class GitHubPRTarget(ReviewTarget):
                     self.repo_name,
                     self.pr_number,
                     self.pr_info["head_sha"],
-                    suggestion["file"],
-                    suggestion["line_start"],
-                    suggestion["line_end"],
+                    suggestion.file,
+                    suggestion.line_start,
+                    suggestion.line_end,
                     body,
                 )
-                click.echo(f"✓ Posted inline comment {i}/{len(review.feedback)}: {suggestion['file']}")
+                click.echo(f"✓ Posted inline comment {i}/{len(review.feedback)}: {suggestion.file}")
                 success_count += 1
             except Exception as e:
                 click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
@@ -368,7 +527,7 @@ class GitHubPRTarget(ReviewTarget):
             click.echo(f"\n⚠ Failed to post {len(failed_suggestions)} suggestions as inline comments")
             click.echo("These suggestions could not be posted (file may not exist in PR diff):")
             for s in failed_suggestions:
-                click.echo(f"  - {s['file']}:{s['line_start']}-{s['line_end']}")
+                click.echo(f"  - {s.file}:{s.line_start}-{s.line_end}")
 
         click.echo(f"\nView the review at:")
         click.echo(f"  https://github.com/{self.repo_name}/pull/{self.pr_number}")
@@ -411,7 +570,7 @@ class GitHubPRTarget(ReviewTarget):
         ]
         return "\n".join(parts)
 
-    def _format_inline_comment(self, suggestion: dict) -> str:
+    def _format_inline_comment(self, suggestion: "FeedbackItem") -> str:
         """Format a single suggestion as an inline comment."""
         category_emoji = {
             "bug": "🐛",
@@ -420,18 +579,18 @@ class GitHubPRTarget(ReviewTarget):
             "style": "💅",
             "refactor": "♻️",
             "documentation": "📝",
-        }.get(suggestion["category"], "💡")
+        }.get(suggestion.category, "💡")
 
         parts = [
-            f"**{category_emoji} {suggestion['category'].title()}**",
+            f"**{category_emoji} {suggestion.category.title()}**",
             "",
-            suggestion["reason"],
+            suggestion.reason,
             "",
             "<details>",
             "<summary>Suggested change</summary>",
             "",
             "```suggestion",
-            suggestion["suggested_code"],
+            suggestion.suggested_code,
             "```",
             "</details>",
         ]
@@ -664,7 +823,7 @@ class ReviewFeedbackEditor:
     """Handles serialization and editing of review feedback."""
 
     @staticmethod
-    def serialize(feedback: List[Dict[str, Any]], summary: Optional[str] = None) -> str:
+    def serialize(feedback: List["FeedbackItem"], summary: Optional[str] = None) -> str:
         """
         Serialize feedback into human-editable YAML format.
 
@@ -688,10 +847,10 @@ class ReviewFeedbackEditor:
 
         # Add suggestion index/table of contents
         for i, item in enumerate(feedback):
-            prob = item.get('probability', 1.0)
-            dup_marker = " [DUPLICATE]" if 'duplicate_of' in item else ""
-            lines.append(f"#   {i + 1}. {item['file']}:{item['line_start']}-{item['line_end']} "
-                        f"[{item['category']}, {item.get('severity', 'medium')}, p={prob:.2f}]{dup_marker}")
+            prob = item.probability if item.probability is not None else 1.0
+            dup_marker = " [DUPLICATE]" if item.duplicate_of is not None else ""
+            lines.append(f"#   {i + 1}. {item.file}:{item.line_start}-{item.line_end} "
+                        f"[{item.category}, {item.severity}, p={prob:.2f}]{dup_marker}")
         lines.append("")
 
         # Add review summary as first YAML document if provided
@@ -713,16 +872,16 @@ class ReviewFeedbackEditor:
         for item in feedback:
             lines.append("---")
 
-            # Wrap multiline string fields with LiteralString for literal block style
-            item_copy = item.copy()
-            if 'current_code' in item_copy and item_copy['current_code']:
-                item_copy['current_code'] = LiteralString(item_copy['current_code'])
-            if 'suggested_code' in item_copy and item_copy['suggested_code']:
-                item_copy['suggested_code'] = LiteralString(item_copy['suggested_code'])
+            # Convert to dict and wrap multiline string fields with LiteralString
+            item_dict = item.to_dict()
+            if item_dict.get('current_code'):
+                item_dict['current_code'] = LiteralString(item_dict['current_code'])
+            if item_dict.get('suggested_code'):
+                item_dict['suggested_code'] = LiteralString(item_dict['suggested_code'])
 
             # Use yaml.dump with proper configuration for readability
             yaml_str = yaml.dump(
-                item_copy,
+                item_dict,
                 default_flow_style=False,
                 allow_unicode=True,
                 sort_keys=False,
@@ -733,7 +892,7 @@ class ReviewFeedbackEditor:
         return "\n".join(lines)
 
     @staticmethod
-    def deserialize(text: str) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    def deserialize(text: str) -> tuple[Optional[str], List["FeedbackItem"]]:
         """
         Deserialize multi-document YAML back into feedback items.
 
@@ -787,9 +946,9 @@ class ReviewFeedbackEditor:
                     ignore = ignore.lower() in ['true', 'yes', '1']
 
                 if not ignore:
-                    # Remove the ignore field before adding
+                    # Remove the ignore field and create FeedbackItem
                     doc.pop('ignore', None)
-                    feedback.append(doc)
+                    feedback.append(FeedbackItem.from_dict(doc))
 
         except yaml.YAMLError as e:
             raise ValueError(f"Failed to parse YAML: {e}")
@@ -797,7 +956,7 @@ class ReviewFeedbackEditor:
         return summary, feedback
 
     @staticmethod
-    def save_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> tuple[str, Path]:
+    def save_feedback(feedback: List["FeedbackItem"], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> tuple[str, Path]:
         """
         Save feedback to a file.
 
@@ -822,7 +981,7 @@ class ReviewFeedbackEditor:
         return feedback_id, review_file
 
     @staticmethod
-    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[tuple[Optional[str], List[Dict[str, Any]]]]:
+    def load_feedback(feedback_id_or_path: str, project_dir: Path) -> Optional[tuple[Optional[str], List["FeedbackItem"]]]:
         """
         Load feedback from a file or ID.
 
@@ -852,7 +1011,7 @@ class ReviewFeedbackEditor:
             return None
 
     @staticmethod
-    def edit_feedback(feedback: List[Dict[str, Any]], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> Optional[tuple[Optional[str], List[Dict[str, Any]]]]:
+    def edit_feedback(feedback: List["FeedbackItem"], project_dir: Path, feedback_id: Optional[str] = None, summary: Optional[str] = None) -> Optional[tuple[Optional[str], List["FeedbackItem"]]]:
         """
         Open feedback in editor for human modification.
 
@@ -1010,16 +1169,16 @@ class RecordReviewFeedbackTool(MCPTool):
 
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Record review feedback."""
-        feedback_item = {
-            "file": arguments["file"],
-            "line_start": arguments["line_start"],
-            "line_end": arguments["line_end"],
-            "current_code": arguments.get("current_code", ""),
-            "suggested_code": arguments.get("suggested_code", ""),
-            "reason": arguments["reason"],
-            "category": arguments["category"],
-            "severity": arguments.get("severity", "medium"),
-        }
+        feedback_item = FeedbackItem(
+            file=arguments["file"],
+            line_start=arguments["line_start"],
+            line_end=arguments["line_end"],
+            current_code=arguments.get("current_code", ""),
+            suggested_code=arguments.get("suggested_code", ""),
+            reason=arguments["reason"],
+            category=arguments["category"],
+            severity=arguments.get("severity", "medium"),
+        )
 
         self.runner._review_feedback.append(feedback_item)
 
@@ -1073,18 +1232,21 @@ class GetReviewFeedbackTool(MCPTool):
         severity_filter = arguments.get("severity")
 
         if file_filter:
-            feedback = [f for f in feedback if f["file"] == file_filter]
+            feedback = [f for f in feedback if f.file == file_filter]
 
         if category_filter:
-            feedback = [f for f in feedback if f["category"] == category_filter]
+            feedback = [f for f in feedback if f.category == category_filter]
 
         if severity_filter:
-            feedback = [f for f in feedback if f["severity"] == severity_filter]
+            feedback = [f for f in feedback if f.severity == severity_filter]
+
+        # Convert to dicts for API response
+        feedback_dicts = [f.to_dict() for f in feedback]
 
         return {
             "success": True,
-            "feedback": feedback,
-            "count": len(feedback),
+            "feedback": feedback_dicts,
+            "count": len(feedback_dicts),
             "total_recorded": len(self.runner._review_feedback),
         }
 
@@ -1164,15 +1326,17 @@ class UpdateFeedbackTool(MCPTool):
                 errors.append(f"Index {idx} cannot be marked as duplicate of itself")
                 continue
 
+            item = self.runner._review_feedback[idx]
+
             # Update probability if provided
             if probability is not None:
-                self.runner._review_feedback[idx]["probability"] = probability
-                self.runner._review_feedback[idx]["probability_reasoning"] = probability_reasoning
+                item.probability = probability
+                item.probability_reasoning = probability_reasoning
 
             # Mark as duplicate if provided
             if duplicate_of is not None:
-                self.runner._review_feedback[idx]["duplicate_of"] = duplicate_of
-                self.runner._review_feedback[idx]["duplicate_reasoning"] = duplicate_reasoning
+                item.duplicate_of = duplicate_of
+                item.duplicate_reasoning = duplicate_reasoning
 
             updated_count += 1
 
@@ -1193,15 +1357,15 @@ class UpdateFeedbackTool(MCPTool):
 
 
 class PRReviewMCPServer(MCPServer):
-    """MCP Server for code review with all built-in tools and optional target-specific tools."""
+    """MCP Server for code review with all built-in tools and review tools."""
 
-    def __init__(self, runner, target_tools: List = None):
+    def __init__(self, runner, review_target: "ReviewTarget"):
         """
         Initialize code review MCP server.
 
         Args:
             runner: SandboxRunner instance
-            target_tools: Optional list of target-specific tools (e.g., GitHub API tools)
+            review_target: ReviewTarget instance (provides diff/commits data)
         """
         super().__init__()
         # Add all built-in tools
@@ -1215,10 +1379,9 @@ class PRReviewMCPServer(MCPServer):
         self.add_tool(RecordReviewFeedbackTool(runner))
         self.add_tool(GetReviewFeedbackTool(runner))
         self.add_tool(UpdateFeedbackTool(runner))
-        # Add target-specific tools
-        if target_tools:
-            for tool in target_tools:
-                self.add_tool(tool)
+        # Add review data tools (work with any ReviewTarget)
+        self.add_tool(GetReviewDiffTool(review_target))
+        self.add_tool(GetReviewCommitsTool(review_target))
 
 
 class PRReviewSubcommand(Subcommand):
@@ -1559,23 +1722,22 @@ The structured output should just be a high-level summary - the detailed finding
         agent_prompt = self._build_agent_prompt(review_target.get_description(), base_ref, head_ref)
         agent_schema = self._build_agent_schema()
 
-        # Get target-specific tools
-        target_tools = review_target.get_mcp_tools(runner)
-
         # Run agent
         result, all_feedback = asyncio.run(self._execute_async(
-            runner, base_ref, head_ref, review_target.get_description(),
-            agent_prompt, agent_schema, network, verbose,
-            target_tools=target_tools
+            runner, review_target, base_ref, head_ref,
+            agent_prompt, agent_schema, network, verbose
         ))
 
         # Display results
         self._display_agent_results(result)
 
+        # Convert result dict to ReviewMetadata
+        metadata = ReviewMetadata.from_dict(result)
+
         return Review(
             summary=None,  # Will be generated later
             feedback=all_feedback,
-            metadata=result
+            metadata=metadata
         )
 
     def _display_agent_results(self, result: dict):
@@ -1615,7 +1777,7 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo(f"\nOverall Assessment:")
         click.echo(result["overall_assessment"])
 
-    def _display_feedback_statistics(self, review: Review, filtered_feedback: List[Dict[str, Any]]):
+    def _display_feedback_statistics(self, review: Review, filtered_feedback: List["FeedbackItem"]):
         """Display feedback filtering statistics."""
         stats = review.get_statistics()
         probability_threshold = 0.5
@@ -1632,7 +1794,7 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
 
-    def _edit_feedback_interactive(self, review: Review, sorted_feedback: list, project_dir: Path, review_id: Optional[str]) -> Optional[Review]:
+    def _edit_feedback_interactive(self, review: Review, sorted_feedback: List["FeedbackItem"], project_dir: Path, review_id: Optional[str]) -> Optional[Review]:
         """Open editor for user to review and modify feedback."""
         click.echo(f"\n{'='*60}")
         click.echo("Opening editor for review suggestions")
@@ -1655,40 +1817,39 @@ The structured output should just be a high-level summary - the detailed finding
         final_summary, accepted_suggestions = result
         return Review(summary=final_summary, feedback=accepted_suggestions, metadata=review.metadata)
 
-    def _build_summary_text(self, review_target: ReviewTarget, review: Review, sorted_feedback: List[Dict[str, Any]]) -> str:
+    def _build_summary_text(self, review_target: ReviewTarget, review: Review, sorted_feedback: List["FeedbackItem"]) -> str:
         """Build the summary text for the review."""
         stats = review.get_statistics()
         probability_threshold = 0.5
 
         if review.metadata:
             # Generated with LLM - include detailed summary
-            result = review.metadata
-            doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
-            agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
-            findings_stats = result['findings_statistics']
+            meta = review.metadata
+            doc_list = ", ".join(meta.documentation_found) if meta.documentation_found else "None"
+            agent_list = "\n".join([f"  - {a.agent_id}: {a.task_description}" for a in meta.sub_agents_spawned])
 
             return f"""Code review completed for {review_target.get_description()}.
 
 Review approach:
-{result['review_summary'][:300]}{"..." if len(result['review_summary']) > 300 else ""}
+{meta.review_summary[:300]}{"..." if len(meta.review_summary) > 300 else ""}
 
 Documentation found: {doc_list}
 
 Review criteria:
-{result['review_criteria_summary'][:250]}{"..." if len(result['review_criteria_summary']) > 250 else ""}
+{meta.review_criteria_summary[:250]}{"..." if len(meta.review_criteria_summary) > 250 else ""}
 
 Sub-agents used:
 {agent_list}
 
 Findings:
-- Total findings: {findings_stats['total_findings']}
-- Duplicates marked: {findings_stats.get('duplicates_count', 0)}
-- Unique findings: {findings_stats.get('unique_findings', findings_stats['total_findings'])}
-- High confidence (≥0.8): {findings_stats.get('high_confidence_count', 'N/A')}
+- Total findings: {meta.findings_statistics.total_findings}
+- Duplicates marked: {meta.findings_statistics.duplicates_count or 0}
+- Unique findings: {meta.findings_statistics.unique_findings or meta.findings_statistics.total_findings}
+- High confidence (≥0.8): {meta.findings_statistics.high_confidence_count or 'N/A'}
 - After filtering (≥{probability_threshold}, excluding duplicates): {len(sorted_feedback)}
 
 Overall assessment:
-{result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}"""
+{meta.overall_assessment[:300]}{"..." if len(meta.overall_assessment) > 300 else ""}"""
         else:
             # Loaded from file - simple summary
             return f"""Code review completed for {review_target.get_description()}.
@@ -1698,14 +1859,13 @@ Review loaded from saved file."""
     async def _execute_async(
         self,
         runner,
+        review_target: ReviewTarget,
         base_ref,
         head_ref,
-        review_target,
         agent_prompt,
         agent_schema,
         network,
-        verbose,
-        target_tools=None
+        verbose
     ):
         """Async execution of code review workflow."""
         async with runner:
@@ -1737,8 +1897,8 @@ Review loaded from saved file."""
 
             click.echo("  Worktrees created successfully!")
 
-            # Create MCP server with all built-in tools + target-specific tools
-            mcp_server = PRReviewMCPServer(runner, target_tools or [])
+            # Create MCP server with all built-in tools + review tools
+            mcp_server = PRReviewMCPServer(runner, review_target)
 
             # Create agent config and run
             agent = AgentConfig(

@@ -49,7 +49,6 @@ class BackgroundTaskManager:
                 raise ValueError(f"Agent {agent_id} already exists")
             task = asyncio.create_task(coro)
             self._tasks[agent_id] = task
-            print(f"[DEBUG] BackgroundTaskManager: Spawned task for agent '{agent_id}' (total: {len(self._tasks)})")
         return agent_id
 
     async def wait_for(
@@ -71,12 +70,6 @@ class BackgroundTaskManager:
             if agent_ids is None:
                 agent_ids = list(self._tasks.keys())
             tasks = [self._tasks[aid] for aid in agent_ids if aid in self._tasks]
-            # Debug: Check for missing agents
-            missing = [aid for aid in agent_ids if aid not in self._tasks]
-            if missing:
-                print(f"[DEBUG] Warning: Agents {missing} not found in tasks")
-
-        print(f"[DEBUG] Waiting for {len(tasks)} task(s): {agent_ids}")
 
         # Wait outside lock to avoid deadlock
         if timeout:
@@ -86,8 +79,6 @@ class BackgroundTaskManager:
             )
         else:
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        print(f"[DEBUG] Completed waiting for {len(tasks)} task(s)")
 
         # Remove completed tasks
         async with self._lock:
@@ -171,7 +162,8 @@ class SandboxRunner:
         self._background_task_manager = BackgroundTaskManager()
 
         # Review feedback storage (for PR review workflow)
-        self._review_feedback: List[Dict[str, Any]] = []
+        # Type is List[FeedbackItem] but kept as List[Any] to avoid circular dependency
+        self._review_feedback: List[Any] = []
 
         # Internal state
         self._keep_branches: List[str] = []

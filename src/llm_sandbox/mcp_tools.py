@@ -1094,7 +1094,6 @@ class SpawnAgentTool(MCPTool):
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
 
-            print(f"[DEBUG] SpawnAgentTool: Spawned agent '{agent_id}' at depth {child_spawn_depth}")
             if self.runner._verbose:
                 click.echo(f"→ Spawned background agent '{agent_id}' (depth {child_spawn_depth}, {len(child_tool_names)} tools)")
 
@@ -1169,7 +1168,6 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
-            print(f"[DEBUG] WaitForAgentsTool: Waiting for agents {agent_ids} with timeout {timeout}s")
             if self.runner._verbose:
                 click.echo(f"\nWaiting for {len(agent_ids)} background agent(s) to complete...")
                 for aid in agent_ids:
