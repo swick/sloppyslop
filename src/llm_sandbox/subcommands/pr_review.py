@@ -1,33 +1,35 @@
-"""Example subcommand: GitHub PR review with instruction-based criteria.
+"""Code review subcommand with support for GitHub PRs and local commits.
 
-This subcommand demonstrates a single-agent workflow with custom MCP tools:
-1. Fetches PR information from GitHub API
-2. Fetches PR head from GitHub into branch (fetch/pr-{id}/{head-branch} pattern)
-3. Pre-checks out PR head and base commits into worktrees (pr-head and pr-base)
+This subcommand demonstrates a multi-agent review workflow with an abstraction layer:
+1. For GitHub PRs: Fetches PR info and head branch from GitHub API
+2. For local reviews: Uses provided base and head refs directly
+3. Pre-checks out head and base commits into worktrees (review-head and review-base)
 4. Agent reads project documentation (AGENTS.md, CLAUDE.md) if available
-5. Agent uses custom GitHub API tools (get_pull_request_commits, get_pull_request_diff) to fetch PR data
-6. OR agent uses git history (git rev-list --ancestry-path) to identify commits in the PR
-7. Agent examines each commit (git show) to understand all changes
-8. Agent finds review instruction files in review/ and docs/review/ folders
-9. Agent reads ALL review instruction files and applies criteria to ALL PR changes
-10. Agent generates suggestions based on all criteria
-11. User approves suggestions and posts to GitHub
+5. Agent uses review tools (get_review_commits, get_review_diff) to fetch data
+   - For GitHub PRs: Data fetched from GitHub API via ReviewTarget
+   - For local: Agent uses git commands directly
+6. Agent examines commits and changes
+7. Agent finds review instruction files in review/ and docs/review/ folders
+8. Agent reads ALL review instruction files and applies criteria to ALL changes
+9. Agent spawns sub-agents for specific review tasks
+10. Sub-agents record findings, orchestrator assigns probabilities and identifies duplicates
+11. User approves suggestions and posts to GitHub (or saves locally)
 
-Custom MCP Tools:
-- get_pull_request_commits: Fetches commit list from GitHub API
-- get_pull_request_diff: Fetches full PR diff from GitHub API
+Review Tools:
+- get_review_commits: Get commit list (from GitHub API or git commands)
+- get_review_diff: Get full diff (from GitHub API or git commands)
 
 The review/ and docs/review/ folders contain INSTRUCTIONS on how to review code,
 not the code to review. The actual code to review is identified through git history
-between pr-base and pr-head commits.
+between review-base and review-head.
 
 If no review instruction files exist, uses general best practices review criteria.
 
 Usage:
-    llm-sandbox pr-review --pr 123
-    llm-sandbox pr-review --pr 123 --with-token ghp_xxxxx
+    llm-sandbox pr-review --pr 123                    # Review GitHub PR
+    llm-sandbox pr-review --base main --head feature  # Review local commits
 
-Authentication:
+Authentication (for GitHub PRs):
     Set GH_TOKEN environment variable or use --with-token option
 """
 
@@ -39,6 +41,8 @@ import subprocess
 import sys
 import uuid
 import tempfile
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -60,6 +64,380 @@ def literal_presenter(dumper, data):
 # Register the representer
 yaml.add_representer(LiteralString, literal_presenter)
 
+
+# ============================================================================
+# Review Data Classes
+# ============================================================================
+
+@dataclass
+class Review:
+    """Container for code review results."""
+
+    summary: Optional[str]  # Review summary text
+    feedback: List[Dict[str, Any]]  # List of feedback items
+    metadata: Optional[Dict[str, Any]] = None  # Agent result metadata (stats, etc)
+
+    def filter_feedback(self, probability_threshold: float = 0.5) -> List[Dict[str, Any]]:
+        """Filter feedback by probability and exclude duplicates."""
+        # Count duplicates
+        duplicates_count = len([f for f in self.feedback if 'duplicate_of' in f])
+
+        # Filter: keep items with probability >= threshold AND not marked as duplicate
+        filtered = [
+            f for f in self.feedback
+            if f.get("probability", 1.0) >= probability_threshold
+            and 'duplicate_of' not in f
+        ]
+
+        # Sort by probability (highest first)
+        return sorted(filtered, key=lambda x: x.get("probability", 1.0), reverse=True)
+
+    def get_statistics(self) -> Dict[str, int]:
+        """Get review statistics."""
+        duplicates = len([f for f in self.feedback if 'duplicate_of' in f])
+        return {
+            "total": len(self.feedback),
+            "duplicates": duplicates,
+            "unique": len(self.feedback) - duplicates,
+        }
+
+
+class ReviewTarget(ABC):
+    """Abstract base class for review targets (local, GitHub PR, GitLab MR, etc)."""
+
+    @abstractmethod
+    def get_base_ref(self) -> str:
+        """Get the base commit/branch reference."""
+        pass
+
+    @abstractmethod
+    def get_head_ref(self) -> str:
+        """Get the head commit/branch reference."""
+        pass
+
+    @abstractmethod
+    def get_description(self) -> str:
+        """Get a human-readable description of the review target."""
+        pass
+
+    @abstractmethod
+    def fetch_if_needed(self, project_dir: Path) -> None:
+        """Fetch remote refs if needed (e.g., PR from GitHub)."""
+        pass
+
+    @abstractmethod
+    def get_diff(self) -> Optional[str]:
+        """Get the full diff for the review. Returns None if not available."""
+        pass
+
+    @abstractmethod
+    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
+        """Get the list of commits in the review. Returns None if not available."""
+        pass
+
+    @abstractmethod
+    def get_mcp_tools(self, runner) -> List:
+        """Get target-specific MCP tools for the agent."""
+        pass
+
+    @abstractmethod
+    def can_publish(self) -> bool:
+        """Whether this target supports publishing reviews."""
+        pass
+
+    @abstractmethod
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+        """Publish the review to the target (e.g., post to GitHub)."""
+        pass
+
+
+class LocalReviewTarget(ReviewTarget):
+    """Review target for local commits/branches."""
+
+    def __init__(self, base_ref: str, head_ref: str):
+        self.base_ref = base_ref
+        self.head_ref = head_ref
+
+    def get_base_ref(self) -> str:
+        return self.base_ref
+
+    def get_head_ref(self) -> str:
+        return self.head_ref
+
+    def get_description(self) -> str:
+        return f"{self.base_ref}..{self.head_ref}"
+
+    def fetch_if_needed(self, project_dir: Path) -> None:
+        # Local refs, nothing to fetch
+        pass
+
+    def get_diff(self) -> Optional[str]:
+        # For local reviews, diff should be obtained via git commands
+        # Agent can use execute_command tool
+        return None
+
+    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
+        # For local reviews, commits should be obtained via git commands
+        # Agent can use execute_command tool
+        return None
+
+    def get_mcp_tools(self, runner) -> List:
+        # No special tools for local reviews - agent uses git commands
+        return []
+
+    def can_publish(self) -> bool:
+        return False
+
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+        raise NotImplementedError("Cannot publish local reviews to remote")
+
+
+class GitHubPRTarget(ReviewTarget):
+    """Review target for GitHub Pull Requests."""
+
+    def __init__(self, pr_number: int, token: str, project_dir: Path):
+        self.pr_number = pr_number
+        self.token = token
+        self.project_dir = project_dir
+        self.github_client = None
+        self.repo_name = None
+        self.pr_info = None
+        self.pr_head_branch = None
+
+    def get_description(self) -> str:
+        return f"PR #{self.pr_number}"
+
+    def fetch_if_needed(self, project_dir: Path) -> None:
+        """Fetch PR information and head branch from GitHub."""
+        self.github_client = GitHubClient(self.token)
+
+        # Get repository name
+        click.echo("Fetching repository information...")
+        try:
+            self.repo_name = self._get_repo_name(project_dir)
+            click.echo(f"  Repository: {self.repo_name}")
+        except Exception as e:
+            click.echo(f"Error getting repository: {e}", err=True)
+            sys.exit(1)
+
+        # Fetch PR info
+        click.echo("Fetching PR information...")
+        try:
+            self.pr_info = self.github_client.get_pull_request(self.repo_name, self.pr_number)
+            click.echo(f"  PR Title: {self.pr_info['title']}")
+            click.echo(f"  Branch: {self.pr_info['head_ref']} ({self.pr_info['head_sha'][:7]})")
+            click.echo(f"  Base: {self.pr_info['base_ref']} ({self.pr_info['base_sha'][:7]})")
+            click.echo(f"  Author: {self.pr_info['author']}")
+        except Exception as e:
+            click.echo(f"Error fetching PR info: {e}", err=True)
+            sys.exit(1)
+
+        # Fetch PR head
+        click.echo("\nFetching PR commits...")
+        self.pr_head_branch = f"fetch/pr-{self.pr_number}/{self.pr_info['head_ref']}"
+
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", f"pull/{self.pr_number}/head:{self.pr_head_branch}"],
+                cwd=project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            click.echo(f"  Fetched PR head: {self.pr_head_branch}")
+        except subprocess.CalledProcessError as e:
+            click.echo(f"Error fetching PR head: {e.stderr}", err=True)
+            sys.exit(1)
+
+    def get_base_ref(self) -> str:
+        if not self.pr_info:
+            raise RuntimeError("Must call fetch_if_needed() first")
+        return self.pr_info['base_ref']
+
+    def get_head_ref(self) -> str:
+        if not self.pr_head_branch:
+            raise RuntimeError("Must call fetch_if_needed() first")
+        return self.pr_head_branch
+
+    def get_diff(self) -> Optional[str]:
+        """Get the full PR diff from GitHub API."""
+        if not self.github_client or not self.repo_name:
+            raise RuntimeError("Must call fetch_if_needed() first")
+
+        try:
+            return self.github_client.get_pull_request_diff(self.repo_name, self.pr_number)
+        except Exception as e:
+            click.echo(f"Warning: Failed to fetch PR diff from GitHub: {e}", err=True)
+            return None
+
+    def get_commits(self) -> Optional[List[Dict[str, Any]]]:
+        """Get the list of commits from GitHub API."""
+        if not self.github_client or not self.repo_name:
+            raise RuntimeError("Must call fetch_if_needed() first")
+
+        try:
+            return self.github_client.get_pull_request_commits(self.repo_name, self.pr_number)
+        except Exception as e:
+            click.echo(f"Warning: Failed to fetch PR commits from GitHub: {e}", err=True)
+            return None
+
+    def get_mcp_tools(self, runner) -> List:
+        """Get generic review tools that use this target."""
+        if not self.github_client or not self.repo_name:
+            raise RuntimeError("Must call fetch_if_needed() first")
+
+        return [
+            GetReviewDiffTool(self),
+            GetReviewCommitsTool(self),
+        ]
+
+    def can_publish(self) -> bool:
+        return True
+
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+        """Post review summary and inline comments to GitHub."""
+        if not self.github_client or not self.pr_info:
+            raise RuntimeError("Must call fetch_if_needed() first")
+
+        # Format summary for GitHub
+        if review.summary:
+            summary_body = self._format_summary_comment(len(review.feedback), review.summary)
+
+            # Show summary
+            click.echo(f"\n{'='*60}")
+            click.echo("Review Summary Comment")
+            click.echo(f"{'='*60}\n")
+            click.echo(summary_body)
+            click.echo(f"\n{'='*60}")
+
+        # Final confirmation
+        click.echo(f"\n{'='*60}")
+        click.echo("Ready to Post Review")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nThis will post to PR #{self.pr_number}:")
+        if review.summary:
+            click.echo(f"  • 1 summary comment")
+        click.echo(f"  • {len(review.feedback)} inline suggestions")
+        click.echo()
+
+        if not click.confirm("Post review to GitHub?", default=True):
+            click.echo("\nCancelled. Review not posted.")
+            return
+
+        # Post to GitHub
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Posting review to GitHub")
+        click.echo(f"{'='*60}\n")
+
+        # Post summary
+        if review.summary:
+            try:
+                self.github_client.post_issue_comment(self.repo_name, self.pr_number, summary_body)
+                click.echo(f"✓ Posted review summary")
+            except Exception as e:
+                click.echo(f"Warning: Failed to post summary: {e}", err=True)
+
+        # Post inline comments
+        success_count = 0
+        failed_suggestions = []
+
+        for i, suggestion in enumerate(review.feedback, 1):
+            try:
+                body = self._format_inline_comment(suggestion)
+                self.github_client.post_review_comment(
+                    self.repo_name,
+                    self.pr_number,
+                    self.pr_info["head_sha"],
+                    suggestion["file"],
+                    suggestion["line_start"],
+                    suggestion["line_end"],
+                    body,
+                )
+                click.echo(f"✓ Posted inline comment {i}/{len(review.feedback)}: {suggestion['file']}")
+                success_count += 1
+            except Exception as e:
+                click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
+                failed_suggestions.append(suggestion)
+
+        # Show results
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Posted {success_count}/{len(review.feedback)} inline comments")
+        click.echo(f"{'='*60}")
+
+        if failed_suggestions:
+            click.echo(f"\n⚠ Failed to post {len(failed_suggestions)} suggestions as inline comments")
+            click.echo("These suggestions could not be posted (file may not exist in PR diff):")
+            for s in failed_suggestions:
+                click.echo(f"  - {s['file']}:{s['line_start']}-{s['line_end']}")
+
+        click.echo(f"\nView the review at:")
+        click.echo(f"  https://github.com/{self.repo_name}/pull/{self.pr_number}")
+
+    def _get_repo_name(self, project_dir: Path) -> str:
+        """Get GitHub repository owner/name from git remote."""
+        try:
+            result = subprocess.run(
+                ["git", "config", "--get", "remote.origin.url"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            remote_url = result.stdout.strip()
+
+            # Parse GitHub URL
+            if "github.com" in remote_url:
+                match = re.search(r'github\.com[:/]([^/]+/[^/]+?)(\.git)?$', remote_url)
+                if match:
+                    return match.group(1)
+
+            raise ValueError(f"Could not parse GitHub repository from: {remote_url}")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to get git remote: {e.stderr}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to determine repository: {e}")
+
+    def _format_summary_comment(self, count: int, summary: str) -> str:
+        """Format summary as a GitHub comment in Markdown."""
+        parts = [
+            "## 🤖 LLM Code Review",
+            "",
+            summary,
+            "",
+            f"Posted {count} inline suggestions on specific lines. Check the 'Files changed' tab to see them.",
+            "",
+            "---",
+            "*This review was generated by llm-sandbox with LLM assistance*",
+        ]
+        return "\n".join(parts)
+
+    def _format_inline_comment(self, suggestion: dict) -> str:
+        """Format a single suggestion as an inline comment."""
+        category_emoji = {
+            "bug": "🐛",
+            "performance": "⚡",
+            "security": "🔒",
+            "style": "💅",
+            "refactor": "♻️",
+            "documentation": "📝",
+        }.get(suggestion["category"], "💡")
+
+        parts = [
+            f"**{category_emoji} {suggestion['category'].title()}**",
+            "",
+            suggestion["reason"],
+            "",
+            "<details>",
+            "<summary>Suggested change</summary>",
+            "",
+            "```suggestion",
+            suggestion["suggested_code"],
+            "```",
+            "</details>",
+        ]
+        return "\n".join(parts)
+
+
 from llm_sandbox import AgentConfig
 from llm_sandbox.mcp_tools import (
     MCPTool,
@@ -78,35 +456,36 @@ from llm_sandbox.mcp_tools import (
 from llm_sandbox.subcommand import Subcommand
 
 
-class GetPullRequestDiffTool(MCPTool):
-    """Custom MCP tool for fetching GitHub PR diff."""
+class GetReviewDiffTool(MCPTool):
+    """Generic MCP tool for fetching review diff from ReviewTarget."""
 
-    def __init__(self, github_client: "GitHubClient", repo: str, pr_number: int):
+    def __init__(self, review_target: "ReviewTarget"):
         """
-        Initialize the PR diff tool.
+        Initialize the review diff tool.
 
         Args:
-            github_client: GitHubClient instance
-            repo: Repository in owner/name format
-            pr_number: Pull request number
+            review_target: ReviewTarget instance that provides the diff
         """
         super().__init__(
-            name="get_pull_request_diff",
-            description="Get the full diff of the pull request from GitHub API. Returns the unified diff format showing all changes.",
+            name="get_review_diff",
+            description="Get the full diff of the code changes being reviewed. Returns the unified diff format showing all changes. For GitHub PRs, this fetches from the GitHub API. For local reviews, use git commands instead.",
             parameters={
                 "type": "object",
                 "properties": {},
                 "required": [],
             },
         )
-        self.github_client = github_client
-        self.repo = repo
-        self.pr_number = pr_number
+        self.review_target = review_target
 
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
-        """Fetch the PR diff from GitHub API."""
+        """Fetch the diff from the review target."""
         try:
-            diff = self.github_client.get_pull_request_diff(self.repo, self.pr_number)
+            diff = self.review_target.get_diff()
+            if diff is None:
+                return {
+                    "success": False,
+                    "error": "Diff not available from review target. Use git commands to get diff (e.g., git diff base..head).",
+                }
             return {
                 "success": True,
                 "diff": diff,
@@ -114,39 +493,40 @@ class GetPullRequestDiffTool(MCPTool):
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Failed to fetch PR diff: {str(e)}",
+                "error": f"Failed to fetch diff: {str(e)}",
             }
 
 
-class GetPullRequestCommitsTool(MCPTool):
-    """Custom MCP tool for fetching GitHub PR commits."""
+class GetReviewCommitsTool(MCPTool):
+    """Generic MCP tool for fetching review commits from ReviewTarget."""
 
-    def __init__(self, github_client: "GitHubClient", repo: str, pr_number: int):
+    def __init__(self, review_target: "ReviewTarget"):
         """
-        Initialize the PR commits tool.
+        Initialize the review commits tool.
 
         Args:
-            github_client: GitHubClient instance
-            repo: Repository in owner/name format
-            pr_number: Pull request number
+            review_target: ReviewTarget instance that provides the commits
         """
         super().__init__(
-            name="get_pull_request_commits",
-            description="Get the list of commits in the pull request from GitHub API. Returns commit SHAs, messages, authors, and timestamps.",
+            name="get_review_commits",
+            description="Get the list of commits in the code review. Returns commit SHAs, messages, authors, and timestamps. For GitHub PRs, this fetches from the GitHub API. For local reviews, use git commands instead.",
             parameters={
                 "type": "object",
                 "properties": {},
                 "required": [],
             },
         )
-        self.github_client = github_client
-        self.repo = repo
-        self.pr_number = pr_number
+        self.review_target = review_target
 
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
-        """Fetch the PR commits from GitHub API."""
+        """Fetch the commits from the review target."""
         try:
-            commits = self.github_client.get_pull_request_commits(self.repo, self.pr_number)
+            commits = self.review_target.get_commits()
+            if commits is None:
+                return {
+                    "success": False,
+                    "error": "Commits not available from review target. Use git commands to get commits (e.g., git log base..head).",
+                }
             return {
                 "success": True,
                 "commits": commits,
@@ -155,7 +535,7 @@ class GetPullRequestCommitsTool(MCPTool):
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Failed to fetch PR commits: {str(e)}",
+                "error": f"Failed to fetch commits: {str(e)}",
             }
 
 
@@ -813,17 +1193,15 @@ class UpdateFeedbackTool(MCPTool):
 
 
 class PRReviewMCPServer(MCPServer):
-    """MCP Server for PR review with all built-in tools plus GitHub API tools."""
+    """MCP Server for code review with all built-in tools and optional target-specific tools."""
 
-    def __init__(self, runner, github_client: "GitHubClient", repo: str, pr_number: int):
+    def __init__(self, runner, target_tools: List = None):
         """
-        Initialize PR review MCP server.
+        Initialize code review MCP server.
 
         Args:
             runner: SandboxRunner instance
-            github_client: GitHubClient instance
-            repo: Repository in owner/name format
-            pr_number: Pull request number
+            target_tools: Optional list of target-specific tools (e.g., GitHub API tools)
         """
         super().__init__()
         # Add all built-in tools
@@ -833,20 +1211,21 @@ class PRReviewMCPServer(MCPServer):
         self.add_tool(GrepTool(runner))
         self.add_tool(SpawnAgentTool(runner, inheritable=False))
         self.add_tool(WaitForAgentsTool(runner))
-        # Add PR review specific tools
+        # Add review specific tools
         self.add_tool(RecordReviewFeedbackTool(runner))
         self.add_tool(GetReviewFeedbackTool(runner))
         self.add_tool(UpdateFeedbackTool(runner))
-        # Add custom GitHub API tools
-        self.add_tool(GetPullRequestDiffTool(github_client, repo, pr_number))
-        self.add_tool(GetPullRequestCommitsTool(github_client, repo, pr_number))
+        # Add target-specific tools
+        if target_tools:
+            for tool in target_tools:
+                self.add_tool(tool)
 
 
 class PRReviewSubcommand(Subcommand):
-    """GitHub PR review with instruction-based criteria using a single agent."""
+    """Code review with instruction-based criteria using multi-agent workflow."""
 
     name = "pr-review"
-    help = "PR review: single agent reads docs, finds changes, applies review instructions"
+    help = "Code review: orchestrator agent reads docs, spawns review agents, applies review instructions"
 
     def add_arguments(self, command):
         """Add custom arguments."""
@@ -854,8 +1233,21 @@ class PRReviewSubcommand(Subcommand):
             click.Option(
                 ["--pr"],
                 type=int,
-                required=True,
                 help="GitHub PR number to review",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--base"],
+                type=str,
+                help="Base commit/branch for local review (requires --head)",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--head"],
+                type=str,
+                help="Head commit/branch for local review (requires --base)",
             )
         )
         command.params.append(
@@ -882,64 +1274,98 @@ class PRReviewSubcommand(Subcommand):
         return command
 
     def execute(self, project_dir: Path, runner, **kwargs):
-        """Execute multi-agent PR review workflow."""
-        pr_number = kwargs["pr"]
+        """Execute multi-agent code review workflow."""
+        pr_number = kwargs.get("pr")
+        base_commit = kwargs.get("base")
+        head_commit = kwargs.get("head")
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
         network = kwargs["network"]
         verbose = kwargs["verbose"]
         load_review = kwargs.get("load_review")
         review_id = kwargs.get("review_id")
 
+        # Validate arguments
+        if pr_number and (base_commit or head_commit):
+            click.echo("Error: Cannot use --pr with --base/--head. Choose one mode.", err=True)
+            sys.exit(1)
+
+        if not pr_number and not (base_commit and head_commit):
+            click.echo("Error: Either --pr OR both --base and --head must be provided.", err=True)
+            sys.exit(1)
+
+        if (base_commit and not head_commit) or (head_commit and not base_commit):
+            click.echo("Error: Both --base and --head must be provided together.", err=True)
+            sys.exit(1)
+
+        # Create appropriate ReviewTarget
+        if pr_number is not None:
+            if not token:
+                click.echo(
+                    "Error: GitHub token not found.\n"
+                    "\n"
+                    "Set GH_TOKEN environment variable or use --with-token option:\n"
+                    "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
+                    "  or\n"
+                    "  llm-sandbox pr-review --pr 123 --with-token ghp_xxxxxxxxxxxx",
+                    err=True
+                )
+                sys.exit(1)
+            review_target = GitHubPRTarget(pr_number, token, project_dir)
+        else:
+            review_target = LocalReviewTarget(base_commit, head_commit)
+
         click.echo(f"\n{'='*60}")
-        click.echo(f"Multi-Agent GitHub PR Review: #{pr_number}")
+        click.echo(f"Multi-Agent Code Review: {review_target.get_description()}")
         click.echo(f"{'='*60}\n")
 
         # Branch 1: Load from existing file
         if load_review:
-            loaded_summary, all_feedback = self._load_review_from_file(load_review, project_dir)
-            repo_name, pr_info = self._fetch_pr_metadata(project_dir, pr_number, token)
-            result = None
-            stats = None
+            review = self._load_review_from_file(load_review, project_dir)
             # Use --load-review value as review_id if no --review-id was specified
             if not review_id:
                 review_id = load_review
         # Branch 2: Generate fresh review with LLM
         else:
-            repo_name, pr_info, pr_head_branch = self._fetch_and_prepare_pr(project_dir, pr_number, token)
-            result, all_feedback, stats = self._run_review_workflow(
-                runner, repo_name, pr_number, pr_info, pr_head_branch, network, verbose
-            )
-            loaded_summary = None  # Will be generated after filtering
+            # Fetch remote data if needed (PR mode)
+            review_target.fetch_if_needed(project_dir)
 
-        # Common path: filter, edit, and post
-        sorted_feedback = self._filter_and_display_feedback(all_feedback, result, stats)
+            review = self._run_review_workflow(runner, review_target, network, verbose)
+
+        # Filter and display feedback
+        sorted_feedback = review.filter_feedback(probability_threshold=0.5)
+        self._display_feedback_statistics(review, sorted_feedback)
 
         if not sorted_feedback:
             click.echo("\nNo high-confidence suggestions. All files look good!")
             return
 
-        # Generate summary for new reviews after we have sorted_feedback count
-        if not load_review:
-            loaded_summary = self._build_summary_text(pr_number, result, stats, len(all_feedback), 0.5, len(sorted_feedback))
+        # Generate summary if not already present
+        if not review.summary:
+            review.summary = self._build_summary_text(review_target, review, sorted_feedback)
 
-        edit_result = self._edit_feedback_interactive(sorted_feedback, project_dir, review_id, loaded_summary)
+        # Edit feedback interactively
+        edited_review = self._edit_feedback_interactive(review, sorted_feedback, project_dir, review_id)
 
-        if edit_result is None:
+        if edited_review is None:
             click.echo("\nReview cancelled. No review will be posted.")
             return
 
-        final_summary, accepted_suggestions = edit_result
-
-        if len(accepted_suggestions) == 0:
+        if len(edited_review.feedback) == 0:
             click.echo("\nNo suggestions remaining after editing. No review will be posted.")
             return
 
-        self._post_review_to_github(
-            repo_name, pr_number, pr_info, accepted_suggestions,
-            final_summary
-        )
+        # Publish review if target supports it
+        if review_target.can_publish():
+            review_target.publish_review(edited_review)
+        else:
+            click.echo(f"\n{'='*60}")
+            click.echo("Review Complete (Local Mode)")
+            click.echo(f"{'='*60}")
+            click.echo(f"\nReview completed for {review_target.get_description()}")
+            click.echo(f"Total suggestions: {len(edited_review.feedback)}")
+            click.echo(f"\nReview saved to file (use --load-review to reload)")
 
-    def _load_review_from_file(self, load_review: str, project_dir: Path):
+    def _load_review_from_file(self, load_review: str, project_dir: Path) -> Review:
         """Load review feedback from existing file."""
         click.echo(f"\n{'='*60}")
         click.echo(f"Loading Review from File/ID")
@@ -957,113 +1383,29 @@ class PRReviewSubcommand(Subcommand):
         click.echo(f"Loaded {len(all_feedback)} suggestions")
         if summary:
             click.echo(f"Loaded review summary")
-        return summary, all_feedback
 
-    def _fetch_pr_metadata(self, project_dir: Path, pr_number: int, token: str):
-        """Fetch minimal PR metadata needed for posting (when loading from file)."""
-        if not token:
-            click.echo(
-                "Error: GitHub token required to post review.\n"
-                "\n"
-                "Set GH_TOKEN environment variable or use --with-token option:\n"
-                "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
-                "  or\n"
-                "  llm-sandbox pr-review --pr 123 --with-token ghp_xxxxxxxxxxxx",
-                err=True
-            )
-            sys.exit(1)
+        return Review(summary=summary, feedback=all_feedback)
 
-        self.github = GitHubClient(token)
+    def _build_agent_prompt(self, review_target: str, base_ref: str, head_ref: str) -> str:
+        """Build the agent prompt for code review."""
+        return f"""You are the orchestrator agent for code review: {review_target}
 
-        click.echo("\nFetching PR metadata...")
-        try:
-            repo_name = self._get_repo_name(project_dir)
-            pr_info = self.github.get_pull_request(repo_name, pr_number)
-            click.echo(f"  Repository: {repo_name}")
-            click.echo(f"  PR #{pr_number}: {pr_info['title']}")
-            return repo_name, pr_info
-        except Exception as e:
-            click.echo(f"Error fetching PR metadata: {e}", err=True)
-            sys.exit(1)
-
-    def _fetch_and_prepare_pr(self, project_dir: Path, pr_number: int, token: str):
-        """Fetch full PR info and prepare for review."""
-        if not token:
-            click.echo(
-                "Error: GitHub token not found.\n"
-                "\n"
-                "Set GH_TOKEN environment variable or use --with-token option:\n"
-                "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
-                "  or\n"
-                "  llm-sandbox pr-review --pr 123 --with-token ghp_xxxxxxxxxxxx",
-                err=True
-            )
-            sys.exit(1)
-
-        self.github = GitHubClient(token)
-
-        # Get repository info
-        click.echo("Fetching repository information...")
-        try:
-            repo_name = self._get_repo_name(project_dir)
-            click.echo(f"  Repository: {repo_name}")
-        except Exception as e:
-            click.echo(f"Error getting repository: {e}", err=True)
-            sys.exit(1)
-
-        # Fetch PR info
-        click.echo("Fetching PR information...")
-        try:
-            pr_info = self.github.get_pull_request(repo_name, pr_number)
-            click.echo(f"  PR Title: {pr_info['title']}")
-            click.echo(f"  Branch: {pr_info['head_ref']} ({pr_info['head_sha'][:7]})")
-            click.echo(f"  Base: {pr_info['base_ref']} ({pr_info['base_sha'][:7]})")
-            click.echo(f"  Author: {pr_info['author']}")
-        except Exception as e:
-            click.echo(f"Error fetching PR info: {e}", err=True)
-            sys.exit(1)
-
-        # Fetch PR head
-        click.echo("\nFetching PR commits...")
-        pr_head_branch = f"fetch/pr-{pr_number}/{pr_info['head_ref']}"
-
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", f"pull/{pr_number}/head:{pr_head_branch}"],
-                cwd=project_dir,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            click.echo(f"  Fetched PR head: {pr_head_branch}")
-        except subprocess.CalledProcessError as e:
-            click.echo(f"Error fetching PR head: {e.stderr}", err=True)
-            sys.exit(1)
-
-        return repo_name, pr_info, pr_head_branch
-
-    def _build_agent_prompt(self, pr_number: int, pr_info: dict) -> str:
-        """Build the agent prompt for PR review."""
-        return f"""You are the orchestrator agent for PR #{pr_number} review.
-
-PR Information:
-- Title: {pr_info['title']}
-- Head branch: {pr_info['head_ref']}
-- Base branch: {pr_info['base_ref']}
-- Author: {pr_info['author']}
+Review Target:
+- Base: {base_ref}
+- Head: {head_ref}
 
 Worktrees already checked out for you:
-- 'pr-head': Contains the PR changes (head: {pr_info['head_ref']})
-- 'pr-base': Contains the base branch (base: {pr_info['base_ref']})
+- 'review-head': Contains the changes being reviewed (head: {head_ref})
+- 'review-base': Contains the base for comparison (base: {base_ref})
 
 Your workflow:
 
 1. Read project documentation and review instructions:
-   - Read AGENTS.md and CLAUDE.md from pr-head worktree (if available)
+   - Read AGENTS.md and CLAUDE.md from review-head worktree (if available)
    - Look for review instruction files as specified in those docs
    - If not specified, search common patterns: review/, docs/review/, .github/review/
    - Understand all review criteria from all instruction files
-   - Get PR changes summary using the MCP tools get_pull_request_commits and get_pull_request_diff
+   - Identify changes using git commands (e.g., git diff, git log)
 
 2. Spawn sub-agents for specific review tasks:
    - Break down the review into specific tasks based on:
@@ -1171,25 +1513,33 @@ The structured output should just be a high-level summary - the detailed finding
             "required": ["review_summary", "documentation_found", "sub_agents_spawned", "findings_statistics", "overall_assessment"],
         }
 
-    def _run_review_workflow(self, runner, repo_name: str, pr_number: int, pr_info: dict,
-                            pr_head_branch: str, network: str, verbose: bool):
+    def _run_review_workflow(self, runner, review_target: ReviewTarget, network: str, verbose: bool) -> Review:
         """Run the full review workflow with LLM agent."""
         click.echo("\nStarting review agent...")
 
-        agent_prompt = self._build_agent_prompt(pr_number, pr_info)
+        base_ref = review_target.get_base_ref()
+        head_ref = review_target.get_head_ref()
+        agent_prompt = self._build_agent_prompt(review_target.get_description(), base_ref, head_ref)
         agent_schema = self._build_agent_schema()
+
+        # Get target-specific tools
+        target_tools = review_target.get_mcp_tools(runner)
 
         # Run agent
         result, all_feedback = asyncio.run(self._execute_async(
-            runner, pr_head_branch, pr_info, repo_name, pr_number,
-            agent_prompt, agent_schema, network, verbose
+            runner, base_ref, head_ref, review_target.get_description(),
+            agent_prompt, agent_schema, network, verbose,
+            target_tools=target_tools
         ))
 
         # Display results
         self._display_agent_results(result)
 
-        stats = result["findings_statistics"]
-        return result, all_feedback, stats
+        return Review(
+            summary=None,  # Will be generated later
+            feedback=all_feedback,
+            metadata=result
+        )
 
     def _display_agent_results(self, result: dict):
         """Display the agent's review results."""
@@ -1228,42 +1578,24 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo(f"\nOverall Assessment:")
         click.echo(result["overall_assessment"])
 
-    def _filter_and_display_feedback(self, all_feedback: list, result: Optional[dict], stats: Optional[dict]):
-        """Filter feedback by probability and duplicates, display statistics."""
+    def _display_feedback_statistics(self, review: Review, filtered_feedback: List[Dict[str, Any]]):
+        """Display feedback filtering statistics."""
+        stats = review.get_statistics()
         probability_threshold = 0.5
-
-        # Count duplicates
-        duplicates_count = len([f for f in all_feedback if 'duplicate_of' in f])
-
-        # Filter: probability >= threshold AND not duplicate
-        filtered_feedback = [
-            f for f in all_feedback
-            if f.get("probability", 1.0) >= probability_threshold
-            and 'duplicate_of' not in f
-        ]
 
         click.echo(f"\n{'='*60}")
         click.echo(f"Filtering Feedback")
         click.echo(f"{'='*60}")
-        click.echo(f"Total findings recorded: {len(all_feedback)}")
-        click.echo(f"Duplicates marked: {duplicates_count}")
-        click.echo(f"Unique findings: {len(all_feedback) - duplicates_count}")
+        click.echo(f"Total findings recorded: {stats['total']}")
+        click.echo(f"Duplicates marked: {stats['duplicates']}")
+        click.echo(f"Unique findings: {stats['unique']}")
         click.echo(f"After filtering (probability ≥ {probability_threshold}, excluding duplicates): {len(filtered_feedback)}")
 
-        # Sort by probability (highest first)
-        sorted_feedback = sorted(
-            filtered_feedback,
-            key=lambda x: x.get("probability", 1.0),
-            reverse=True
-        )
-
         click.echo(f"\n{'='*60}")
-        click.echo(f"Review Complete - {len(sorted_feedback)} High-Confidence Suggestions")
+        click.echo(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
 
-        return sorted_feedback
-
-    def _edit_feedback_interactive(self, sorted_feedback: list, project_dir: Path, review_id: Optional[str], summary: Optional[str] = None):
+    def _edit_feedback_interactive(self, review: Review, sorted_feedback: list, project_dir: Path, review_id: Optional[str]) -> Optional[Review]:
         """Open editor for user to review and modify feedback."""
         click.echo(f"\n{'='*60}")
         click.echo("Opening editor for review suggestions")
@@ -1278,17 +1610,27 @@ The structured output should just be a high-level summary - the detailed finding
         click.echo("  - Edit the review summary in the first YAML document")
         click.echo("- Save and close when done\n")
 
-        return ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id, summary=summary)
+        result = ReviewFeedbackEditor.edit_feedback(sorted_feedback, project_dir, feedback_id=review_id, summary=review.summary)
 
-    def _build_summary_text(self, pr_number: int, result: Optional[dict], stats: Optional[dict],
-                           total_feedback_count: int, probability_threshold: float, sorted_feedback_count: int) -> str:
+        if result is None:
+            return None
+
+        final_summary, accepted_suggestions = result
+        return Review(summary=final_summary, feedback=accepted_suggestions, metadata=review.metadata)
+
+    def _build_summary_text(self, review_target: ReviewTarget, review: Review, sorted_feedback: List[Dict[str, Any]]) -> str:
         """Build the summary text for the review."""
-        if result:
+        stats = review.get_statistics()
+        probability_threshold = 0.5
+
+        if review.metadata:
             # Generated with LLM - include detailed summary
+            result = review.metadata
             doc_list = ", ".join(result['documentation_found']) if result['documentation_found'] else "None"
             agent_list = "\n".join([f"  - {a['agent_id']}: {a['task_description']}" for a in result['sub_agents_spawned']])
+            findings_stats = result['findings_statistics']
 
-            return f"""Code review completed for PR #{pr_number}.
+            return f"""Code review completed for {review_target.get_description()}.
 
 Review approach:
 {result['review_summary'][:300]}{"..." if len(result['review_summary']) > 300 else ""}
@@ -1302,112 +1644,33 @@ Sub-agents used:
 {agent_list}
 
 Findings:
-- Total findings: {stats['total_findings']}
-- Duplicates marked: {stats.get('duplicates_count', 0)}
-- Unique findings: {stats.get('unique_findings', stats['total_findings'])}
-- High confidence (≥0.8): {stats.get('high_confidence_count', 'N/A')}
-- After filtering (≥{probability_threshold}, excluding duplicates): {sorted_feedback_count}
+- Total findings: {findings_stats['total_findings']}
+- Duplicates marked: {findings_stats.get('duplicates_count', 0)}
+- Unique findings: {findings_stats.get('unique_findings', findings_stats['total_findings'])}
+- High confidence (≥0.8): {findings_stats.get('high_confidence_count', 'N/A')}
+- After filtering (≥{probability_threshold}, excluding duplicates): {len(sorted_feedback)}
 
 Overall assessment:
 {result['overall_assessment'][:300]}{"..." if len(result['overall_assessment']) > 300 else ""}"""
         else:
             # Loaded from file - simple summary
-            return f"""Code review completed for PR #{pr_number}.
+            return f"""Code review completed for {review_target.get_description()}.
 
 Review loaded from saved file."""
-
-    def _post_review_to_github(self, repo_name: str, pr_number: int, pr_info: dict,
-                              accepted_suggestions: list, summary: Optional[str]):
-        """Post review summary and inline comments to GitHub."""
-        # Summary has already been edited in the YAML file
-
-        # Format summary for GitHub (if provided)
-        if summary:
-            summary_body = self._format_summary_comment(len(accepted_suggestions), summary)
-
-            # Show summary
-            click.echo(f"\n{'='*60}")
-            click.echo("Review Summary Comment")
-            click.echo(f"{'='*60}\n")
-            click.echo(summary_body)
-            click.echo(f"\n{'='*60}")
-
-        # Final confirmation before posting
-        click.echo(f"\n{'='*60}")
-        click.echo("Ready to Post Review")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nThis will post to PR #{pr_number}:")
-        if summary:
-            click.echo(f"  • 1 summary comment")
-        click.echo(f"  • {len(accepted_suggestions)} inline suggestions")
-        click.echo()
-
-        if not click.confirm("Post review to GitHub?", default=True):
-            click.echo("\nCancelled. Review not posted.")
-            return
-
-        # Post to GitHub
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Posting review to GitHub")
-        click.echo(f"{'='*60}\n")
-
-        # Post summary comment if provided
-        if summary:
-            try:
-                self.github.post_issue_comment(repo_name, pr_number, summary_body)
-                click.echo(f"✓ Posted review summary")
-            except Exception as e:
-                click.echo(f"Warning: Failed to post summary: {e}", err=True)
-
-        # Post each suggestion as an inline comment
-        success_count = 0
-        failed_suggestions = []
-
-        for i, suggestion in enumerate(accepted_suggestions, 1):
-            try:
-                body = self._format_inline_comment(suggestion)
-                self.github.post_review_comment(
-                    repo_name,
-                    pr_number,
-                    pr_info["head_sha"],
-                    suggestion["file"],
-                    suggestion["line_start"],
-                    suggestion["line_end"],
-                    body,
-                )
-                click.echo(f"✓ Posted inline comment {i}/{len(accepted_suggestions)}: {suggestion['file']}")
-                success_count += 1
-            except Exception as e:
-                click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
-                failed_suggestions.append(suggestion)
-
-        # Step 7: Show results
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Posted {success_count}/{len(accepted_suggestions)} inline comments")
-        click.echo(f"{'='*60}")
-
-        if failed_suggestions:
-            click.echo(f"\n⚠ Failed to post {len(failed_suggestions)} suggestions as inline comments")
-            click.echo("These suggestions could not be posted (file may not exist in PR diff):")
-            for s in failed_suggestions:
-                click.echo(f"  - {s['file']}:{s['line_start']}-{s['line_end']}")
-
-        click.echo(f"\nView the review at:")
-        click.echo(f"  https://github.com/{repo_name}/pull/{pr_number}")
 
     async def _execute_async(
         self,
         runner,
-        pr_head_branch,
-        pr_info,
-        repo_name,
-        pr_number,
+        base_ref,
+        head_ref,
+        review_target,
         agent_prompt,
         agent_schema,
         network,
-        verbose
+        verbose,
+        target_tools=None
     ):
-        """Async execution of PR review workflow."""
+        """Async execution of code review workflow."""
         async with runner:
             # Setup the sandbox environment
             await runner.setup(network=network)
@@ -1415,23 +1678,21 @@ Review loaded from saved file."""
             # Create checkout tool instance
             checkout_tool = CheckoutCommitTool(runner)
 
-            # Pre-checkout worktrees for PR head and base
+            # Pre-checkout worktrees for head and base
             click.echo("\nChecking out worktrees...")
-            click.echo(f"  Creating worktree 'pr-head' from {pr_head_branch}...")
+            click.echo(f"  Creating worktree 'review-head' from {head_ref}...")
             head_result = await checkout_tool.execute({
-                "commit": pr_head_branch,
-                "worktree_name": "pr-head",
+                "commit": head_ref,
+                "worktree_name": "review-head",
             })
             if not head_result["success"]:
                 click.echo(f"Error: {head_result['error']}", err=True)
                 sys.exit(1)
 
-            # Use the base ref directly (like "main" or "master")
-            # The base commit is already available from the PR head fetch
-            click.echo(f"  Creating worktree 'pr-base' from {pr_info['base_ref']}...")
+            click.echo(f"  Creating worktree 'review-base' from {base_ref}...")
             base_result = await checkout_tool.execute({
-                "commit": pr_info['base_ref'],
-                "worktree_name": "pr-base",
+                "commit": base_ref,
+                "worktree_name": "review-base",
             })
             if not base_result["success"]:
                 click.echo(f"Error: {base_result['error']}", err=True)
@@ -1439,8 +1700,8 @@ Review loaded from saved file."""
 
             click.echo("  Worktrees created successfully!")
 
-            # Create MCP server with all built-in tools + GitHub API tools
-            mcp_server = PRReviewMCPServer(runner, self.github, repo_name, pr_number)
+            # Create MCP server with all built-in tools + target-specific tools
+            mcp_server = PRReviewMCPServer(runner, target_tools or [])
 
             # Create agent config and run
             agent = AgentConfig(
@@ -1454,74 +1715,3 @@ Review loaded from saved file."""
             all_feedback = list(runner._review_feedback)
 
             return results[0], all_feedback
-
-    def _get_repo_name(self, project_dir: Path) -> str:
-        """Get GitHub repository owner/name from git remote."""
-        try:
-            result = subprocess.run(
-                ["git", "config", "--get", "remote.origin.url"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            remote_url = result.stdout.strip()
-
-            # Parse GitHub URL
-            # Support both SSH (git@github.com:owner/repo.git) and HTTPS (https://github.com/owner/repo.git)
-            if "github.com" in remote_url:
-                # Extract owner/repo
-                match = re.search(r'github\.com[:/]([^/]+/[^/]+?)(\.git)?$', remote_url)
-                if match:
-                    return match.group(1)
-
-            raise ValueError(f"Could not parse GitHub repository from: {remote_url}")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to get git remote: {e.stderr}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to determine repository: {e}")
-
-    def _indent_code(self, code: str, indent: int) -> str:
-        """Indent code snippet for display."""
-        lines = code.split("\n")
-        return "\n" + "\n".join(" " * indent + line for line in lines)
-
-    def _format_summary_comment(self, count: int, summary: str) -> str:
-        """Format summary as a GitHub comment in Markdown."""
-        parts = [
-            "## 🤖 LLM Code Review",
-            "",
-            summary,
-            "",
-            f"Posted {count} inline suggestions on specific lines. Check the 'Files changed' tab to see them.",
-            "",
-            "---",
-            "*This review was generated by llm-sandbox with LLM assistance*",
-        ]
-        return "\n".join(parts)
-
-    def _format_inline_comment(self, suggestion: dict) -> str:
-        """Format a single suggestion as an inline comment."""
-        category_emoji = {
-            "bug": "🐛",
-            "performance": "⚡",
-            "security": "🔒",
-            "style": "💅",
-            "refactor": "♻️",
-            "documentation": "📝",
-        }.get(suggestion["category"], "💡")
-
-        parts = [
-            f"**{category_emoji} {suggestion['category'].title()}**",
-            "",
-            suggestion["reason"],
-            "",
-            "<details>",
-            "<summary>Suggested change</summary>",
-            "",
-            "```suggestion",
-            suggestion["suggested_code"],
-            "```",
-            "</details>",
-        ]
-        return "\n".join(parts)
