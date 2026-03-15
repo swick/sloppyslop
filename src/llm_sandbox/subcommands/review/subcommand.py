@@ -42,6 +42,7 @@ Supports multiple actions:
   list      - List all saved reviews (default)
   create    - Run a new review (--pr for GitHub, --base/--head for local)
   show      - Display a saved review with optional filtering
+  check     - Interactively review suggestions one by one
   edit      - Interactively edit a suggestion's diff
   dismiss   - Mark suggestions as ignored
   undismiss - Un-mark suggestions (restore dismissed suggestions)
@@ -59,6 +60,7 @@ Examples:
   llm-sandbox review show my-review --commit abc123      # Filter by commit
   llm-sandbox review show my-review --commit main..feature
   llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
+  llm-sandbox review check my-review                     # Review suggestions interactively
   llm-sandbox review edit my-review a1b2c3               # Edit suggestion interactively
   llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
   llm-sandbox review undismiss my-review a1b2c3          # Restore dismissed suggestions
@@ -73,7 +75,7 @@ Examples:
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post", "show", "edit", "dismiss", "undismiss", "rebase"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show", "edit", "check", "dismiss", "undismiss", "rebase"], case_sensitive=False),
                 metavar="ACTION",
             )
         )
@@ -175,8 +177,8 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post/edit/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post", "edit", "dismiss", "undismiss", "rebase"):
+        # For show/post/edit/check/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post", "edit", "check", "dismiss", "undismiss", "rebase"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
@@ -195,6 +197,8 @@ Examples:
             self._post_review(store, **kwargs)
         elif action == "show":
             self._show_review(store, **kwargs)
+        elif action == "check":
+            self._check_suggestions(store, **kwargs)
         elif action == "edit":
             self._edit_suggestion(store, **kwargs)
         elif action == "dismiss":
@@ -745,37 +749,8 @@ Examples:
             reason_short = reason_short.replace('\n', ' ').strip()
             click.echo(f"  [{short_id}] {item.file}:{item.line_start} [{item.category}] {reason_short}")
         else:
-            # Separator before item (except first)
-            if not is_first:
-                click.echo("═" * 80)
-
-            # Detailed format: show full reason and diff
-            click.echo(f"\n[{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
-            if item.commit:
-                short_commit = item.commit[:7] if len(item.commit) >= 7 else item.commit
-                click.echo(f"Commit: {short_commit}")
-            click.echo(f"Severity: {item.severity}")
-            if item.probability is not None:
-                click.echo(f"Confidence: {item.probability:.2f}")
-
-            # Newline before reason
-            click.echo()
-
-            # Reason text (indented by 4 spaces)
-            for line in item.reason.split('\n'):
-                click.echo(f"    {line}")
-
-            # Generate and show diff
-            try:
-                diff_text = diff_generator.generate_diff(item)
-                if diff_text:
-                    click.echo()  # Blank line before diff
-                    for line in diff_text.split('\n'):
-                        self._display_diff_line(line)
-                else:
-                    click.echo("\n(No diff available)")
-            except Exception as e:
-                click.echo(f"\n(Error generating diff: {e})")
+            # Detailed format: use the shared display method
+            self._display_suggestion_full(item, diff_generator, show_separator=not is_first)
 
     def _dismiss_suggestions(self, store: ReviewStore, **kwargs):
         """Dismiss (ignore) one or more suggestions."""
@@ -970,6 +945,104 @@ Examples:
             store.save(review_id, review)
             click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
+    def _check_suggestions(self, store: ReviewStore, **kwargs):
+        """Interactively review suggestions one by one."""
+        review_id = kwargs.get("id")
+
+        # Note: review_id validation is done in execute() method
+        if not review_id:
+            click.echo("Error: review ID is required for check", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Get active suggestions
+        active_feedback = review.get_active_feedback()
+        if not active_feedback:
+            click.echo("No active suggestions to review")
+            return
+
+        # Create diff generator
+        diff_generator = FeedbackDiffGenerator(store.project_dir)
+
+        # Create editor for editing suggestions
+        editor = ReviewEditor(store.project_dir, review)
+
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Interactive Review: {review_id}")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nReviewing {len(active_feedback)} active suggestions")
+        click.echo("\nCommands:")
+        click.echo("  - e - Edit the diff interactively")
+        click.echo("  - d - Dismiss (mark as ignored)")
+        click.echo("  - a - Accept (move to next, default)")
+        click.echo("  - q - Quit and save changes")
+        click.echo()
+
+        modified = False
+        for i, item in enumerate(active_feedback, 1):
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Suggestion {i}/{len(active_feedback)}")
+            click.echo(f"{'='*60}")
+
+            # Display the suggestion with diff
+            self._display_suggestion_full(item, diff_generator, show_separator=False)
+
+            # Prompt for action
+            while True:
+                click.echo()
+                action = click.prompt(
+                    "Action",
+                    type=click.Choice(['e', 'd', 'a', 'q'], case_sensitive=False),
+                    default='a',
+                    show_choices=True
+                )
+
+                if action == 'q':
+                    click.echo("\nQuitting review...")
+                    if modified:
+                        store.save(review_id, review)
+                        click.echo(f"✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                    return
+
+                elif action == 'a':
+                    # Accept - just move to next
+                    break
+
+                elif action == 'd':
+                    # Dismiss
+                    item.ignore = True
+                    modified = True
+                    click.echo(f"✓ Dismissed suggestion {item.get_short_id()}")
+                    break
+
+                elif action == 'e':
+                    # Edit
+                    try:
+                        if editor.edit_suggestion(item.get_short_id()):
+                            modified = True
+                            # Redisplay after edit
+                            click.echo(f"\n{'='*60}")
+                            click.echo(f"Suggestion {i}/{len(active_feedback)} (after edit)")
+                            click.echo(f"{'='*60}")
+                            self._display_suggestion_full(item, diff_generator, show_separator=False)
+                    except RuntimeError as e:
+                        click.echo(f"Error editing: {e}", err=True)
+                    # Continue loop to show prompt again
+                    continue
+
+        # Save if modified
+        if modified:
+            store.save(review_id, review)
+            click.echo(f"\n✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+        else:
+            click.echo("\nNo changes made")
+
     def _edit_suggestion(self, store: ReviewStore, **kwargs):
         """Edit a suggestion interactively."""
         review_id = kwargs.get("id")
@@ -1005,6 +1078,48 @@ Examples:
         except RuntimeError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+
+    def _display_suggestion_full(self, item: FeedbackItem, diff_generator: FeedbackDiffGenerator, show_separator: bool = True) -> None:
+        """Display a single suggestion with full details and diff.
+
+        Args:
+            item: FeedbackItem to display
+            diff_generator: Diff generator for showing changes
+            show_separator: Whether to show separator before item
+        """
+        short_id = item.get_short_id()
+
+        # Separator before item
+        if show_separator:
+            click.echo("═" * 80)
+
+        # Detailed format: show full reason and diff
+        click.echo(f"\n[{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
+        if item.commit:
+            short_commit = item.commit[:7] if len(item.commit) >= 7 else item.commit
+            click.echo(f"Commit: {short_commit}")
+        click.echo(f"Severity: {item.severity}")
+        if item.probability is not None:
+            click.echo(f"Confidence: {item.probability:.2f}")
+
+        # Newline before reason
+        click.echo()
+
+        # Reason text (indented by 4 spaces)
+        for line in item.reason.split('\n'):
+            click.echo(f"    {line}")
+
+        # Generate and show diff
+        try:
+            diff_text = diff_generator.generate_diff(item)
+            if diff_text:
+                click.echo()  # Blank line before diff
+                for line in diff_text.split('\n'):
+                    self._display_diff_line(line)
+            else:
+                click.echo("\n(No diff available)")
+        except Exception as e:
+            click.echo(f"\n(Error generating diff: {e})")
 
     def _display_diff_line(self, line: str):
         """Display a diff line with appropriate coloring.
