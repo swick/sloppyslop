@@ -70,8 +70,27 @@ class ReviewTarget(ABC):
         pass
 
     @abstractmethod
+    def print_publish_preview(self, review: Review) -> None:
+        """Print a preview of what will be posted.
+
+        Args:
+            review: Review object to preview
+        """
+        pass
+
+    @abstractmethod
+    def print_published_success(self) -> None:
+        """Print success message after publishing."""
+        pass
+
+    @abstractmethod
     def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
-        """Publish the review to the target (e.g., post to GitHub)."""
+        """Publish the review to the target (e.g., post to GitHub).
+
+        Args:
+            review: Review object to publish
+            pr_info: Optional PR info (deprecated, not used)
+        """
         pass
 
     @abstractmethod
@@ -161,6 +180,14 @@ class LocalReviewTarget(ReviewTarget):
 
     def can_publish(self) -> bool:
         return False
+
+    def print_publish_preview(self, review: Review) -> None:
+        """Local reviews cannot be published."""
+        raise NotImplementedError("Cannot publish local reviews to remote")
+
+    def print_published_success(self) -> None:
+        """Local reviews cannot be published."""
+        raise NotImplementedError("Cannot publish local reviews to remote")
 
     def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
         raise NotImplementedError("Cannot publish local reviews to remote")
@@ -279,43 +306,69 @@ class GitHubPRTarget(ReviewTarget):
     def can_publish(self) -> bool:
         return True
 
+    def print_publish_preview(self, review: Review) -> None:
+        """Print a preview of what will be posted to GitHub."""
+        if not self.github_client or not self.pr_info:
+            raise RuntimeError("Must call fetch_if_needed() first")
+
+        pr_url = f"https://github.com/{self.repo_name}/pull/{self.pr_number}"
+        summary_body = None
+        if review.summary:
+            summary_body = self._format_summary_comment(len(review.feedback), review.summary)
+
+        # Display preview
+        click.echo(f"\n{'='*60}")
+        click.echo("Review Post Preview")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nTarget: GitHub PR #{self.pr_number}")
+        click.echo(f"Repository: {self.repo_name}")
+        click.echo(f"PR URL: {pr_url}")
+
+        click.echo(f"\nWill post:")
+        if summary_body:
+            click.echo(f"  • 1 summary comment")
+        click.echo(f"  • {len(review.feedback)} inline comments")
+
+        if summary_body:
+            click.echo(f"\n{'='*60}")
+            click.echo("Summary Comment")
+            click.echo(f"{'='*60}\n")
+            click.echo(summary_body)
+            click.echo(f"\n{'='*60}")
+
+        # Show sample inline comments
+        if review.feedback:
+            click.echo(f"\nSample inline comments ({min(3, len(review.feedback))} of {len(review.feedback)}):")
+            for i, suggestion in enumerate(review.feedback[:3], 1):
+                comment_body = self._format_inline_comment(suggestion)
+                click.echo(f"\n  {i}. {suggestion.file}:{suggestion.line_start}-{suggestion.line_end} [{suggestion.category}]")
+                # Show first 2 lines of the comment body
+                body_lines = comment_body.split('\n')
+                for line in body_lines[:2]:
+                    click.echo(f"     {line}")
+                if len(body_lines) > 2:
+                    click.echo(f"     ... ({len(body_lines) - 2} more lines)")
+
+    def print_published_success(self) -> None:
+        """Print success message after publishing."""
+        pr_url = f"https://github.com/{self.repo_name}/pull/{self.pr_number}"
+        click.echo(f"\n{'='*60}")
+        click.echo("✓ Review posted successfully!")
+        click.echo(f"{'='*60}")
+        click.echo(f"\nView at: {pr_url}")
+
     def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
         """Post review summary and inline comments to GitHub."""
         if not self.github_client or not self.pr_info:
             raise RuntimeError("Must call fetch_if_needed() first")
 
         # Format summary for GitHub
+        summary_body = None
         if review.summary:
             summary_body = self._format_summary_comment(len(review.feedback), review.summary)
 
-            # Show summary
-            click.echo(f"\n{'='*60}")
-            click.echo("Review Summary Comment")
-            click.echo(f"{'='*60}\n")
-            click.echo(summary_body)
-            click.echo(f"\n{'='*60}")
-
-        # Final confirmation
-        click.echo(f"\n{'='*60}")
-        click.echo("Ready to Post Review")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nThis will post to PR #{self.pr_number}:")
-        if review.summary:
-            click.echo(f"  • 1 summary comment")
-        click.echo(f"  • {len(review.feedback)} inline suggestions")
-        click.echo()
-
-        if not click.confirm("Post review to GitHub?", default=True):
-            click.echo("\nCancelled. Review not posted.")
-            return
-
-        # Post to GitHub
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Posting review to GitHub")
-        click.echo(f"{'='*60}\n")
-
         # Post summary
-        if review.summary:
+        if summary_body:
             try:
                 self.github_client.post_issue_comment(self.repo_name, self.pr_number, summary_body)
                 click.echo(f"✓ Posted review summary")

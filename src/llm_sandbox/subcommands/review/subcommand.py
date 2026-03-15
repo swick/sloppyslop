@@ -86,7 +86,7 @@ class ReviewSubcommand(Subcommand):
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post"], case_sensitive=False),
             )
         )
 
@@ -142,6 +142,8 @@ class ReviewSubcommand(Subcommand):
             self._remove_review(store, **kwargs)
         elif action == "create":
             self._create_review(store, **kwargs)
+        elif action == "post":
+            self._post_review(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
@@ -347,3 +349,67 @@ class ReviewSubcommand(Subcommand):
         click.echo(f"\n{'='*60}")
         click.echo(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
         click.echo(f"{'='*60}")
+
+    def _post_review(self, store: ReviewStore, **kwargs):
+        """Post a review to its target."""
+        review_id = kwargs.get("id")
+        token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
+        project_dir = store.project_dir
+
+        if not review_id:
+            click.echo("Error: --id is required for post", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Check if review has target info
+        if not review.target_info or not review.target_info.get("type"):
+            click.echo("Error: Review does not have target information (cannot determine where to post)", err=True)
+            sys.exit(1)
+
+        # Reconstruct the target
+        from .targets import ReviewTarget
+
+        try:
+            target = ReviewTarget.from_info(review.target_info, token=token, project_dir=project_dir)
+            # Fetch PR info if needed (for GitHub PRs)
+            target.fetch_if_needed()
+        except Exception as e:
+            click.echo(f"Error: Failed to reconstruct review target: {e}", err=True)
+            sys.exit(1)
+
+        # Check if target can publish
+        if not target.can_publish():
+            click.echo(f"Error: Target type '{review.target_info['type']}' does not support publishing", err=True)
+            sys.exit(1)
+
+        # Display preview
+        click.echo(f"\nReview ID: {review_id}")
+        try:
+            target.print_publish_preview(review)
+        except Exception as e:
+            click.echo(f"Error: Failed to generate preview: {e}", err=True)
+            sys.exit(1)
+
+        # Confirm
+        click.echo(f"\n{'='*60}")
+        if not click.confirm("Post review?", default=True):
+            click.echo("\nCancelled. Review not posted.")
+            return
+
+        # Post the review
+        click.echo(f"\n{'='*60}")
+        click.echo("Posting Review")
+        click.echo(f"{'='*60}\n")
+
+        try:
+            target.publish_review(review)
+            target.print_published_success()
+        except Exception as e:
+            click.echo(f"\n✗ Error posting review: {e}", err=True)
+            sys.exit(1)
