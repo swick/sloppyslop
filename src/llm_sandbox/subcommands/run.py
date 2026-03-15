@@ -8,6 +8,8 @@ from pathlib import Path
 import click
 
 from llm_sandbox import AgentConfig
+from llm_sandbox.config import load_config
+from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import Subcommand
 from llm_sandbox.mcp_tools import (
     MCPServer,
@@ -92,7 +94,7 @@ class RunSubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir: Path, runner, **kwargs):
+    def execute(self, project_dir: Path, **kwargs):
         """
         Execute the run command.
         """
@@ -103,6 +105,10 @@ class RunSubcommand(Subcommand):
         schema_file = kwargs.get("schema_file")
         network = kwargs["network"]
         verbose = kwargs["verbose"]
+
+        # Load config and create runner
+        config = load_config(project_dir)
+        runner = SandboxRunner(project_dir, config)
 
         # Validate prompt input
         if not prompt and not prompt_file:

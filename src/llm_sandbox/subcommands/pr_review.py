@@ -749,6 +749,8 @@ class GitHubPRTarget(ReviewTarget):
 
 
 from llm_sandbox import AgentConfig
+from llm_sandbox.config import load_config
+from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.mcp_tools import (
     MCPTool,
     MCPServer,
@@ -1303,22 +1305,22 @@ class PRReviewSubcommand(Subcommand):
 
         return command
 
-    def execute(self, project_dir: Path, runner, **kwargs):
+    def execute(self, project_dir: Path, **kwargs):
         """Execute pr-review command, routing to appropriate sub-sub-command."""
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
         if action == "list":
-            self._list_reviews(store)
+            self._list_reviews(store, **kwargs)
         elif action == "remove":
             self._remove_review(store, **kwargs)
         elif action == "create":
-            self._create_review(store, runner, **kwargs)
+            self._create_review(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
 
-    def _list_reviews(self, store: ReviewStore):
+    def _list_reviews(self, store: ReviewStore, **kwargs):
         """List all available reviews."""
         review_ids = store.list_ids()
 
@@ -1368,7 +1370,7 @@ class PRReviewSubcommand(Subcommand):
             click.echo(f"Error: Review '{review_id}' not found.", err=True)
             sys.exit(1)
 
-    def _create_review(self, store: ReviewStore, runner, **kwargs):
+    def _create_review(self, store: ReviewStore, **kwargs):
         """Create a new review."""
         pr_number = kwargs.get("pr")
         base_commit = kwargs.get("base")
@@ -1378,6 +1380,10 @@ class PRReviewSubcommand(Subcommand):
         verbose = kwargs["verbose"]
         review_id = kwargs.get("id")
         project_dir = store.project_dir
+
+        # Load config and create runner
+        config = load_config(project_dir)
+        runner = SandboxRunner(project_dir, config)
 
         # Validate arguments
         if pr_number and (base_commit or head_commit):

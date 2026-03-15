@@ -19,7 +19,6 @@ from llm_sandbox.config import (
 from llm_sandbox.container import ContainerManager
 from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import create_llm_provider
-from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import discover_subcommands
 
 
@@ -214,17 +213,10 @@ def make_subcommand_callback(subcommand_instance):
         Click callback function
     """
     def callback(project_dir, network, verbose, **kwargs):
-        # Load configuration (project overrides global)
-        config = load_config(project_dir)
-
-        # Create SandboxRunner instance
-        runner = SandboxRunner(project_dir, config)
-
-        # Execute the subcommand
+        # Execute the subcommand (subcommand creates its own runner)
         try:
             subcommand_instance.execute(
                 project_dir=project_dir,
-                runner=runner,
                 network=network,
                 verbose=verbose,
                 **kwargs

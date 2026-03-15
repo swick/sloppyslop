@@ -18,6 +18,8 @@ class Subcommand(ABC):
     Example:
         import asyncio
         from llm_sandbox import AgentConfig
+        from llm_sandbox.config import load_config
+        from llm_sandbox.runner import SandboxRunner
         from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ExecuteCommandTool
 
         class AnalyzeMCPServer(MCPServer):
@@ -37,7 +39,7 @@ class Subcommand(ABC):
                 )
                 return command
 
-            def execute(self, project_dir, runner, **kwargs):
+            def execute(self, project_dir, **kwargs):
                 # Common options available in kwargs:
                 # - network: from --network
                 # - verbose: from --verbose
@@ -46,23 +48,28 @@ class Subcommand(ABC):
                 network = kwargs["network"]
                 verbose = kwargs["verbose"]
 
+                # Load config and create runner
+                config = load_config(project_dir)
+                runner = SandboxRunner(project_dir, config)
+
                 # Setup sandbox, run agent, and cleanup
-                try:
-                    runner.setup(keep_branches=["my-branch"], network=network)
-                    mcp_server = AnalyzeMCPServer(runner)
+                async def main():
+                    async with runner:
+                        await runner.setup(keep_branches=["my-branch"], network=network)
+                        mcp_server = AnalyzeMCPServer(runner)
 
-                    # Create agent config and run
-                    agent = AgentConfig(
-                        prompt=f"Analyze this project with depth {depth}",
-                        output_schema={"type": "object", ...},
-                        mcp_server=mcp_server,
-                    )
-                    results = asyncio.run(runner.run_agents([agent], verbose=verbose))
-                    result = results[0]
+                        # Create agent config and run
+                        agent = AgentConfig(
+                            prompt=f"Analyze this project with depth {depth}",
+                            output_schema={"type": "object", ...},
+                            mcp_server=mcp_server,
+                        )
+                        results = await runner.run_agents([agent], verbose=verbose)
+                        result = results[0]
 
-                    click.echo(f"Analysis complete: {result}")
-                finally:
-                    runner.cleanup()
+                        click.echo(f"Analysis complete: {result}")
+
+                asyncio.run(main())
     """
 
     name: str = None  # Subcommand name (e.g., "analyze")
@@ -85,7 +92,6 @@ class Subcommand(ABC):
     def execute(
         self,
         project_dir: Path,
-        runner: Any,  # SandboxRunner type
         **kwargs
     ) -> Any:
         """
@@ -93,11 +99,6 @@ class Subcommand(ABC):
 
         Args:
             project_dir: Project directory path
-            runner: SandboxRunner instance with methods:
-                - setup(keep_branches: list = None, network: str = None): Setup environment
-                - async run_agents(agents: List[AgentConfig], verbose: bool = False) -> List[dict]:
-                  Execute agents in parallel. Use asyncio.run() to call from sync context.
-                - cleanup(): Cleanup container and worktrees
             **kwargs: Arguments from CLI including:
                 - network: Network mode from --network
                 - verbose: Verbose flag from --verbose
@@ -107,9 +108,18 @@ class Subcommand(ABC):
             Any value (typically None or a result dict)
 
         Note:
-            Best practice is to call runner.setup(), create an MCPServer and AgentConfig,
-            call asyncio.run(runner.run_agents([agent])), and runner.cleanup() in a
-            try/finally block to ensure cleanup.
+            Subcommands should create their own SandboxRunner instance using:
+                from llm_sandbox.config import load_config
+                from llm_sandbox.runner import SandboxRunner
+
+                config = load_config(project_dir)
+                runner = SandboxRunner(project_dir, config)
+
+            Best practice is to use the async context manager pattern:
+                async with runner:
+                    await runner.setup(network=network)
+                    # ... create mcp_server, agent, run agents ...
+                    results = await runner.run_agents([agent], verbose=verbose)
         """
         pass
 

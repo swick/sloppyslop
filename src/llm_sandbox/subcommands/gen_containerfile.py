@@ -6,7 +6,9 @@ from pathlib import Path
 import click
 
 from llm_sandbox import AgentConfig
+from llm_sandbox.config import load_config
 from llm_sandbox.image import Image
+from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.mcp_tools import (
     MCPServer,
     CheckoutCommitTool,
@@ -60,11 +62,15 @@ class GenContainerfileSubcommand(Subcommand):
         )
         return command
 
-    def execute(self, project_dir: Path, runner, **kwargs):
+    def execute(self, project_dir: Path, **kwargs):
         """Execute Containerfile generation."""
         output_path = kwargs["output"]
         extra_prompt = kwargs.get("prompt")
         verbose = kwargs["verbose"]
+
+        # Load config and create runner
+        config = load_config(project_dir)
+        runner = SandboxRunner(project_dir, config)
 
         click.echo(f"Generating Containerfile")
         click.echo(f"Project directory: {project_dir}")
