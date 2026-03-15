@@ -27,6 +27,7 @@ from .targets import (
 )
 from .engine import ReviewWorkflow
 from .diff_generator import FeedbackDiffGenerator
+from .rebase import ReviewRebase
 
 
 class ReviewSubcommand(Subcommand):
@@ -42,6 +43,7 @@ Supports multiple actions:
   show      - Display a saved review with optional filtering
   dismiss   - Mark suggestions as ignored
   undismiss - Un-mark suggestions (restore dismissed suggestions)
+  rebase    - Apply suggestions by rebasing commits
   post      - Post a review to GitHub PR
   remove    - Delete a saved review
 
@@ -57,6 +59,7 @@ Examples:
   llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
   llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
   llm-sandbox review undismiss my-review a1b2c3          # Restore dismissed suggestions
+  llm-sandbox review rebase my-review a1b2c3 --branch fix/suggestions  # Apply via rebase
   llm-sandbox review post my-review"""
 
     def add_arguments(self, command):
@@ -67,7 +70,7 @@ Examples:
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss", "undismiss"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss", "undismiss", "rebase"], case_sensitive=False),
                 metavar="ACTION",
             )
         )
@@ -121,6 +124,15 @@ Examples:
             )
         )
 
+        # Rebase options
+        command.params.append(
+            click.Option(
+                ["--branch"],
+                type=str,
+                help="Branch name for rebase action (required for rebase)",
+            )
+        )
+
         # Suggestion ID filters (for show command)
         command.params.append(
             click.Argument(
@@ -160,8 +172,8 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post/dismiss/undismiss, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post", "dismiss", "undismiss"):
+        # For show/post/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post", "dismiss", "undismiss", "rebase"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
@@ -184,6 +196,8 @@ Examples:
             self._dismiss_suggestions(store, **kwargs)
         elif action == "undismiss":
             self._undismiss_suggestions(store, **kwargs)
+        elif action == "rebase":
+            self._rebase_suggestions(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
@@ -809,6 +823,90 @@ Examples:
         if dismissed_count > 0:
             store.save(review_id, review)
             click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+
+    def _rebase_suggestions(self, store: ReviewStore, **kwargs):
+        """Rebase commits with review suggestions applied."""
+        review_id = kwargs.get("id")
+        suggestion_ids = kwargs.get("suggestion_ids", ())
+        branch_name = kwargs.get("branch")
+
+        # Note: review_id validation is done in execute() method
+        if not review_id:
+            click.echo("Error: review ID is required for rebase", err=True)
+            sys.exit(1)
+
+        if not suggestion_ids:
+            click.echo("Error: at least one suggestion ID is required for rebase", err=True)
+            click.echo("Usage: llm-sandbox review rebase <review-id> <suggestion-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
+            sys.exit(1)
+
+        if not branch_name:
+            click.echo("Error: --branch is required for rebase", err=True)
+            click.echo("Usage: llm-sandbox review rebase <review-id> <suggestion-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Verify review has base_ref and head_ref
+        if not review.base_ref or not review.head_ref:
+            click.echo("Error: Review does not have base_ref and head_ref (cannot rebase)", err=True)
+            sys.exit(1)
+
+        # Find suggestions by ID
+        suggestions = []
+        not_found = []
+
+        for suggestion_id in suggestion_ids:
+            found = False
+            for item in review.feedback:
+                if item.get_short_id() == suggestion_id:
+                    if not item.suggested_code:
+                        click.echo(f"Warning: Suggestion {suggestion_id} has no suggested code, skipping", err=True)
+                    else:
+                        suggestions.append(item)
+                    found = True
+                    break
+            if not found:
+                not_found.append(suggestion_id)
+
+        if not_found:
+            click.echo(f"Error: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+            sys.exit(1)
+
+        if not suggestions:
+            click.echo("Error: No valid suggestions to apply", err=True)
+            sys.exit(1)
+
+        # Display what we're about to do
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Rebase Plan")
+        click.echo(f"{'='*60}")
+        click.echo(f"Review: {review_id}")
+        click.echo(f"Base: {review.base_ref}")
+        click.echo(f"Head: {review.head_ref}")
+        click.echo(f"New branch: {branch_name}")
+        click.echo(f"Suggestions to apply: {len(suggestions)}")
+        for item in suggestions:
+            click.echo(f"  [{item.get_short_id()}] {item.file}:{item.line_start}-{item.line_end} at {item.commit[:7]}")
+
+        # Confirm
+        if not click.confirm("\nProceed with rebase?", default=True):
+            click.echo("Cancelled.")
+            return
+
+        # Perform the rebase
+        rebase = ReviewRebase(store.project_dir, review)
+        try:
+            rebase.apply_suggestions(suggestions, branch_name)
+        except Exception as e:
+            click.echo(f"\n✗ Rebase failed: {e}", err=True)
+            click.echo("\nYou may need to manually complete the rebase or clean up worktrees.", err=True)
+            sys.exit(1)
 
     def _undismiss_suggestions(self, store: ReviewStore, **kwargs):
         """Un-dismiss (un-ignore) one or more suggestions."""
