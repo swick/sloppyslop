@@ -479,6 +479,39 @@ Examples:
             click.echo(f"Error: Review '{review_id}' not found.", err=True)
             sys.exit(1)
 
+        # Always use pager for review output
+        from io import StringIO
+        import sys
+
+        class ColorStringIO(StringIO):
+            """StringIO that pretends to be a TTY for color output."""
+            def isatty(self):
+                return True
+
+        output_buffer = ColorStringIO()
+        old_stdout = sys.stdout
+        sys.stdout = output_buffer
+        try:
+            self._render_review(review, store, suggestion_ids, commit_filter, show_diff, show_all, review_id)
+        finally:
+            sys.stdout = old_stdout
+
+        # Set LESS to interpret color codes
+        old_less = os.environ.get('LESS', '')
+        if 'R' not in old_less:
+            os.environ['LESS'] = old_less + 'R'
+
+        try:
+            # Page the output with color support
+            click.echo_via_pager(output_buffer.getvalue(), color=True)
+        finally:
+            if old_less:
+                os.environ['LESS'] = old_less
+            else:
+                os.environ.pop('LESS', None)
+
+    def _render_review(self, review, store, suggestion_ids, commit_filter, show_diff, show_all, review_id):
+        """Render review output (either to stdout or captured for pager)."""
         # Build filters
         matching_commits = None
         if commit_filter:
