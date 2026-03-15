@@ -38,39 +38,39 @@ class ReviewSubcommand(Subcommand):
     help = """AI-powered code review for GitHub PRs and local commits.
 
 \b
-Supports multiple actions:
-  list      - List all saved reviews (default)
-  create    - Run a new review (--pr for GitHub, --base/--head for local)
-  show      - Display a saved review with optional filtering
-  check     - Interactively review suggestions one by one
-  edit      - Interactively edit a suggestion's diff
+Subcommands:
+  list      - List all saved reviews
+  create    - Run a new review
+  show      - Display a saved review
+  check     - Interactively review suggestions
+  edit      - Edit a suggestion's diff
   dismiss   - Mark suggestions as ignored
-  undismiss - Un-mark suggestions (restore dismissed suggestions)
-  rebase    - Apply suggestions by rebasing commits
-  post      - Post a review to GitHub PR
+  undismiss - Restore dismissed suggestions
+  rebase    - Apply suggestions via rebase
+  post      - Post review to GitHub PR
   remove    - Delete a saved review
 
 \b
 Examples:
   llm-sandbox review list
   llm-sandbox review create --pr 123
-  llm-sandbox review create --base main --head feature
-  llm-sandbox review create --pr 123 --probability-threshold 0.7
-  llm-sandbox review show my-review
+  llm-sandbox review create --base main --head feature --probability-threshold 0.7
   llm-sandbox review show my-review --diff
-  llm-sandbox review show my-review --commit abc123      # Filter by commit
-  llm-sandbox review show my-review --commit main..feature
-  llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
-  llm-sandbox review check my-review                     # Review suggestions interactively
-  llm-sandbox review edit my-review a1b2c3               # Edit suggestion interactively
-  llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
-  llm-sandbox review undismiss my-review a1b2c3          # Restore dismissed suggestions
-  llm-sandbox review rebase my-review a1b2c3 --branch fix/suggestions  # Apply via rebase
+  llm-sandbox review show my-review --commit abc123
+  llm-sandbox review show my-review a1b2c3 d4e5f6
+  llm-sandbox review check my-review
+  llm-sandbox review edit my-review a1b2c3
+  llm-sandbox review dismiss my-review a1b2c3 d4e5f6
+  llm-sandbox review undismiss my-review a1b2c3
+  llm-sandbox review rebase my-review --branch fix/suggestions
+  llm-sandbox review rebase my-review a1b2c3 d4e5f6 --branch fix/suggestions
   llm-sandbox review post my-review"""
 
     def add_arguments(self, command):
         """Add custom arguments."""
-        # Action argument
+        # Keep using action-based approach for compatibility
+        # But organize options by which action they belong to
+
         command.params.append(
             click.Argument(
                 ["action"],
@@ -81,7 +81,6 @@ Examples:
             )
         )
 
-        # Review ID (positional for show/post, option for create/remove)
         command.params.append(
             click.Argument(
                 ["review_id"],
@@ -91,63 +90,6 @@ Examples:
             )
         )
 
-        # Keep --id as fallback/alternative
-        command.params.append(
-            click.Option(
-                ["--id"],
-                type=str,
-                help="Review ID for remove action (required); optional for create (auto-generated if omitted)",
-            )
-        )
-
-        # Create options
-        command.params.append(
-            click.Option(
-                ["--pr"],
-                type=int,
-                help="GitHub PR number to review (for create action)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--base"],
-                type=str,
-                help="Base commit/branch for local review (for create action, requires --head)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--head"],
-                type=str,
-                help="Head commit/branch for local review (for create action, requires --base)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--with-token"],
-                type=str,
-                help="GitHub token for create/post actions (default: $GH_TOKEN)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--probability-threshold"],
-                type=float,
-                default=0.5,
-                help="Probability threshold for auto-ignoring low-confidence suggestions (default: 0.5)",
-            )
-        )
-
-        # Rebase options
-        command.params.append(
-            click.Option(
-                ["--branch"],
-                type=str,
-                help="Branch name for rebase action (required for rebase)",
-            )
-        )
-
-        # Suggestion ID filters (for show command)
         command.params.append(
             click.Argument(
                 ["suggestion_ids"],
@@ -157,27 +99,25 @@ Examples:
                 metavar="[SUGGESTION_ID...]",
             )
         )
-        command.params.append(
-            click.Option(
-                ["--commit"],
-                type=str,
-                help="Filter suggestions by commit SHA or range (for show action; e.g., abc123 or main..feature)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--diff"],
-                is_flag=True,
-                help="Display unified diffs for each suggestion (for show action)",
-            )
-        )
-        command.params.append(
-            click.Option(
-                ["--all"],
-                is_flag=True,
-                help="Include duplicate findings (for show action; default: unique only)",
-            )
-        )
+
+        # CREATE options
+        command.params.append(click.Option(["--pr"], type=int, help="[create] GitHub PR number"))
+        command.params.append(click.Option(["--base"], type=str, help="[create] Base commit/branch (requires --head)"))
+        command.params.append(click.Option(["--head"], type=str, help="[create] Head commit/branch (requires --base)"))
+        command.params.append(click.Option(["--probability-threshold"], type=float, default=0.5,
+                                          help="[create] Probability threshold for auto-ignore (default: 0.5)"))
+
+        # SHOW options
+        command.params.append(click.Option(["--commit"], type=str, help="[show] Filter by commit SHA or range"))
+        command.params.append(click.Option(["--diff"], is_flag=True, help="[show] Display unified diffs"))
+        command.params.append(click.Option(["--all"], is_flag=True, help="[show] Include duplicates"))
+
+        # REBASE options
+        command.params.append(click.Option(["--branch"], type=str, help="[rebase] Branch name (required)"))
+
+        # Shared options
+        command.params.append(click.Option(["--id"], type=str, help="Review ID (alternative to positional)"))
+        command.params.append(click.Option(["--with-token"], type=str, help="[create/post] GitHub token (default: $GH_TOKEN)"))
 
         return command
 
@@ -186,13 +126,13 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post/edit/check/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post", "edit", "check", "dismiss", "undismiss", "rebase"):
+        # For actions that need review_id, use positional if provided, otherwise fall back to --id
+        if action in ("show", "post", "edit", "check", "dismiss", "undismiss", "rebase", "remove"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
                 kwargs["id"] = positional_id
-            elif not option_id:
+            elif not option_id and action != "remove":
                 click.echo(f"Error: review ID is required for {action}", err=True)
                 sys.exit(1)
 
