@@ -509,14 +509,16 @@ Your workflow:
    - Focus your review on the diff itself - the actual lines that changed
 
 3. Spawn sub-agents for specific review tasks:
-   Break down the review into 2-4 parallel tasks based on the changes:
 
-   a) If review guidelines exist: Spawn 1-2 agents for guideline compliance
-      - Each independently audits changes for compliance with project review guidelines
-      - Only flag clear violations where you can quote the exact rule
+   a) For each review instruction file found: Spawn one sub-agent per file
+      - Pass the review file path to the agent in the task description
+      - The agent should read the review file and apply its criteria to the changes
+      - Each agent independently audits changes for compliance with their review file's guidelines
+      - Only flag clear violations where you can quote the exact rule from the review file
       - Consider only guidelines that apply to the changed files
+      - Example task: "Review the changes for compliance with guidelines in docs/review/security.md"
 
-   b) Spawn 1-2 agents for bug detection:
+   b) Spawn 1-2 agents for general bug detection (no review file needed):
       - Security issues (SQL injection, XSS, hardcoded credentials, etc.)
       - Logic errors that will produce wrong results
       - Syntax errors, type errors, missing imports
@@ -527,7 +529,7 @@ Your workflow:
    - Use spawn_agent MCP tool
    - Do not let them create new sub-agents (inheritable=False is already set)
    - Give them clear instructions to use record_review_feedback to record findings
-   - Provide the relevant review criteria
+   - For review file agents: provide the file path and tell them to read it
    - Remind them to focus on HIGH SIGNAL issues only
    - Tell them to self-validate their findings before recording them
 
