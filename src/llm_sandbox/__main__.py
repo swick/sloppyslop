@@ -263,11 +263,27 @@ def register_subcommand_class(subcommand_class):
     # Set the callback
     subcommand_wrapper.callback = make_subcommand_callback(subcommand_instance)
 
-    # Let the subcommand add its custom arguments
-    subcommand_wrapper = subcommand_instance.add_arguments(subcommand_wrapper)
+    # Let the subcommand add its custom arguments or return a Group
+    result = subcommand_instance.add_arguments(subcommand_wrapper)
 
-    # Register with CLI
-    cli.add_command(subcommand_wrapper)
+    # Check if the result is a Group (for nested subcommands)
+    if isinstance(result, click.Group):
+        # It's a group - inject common options into all subcommands
+        group = result
+
+        # Store original params from wrapper (project-dir, network, verbose)
+        common_params = subcommand_wrapper.params
+
+        # Add common options to all commands in the group
+        for cmd_name, cmd in group.commands.items():
+            # Prepend common params so they appear first
+            cmd.params = common_params + cmd.params
+
+        # Register the group
+        cli.add_command(group)
+    else:
+        # It's a regular command
+        cli.add_command(result)
 
 
 def register_builtin_subcommands():

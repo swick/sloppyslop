@@ -168,10 +168,6 @@ Examples:
             click.echo("No reviews found.")
             return
 
-        click.echo(f"\n{'='*60}")
-        click.echo("Available Reviews")
-        click.echo(f"{'='*60}\n")
-
         for review_id in review_ids:
             # Try to load review to get metadata
             try:

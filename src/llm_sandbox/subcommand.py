@@ -75,7 +75,6 @@ class Subcommand(ABC):
     name: str = None  # Subcommand name (e.g., "analyze")
     help: str = None  # Help text for the subcommand
 
-    @abstractmethod
     def add_arguments(self, command: click.Command) -> click.Command:
         """
         Add custom arguments to the command.
@@ -84,9 +83,9 @@ class Subcommand(ABC):
             command: Click command object to modify
 
         Returns:
-            Modified command object
+            Modified command object (can also return a click.Group for nested subcommands)
         """
-        pass
+        return command
 
     @abstractmethod
     def execute(
