@@ -37,12 +37,13 @@ class ReviewSubcommand(Subcommand):
 
 \b
 Supports multiple actions:
-  list    - List all saved reviews (default)
-  create  - Run a new review (--pr for GitHub, --base/--head for local)
-  show    - Display a saved review with optional filtering
-  dismiss - Mark suggestions as ignored
-  post    - Post a review to GitHub PR
-  remove  - Delete a saved review
+  list      - List all saved reviews (default)
+  create    - Run a new review (--pr for GitHub, --base/--head for local)
+  show      - Display a saved review with optional filtering
+  dismiss   - Mark suggestions as ignored
+  undismiss - Un-mark suggestions (restore dismissed suggestions)
+  post      - Post a review to GitHub PR
+  remove    - Delete a saved review
 
 \b
 Examples:
@@ -55,6 +56,7 @@ Examples:
   llm-sandbox review show my-review --commit main..feature
   llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
   llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
+  llm-sandbox review undismiss my-review a1b2c3          # Restore dismissed suggestions
   llm-sandbox review post my-review"""
 
     def add_arguments(self, command):
@@ -65,7 +67,7 @@ Examples:
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss", "undismiss"], case_sensitive=False),
                 metavar="ACTION",
             )
         )
@@ -158,8 +160,8 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post/dismiss, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post", "dismiss"):
+        # For show/post/dismiss/undismiss, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post", "dismiss", "undismiss"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
@@ -180,6 +182,8 @@ Examples:
             self._show_review(store, **kwargs)
         elif action == "dismiss":
             self._dismiss_suggestions(store, **kwargs)
+        elif action == "undismiss":
+            self._undismiss_suggestions(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
@@ -479,7 +483,7 @@ Examples:
             click.echo(f"Error: Review '{review_id}' not found.", err=True)
             sys.exit(1)
 
-        # Always use pager for review output
+        # Capture output to decide whether to use pager
         from io import StringIO
         import sys
 
@@ -496,19 +500,32 @@ Examples:
         finally:
             sys.stdout = old_stdout
 
-        # Set LESS to interpret color codes
-        old_less = os.environ.get('LESS', '')
-        if 'R' not in old_less:
-            os.environ['LESS'] = old_less + 'R'
+        output_text = output_buffer.getvalue()
+        output_lines = output_text.count('\n')
 
+        # Get terminal height, default to 24 if not available
         try:
-            # Page the output with color support
-            click.echo_via_pager(output_buffer.getvalue(), color=True)
-        finally:
-            if old_less:
-                os.environ['LESS'] = old_less
-            else:
-                os.environ.pop('LESS', None)
+            terminal_height = os.get_terminal_size().lines
+        except (AttributeError, OSError):
+            terminal_height = 24
+
+        # Use pager if output exceeds terminal height
+        if output_lines > terminal_height:
+            # Set LESS to interpret color codes
+            old_less = os.environ.get('LESS', '')
+            if 'R' not in old_less:
+                os.environ['LESS'] = old_less + 'R'
+
+            try:
+                click.echo_via_pager(output_text, color=True)
+            finally:
+                if old_less:
+                    os.environ['LESS'] = old_less
+                else:
+                    os.environ.pop('LESS', None)
+        else:
+            # Output is short, print directly
+            click.echo(output_text, nl=False)
 
     def _render_review(self, review, store, suggestion_ids, commit_filter, show_diff, show_all, review_id):
         """Render review output (either to stdout or captured for pager)."""
@@ -790,6 +807,56 @@ Examples:
 
         # Save the updated review
         if dismissed_count > 0:
+            store.save(review_id, review)
+            click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+
+    def _undismiss_suggestions(self, store: ReviewStore, **kwargs):
+        """Un-dismiss (un-ignore) one or more suggestions."""
+        review_id = kwargs.get("id")
+        suggestion_ids = kwargs.get("suggestion_ids", ())
+
+        # Note: review_id validation is done in execute() method
+        if not review_id:
+            click.echo("Error: review ID is required for undismiss", err=True)
+            sys.exit(1)
+
+        if not suggestion_ids:
+            click.echo("Error: at least one suggestion ID is required for undismiss", err=True)
+            click.echo("Usage: llm-sandbox review undismiss <review-id> <suggestion-id> [<suggestion-id> ...]", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Find and un-mark suggestions as ignored
+        undismissed_count = 0
+        not_found = []
+
+        for suggestion_id in suggestion_ids:
+            found = False
+            for item in review.feedback:
+                if item.get_short_id() == suggestion_id:
+                    if item.ignore:
+                        item.ignore = False
+                        undismissed_count += 1
+                    found = True
+                    break
+            if not found:
+                not_found.append(suggestion_id)
+
+        # Report results
+        if undismissed_count > 0:
+            click.echo(f"Un-dismissed {undismissed_count} suggestion(s)")
+
+        if not_found:
+            click.echo(f"Warning: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+
+        # Save the updated review
+        if undismissed_count > 0:
             store.save(review_id, review)
             click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
