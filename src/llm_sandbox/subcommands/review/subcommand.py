@@ -37,11 +37,12 @@ class ReviewSubcommand(Subcommand):
 
 \b
 Supports multiple actions:
-  list   - List all saved reviews (default)
-  create - Run a new review (--pr for GitHub, --base/--head for local)
-  show   - Display a saved review with optional filtering
-  post   - Post a review to GitHub PR
-  remove - Delete a saved review
+  list    - List all saved reviews (default)
+  create  - Run a new review (--pr for GitHub, --base/--head for local)
+  show    - Display a saved review with optional filtering
+  dismiss - Mark suggestions as ignored
+  post    - Post a review to GitHub PR
+  remove  - Delete a saved review
 
 \b
 Examples:
@@ -53,6 +54,7 @@ Examples:
   llm-sandbox review show my-review --commit abc123      # Filter by commit
   llm-sandbox review show my-review --commit main..feature
   llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
+  llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
   llm-sandbox review post my-review"""
 
     def add_arguments(self, command):
@@ -63,7 +65,7 @@ Examples:
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post", "show"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss"], case_sensitive=False),
                 metavar="ACTION",
             )
         )
@@ -156,8 +158,8 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post"):
+        # For show/post/dismiss, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post", "dismiss"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
@@ -176,6 +178,8 @@ Examples:
             self._post_review(store, **kwargs)
         elif action == "show":
             self._show_review(store, **kwargs)
+        elif action == "dismiss":
+            self._dismiss_suggestions(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
@@ -705,6 +709,56 @@ Examples:
                     click.echo("\n(No diff available)")
             except Exception as e:
                 click.echo(f"\n(Error generating diff: {e})")
+
+    def _dismiss_suggestions(self, store: ReviewStore, **kwargs):
+        """Dismiss (ignore) one or more suggestions."""
+        review_id = kwargs.get("id")
+        suggestion_ids = kwargs.get("suggestion_ids", ())
+
+        # Note: review_id validation is done in execute() method
+        if not review_id:
+            click.echo("Error: review ID is required for dismiss", err=True)
+            sys.exit(1)
+
+        if not suggestion_ids:
+            click.echo("Error: at least one suggestion ID is required for dismiss", err=True)
+            click.echo("Usage: llm-sandbox review dismiss <review-id> <suggestion-id> [<suggestion-id> ...]", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Find and mark suggestions as ignored
+        dismissed_count = 0
+        not_found = []
+
+        for suggestion_id in suggestion_ids:
+            found = False
+            for item in review.feedback:
+                if item.get_short_id() == suggestion_id:
+                    if not item.ignore:
+                        item.ignore = True
+                        dismissed_count += 1
+                    found = True
+                    break
+            if not found:
+                not_found.append(suggestion_id)
+
+        # Report results
+        if dismissed_count > 0:
+            click.echo(f"Dismissed {dismissed_count} suggestion(s)")
+
+        if not_found:
+            click.echo(f"Warning: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+
+        # Save the updated review
+        if dismissed_count > 0:
+            store.save(review_id, review)
+            click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
     def _display_diff_line(self, line: str):
         """Display a diff line with appropriate coloring.
