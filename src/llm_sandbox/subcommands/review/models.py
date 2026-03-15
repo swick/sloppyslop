@@ -221,6 +221,9 @@ class FeedbackItem:
     reason: str
     category: Literal["bug", "performance", "security", "style", "refactor", "documentation", "best-practice"]
 
+    # Commit information (optional)
+    commit: str = ""
+
     # Code snippets (optional)
     current_code: str = ""
     suggested_code: str = ""
@@ -250,6 +253,8 @@ class FeedbackItem:
         }
 
         # Add optional fields only if they have values
+        if self.commit:
+            result["commit"] = self.commit
         if self.current_code:
             result["current_code"] = self.current_code
         if self.suggested_code:
@@ -278,6 +283,7 @@ class FeedbackItem:
             line_end=data["line_end"],
             reason=data["reason"],
             category=data["category"],
+            commit=data.get("commit", ""),
             current_code=data.get("current_code", ""),
             suggested_code=data.get("suggested_code", ""),
             severity=data.get("severity", "medium"),
@@ -295,6 +301,8 @@ class Review:
 
     summary: Optional[str]  # Review summary text
     feedback: List[FeedbackItem]  # List of feedback items
+    base_ref: str = ""  # Base commit/branch reference
+    head_ref: str = ""  # Head commit/branch reference
     metadata: Optional[ReviewMetadata] = None  # Agent result metadata
 
     def filter_feedback(self, probability_threshold: float = 0.5) -> List[FeedbackItem]:
@@ -325,6 +333,15 @@ class Review:
         """Serialize review to YAML format."""
         docs = []
 
+        # Review info (base_ref and head_ref)
+        review_info = {}
+        if self.base_ref:
+            review_info["base_ref"] = self.base_ref
+        if self.head_ref:
+            review_info["head_ref"] = self.head_ref
+        if review_info:
+            docs.append({"review_info": review_info})
+
         # Summary
         if self.summary:
             docs.append({"summary": LiteralString(self.summary)})
@@ -354,13 +371,20 @@ class Review:
         summary = None
         metadata = None
         feedback = []
+        base_ref = ""
+        head_ref = ""
 
         for doc in documents:
             if doc is None or not isinstance(doc, dict):
                 continue
 
+            # Check if this is review info
+            if 'review_info' in doc and len(doc) == 1:
+                review_info = doc['review_info']
+                base_ref = review_info.get('base_ref', '')
+                head_ref = review_info.get('head_ref', '')
             # Check if this is summary
-            if 'summary' in doc and len(doc) == 1:
+            elif 'summary' in doc and len(doc) == 1:
                 summary = doc['summary']
             # Check if this is metadata
             elif 'metadata' in doc and len(doc) == 1:
@@ -369,4 +393,4 @@ class Review:
             else:
                 feedback.append(FeedbackItem.from_dict(doc))
 
-        return cls(summary=summary, feedback=feedback, metadata=metadata)
+        return cls(summary=summary, feedback=feedback, base_ref=base_ref, head_ref=head_ref, metadata=metadata)

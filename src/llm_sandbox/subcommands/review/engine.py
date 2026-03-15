@@ -155,6 +155,10 @@ class RecordReviewFeedbackTool(MCPTool):
                         "description": "Severity level (optional, defaults to 'medium')",
                         "default": "medium",
                     },
+                    "commit": {
+                        "type": "string",
+                        "description": "Git commit SHA where this issue was introduced or exists (optional)",
+                    },
                 },
                 "required": ["file", "line_start", "line_end", "reason", "category"],
             },
@@ -167,6 +171,7 @@ class RecordReviewFeedbackTool(MCPTool):
             file=arguments["file"],
             line_start=arguments["line_start"],
             line_end=arguments["line_end"],
+            commit=arguments.get("commit", ""),
             current_code=arguments.get("current_code", ""),
             suggested_code=arguments.get("suggested_code", ""),
             reason=arguments["reason"],
@@ -411,6 +416,8 @@ class ReviewWorkflow:
         return Review(
             summary=None,  # Will be generated later by caller
             feedback=all_feedback,
+            base_ref=base_ref,
+            head_ref=head_ref,
             metadata=metadata
         )
 
