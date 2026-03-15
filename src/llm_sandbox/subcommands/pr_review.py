@@ -1398,51 +1398,96 @@ Worktrees already checked out for you:
 - 'review-head': Contains the changes being reviewed (head: {head_ref})
 - 'review-base': Contains the base for comparison (base: {base_ref})
 
+**Agent assumptions (applies to all agents and subagents):**
+- All tools are functional and will work without error. Do not test tools or make exploratory calls.
+- Only call a tool if it is required to complete the task. Every tool call should have a clear purpose.
+- Make sure these assumptions are clear to every subagent that is launched.
+
+**CRITICAL: We only want HIGH SIGNAL issues.** Flag issues where:
+- The code will fail to compile or parse (syntax errors, type errors, missing imports, unresolved references)
+- The code will definitely produce wrong results regardless of inputs (clear logic errors)
+- Clear, unambiguous violations of project review guidelines where you can quote the exact rule being broken
+- Critical security vulnerabilities (SQL injection, XSS, hardcoded secrets, insecure crypto)
+
+Do NOT flag:
+- Code style or quality concerns (unless explicitly required in review guidelines)
+- Potential issues that depend on specific inputs or state
+- Subjective suggestions or improvements
+- Issues that a linter will catch (assume linters are run separately)
+- General code quality concerns (e.g., lack of test coverage) unless explicitly required in review guidelines
+- Pre-existing issues (only review the changed code)
+- Pedantic nitpicks that a senior engineer would not flag
+
+**If you are not certain an issue is real, do not flag it.** False positives erode trust and waste reviewer time.
+
 Your workflow:
 
 1. Read project documentation and review instructions:
    - Read AGENTS.md and CLAUDE.md from review-head worktree (if available)
-   - Look for review instruction files as specified in those docs
-   - If not specified, search common patterns: review/, docs/review/, .github/review/
+   - Find review instructions (either via AGENTS.md, or by searching for them)
    - Understand all review criteria from all instruction files
-   - Identify changes using git commands (e.g., git diff, git log)
+   - When evaluating compliance for a file, only consider review guidelines that apply to that file's path
+   - Identify changes using git commands or get_review_diff/get_review_commits tools
 
-2. Spawn sub-agents for specific review tasks:
-   - Break down the review into specific tasks based on:
-     * Review instruction categories (if found)
-     * Common areas: security, performance, bugs, style, documentation
-     * Changed file types or modules
-   - Use the spawn_agent MCP tool to create a sub-agent for each task
-     * Do not let them create new sub-agents
-   - Give each sub-agent:
-     * The list of tools available to them
-     * Instructions to use record_review_feedback MCP tools to record findings
-     * A clear, specific task description
-     * The relevant review criteria for that task
-   - Example tasks: "Review security aspects", "Review database changes", "Review API endpoints"
+2. Understand the changes:
+   - Use git diff or get_review_diff to see what changed
+   - Use git log or get_review_commits to understand the commits
+   - Focus your review on the diff itself - the actual lines that changed
 
-3. Wait for sub-agents to complete:
+3. Spawn sub-agents for specific review tasks:
+   Break down the review into ~4 parallel tasks:
+
+   a) 2 agents for review guideline compliance (if guidelines exist):
+      - Each independently audits changes for compliance with project review guidelines
+      - Only flag clear violations where you can quote the exact rule
+      - Consider only guidelines that apply to the changed files
+
+   b) 2 agents for bug detection:
+      - Agent 1: Scan for obvious bugs in the diff itself without reading extra context
+        * Focus only on what's visible in the changed lines
+        * Flag only significant bugs; ignore nitpicks and likely false positives
+      - Agent 2: Look for problems in the introduced code
+        * Security issues (SQL injection, XSS, hardcoded credentials, etc.)
+        * Logic errors that will produce wrong results
+        * Missing error handling for critical operations
+
+   For each sub-agent:
+   - Use spawn_agent MCP tool
+   - Do not let them create new sub-agents (inheritable=False)
+   - Give them clear instructions to use record_review_feedback to record findings
+   - Provide the relevant review criteria
+   - Remind them to focus on HIGH SIGNAL issues only
+
+4. Wait for sub-agents to complete:
    - Use wait_for_agents MCP tool to wait for all spawned agents
    - Sub-agents will record their findings using the record_review_feedback MCP tool
 
-4. Review, assign probabilities, and identify duplicates:
+5. Validate findings:
    - Use get_review_feedback MCP tool to retrieve all recorded findings
-   - Analyze each finding for validity and accuracy
-   - Use update_feedback MCP tool to:
-     * Assign confidence scores (0.0-1.0) with probability_reasoning
-     * Mark duplicate findings (multiple sub-agents may identify the same issue)
-   - For probability assignment:
-     * Consider: Is the issue real? Is the suggested fix appropriate? Does it align with review criteria?
-   - For duplicate detection:
-     * Look for findings that point to the same file/line range
-     * Look for findings that describe the same problem (even if worded differently)
-     * Choose the best/most detailed one as primary (duplicate_of)
-     * Mark others as duplicates with duplicate_reasoning
+   - For each bug/logic issue, spawn a validation subagent to confirm it's real
+   - For each guideline violation, spawn a validation subagent to confirm:
+     * The guideline actually applies to this file (check the scope)
+     * The violation is real and clear
+   - Validation agents should return a simple yes/no on whether the issue is valid
 
-5. Return a summary:
-   - Summarize the review process and findings
+6. Assign probabilities and identify duplicates:
+   - Use update_feedback MCP tool to:
+     * Assign confidence scores (0.0-1.0) based on validation results
+       - Validated issues: 0.8-1.0
+       - Uncertain issues: 0.3-0.7
+       - Likely false positives: 0.0-0.3
+     * Provide clear probability_reasoning explaining the score
+     * Mark duplicate findings (multiple sub-agents may identify the same issue)
+       - Look for findings on the same file/line range
+       - Look for findings describing the same problem
+       - Choose the best/most detailed one, mark others with duplicate_of
+       - Provide duplicate_reasoning
+
+7. Return a summary:
+   - Summarize the review process and approach taken
    - Report how many sub-agents were spawned and what tasks they performed
    - Report total findings, duplicates identified, and confidence distribution
+   - Provide overall assessment of the code quality
    - DO NOT include the detailed findings in output (they're in the feedback store)
 
 The structured output should just be a high-level summary - the detailed findings are accessible via the get_review_feedback MCP tool."""
