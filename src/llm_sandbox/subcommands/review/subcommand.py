@@ -28,6 +28,7 @@ from .targets import (
 from .engine import ReviewWorkflow
 from .diff_generator import FeedbackDiffGenerator
 from .rebase import ReviewRebase
+from .editor import ReviewEditor
 
 
 class ReviewSubcommand(Subcommand):
@@ -41,6 +42,7 @@ Supports multiple actions:
   list      - List all saved reviews (default)
   create    - Run a new review (--pr for GitHub, --base/--head for local)
   show      - Display a saved review with optional filtering
+  edit      - Interactively edit a suggestion's diff
   dismiss   - Mark suggestions as ignored
   undismiss - Un-mark suggestions (restore dismissed suggestions)
   rebase    - Apply suggestions by rebasing commits
@@ -57,6 +59,7 @@ Examples:
   llm-sandbox review show my-review --commit abc123      # Filter by commit
   llm-sandbox review show my-review --commit main..feature
   llm-sandbox review show my-review a1b2c3 d4e5f6        # Show specific suggestions by ID
+  llm-sandbox review edit my-review a1b2c3               # Edit suggestion interactively
   llm-sandbox review dismiss my-review a1b2c3 d4e5f6     # Dismiss suggestions
   llm-sandbox review undismiss my-review a1b2c3          # Restore dismissed suggestions
   llm-sandbox review rebase my-review a1b2c3 --branch fix/suggestions  # Apply via rebase
@@ -70,7 +73,7 @@ Examples:
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post", "show", "dismiss", "undismiss", "rebase"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show", "edit", "dismiss", "undismiss", "rebase"], case_sensitive=False),
                 metavar="ACTION",
             )
         )
@@ -172,8 +175,8 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
-        # For show/post/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
-        if action in ("show", "post", "dismiss", "undismiss", "rebase"):
+        # For show/post/edit/dismiss/undismiss/rebase, use positional review_id if provided, otherwise fall back to --id
+        if action in ("show", "post", "edit", "dismiss", "undismiss", "rebase"):
             positional_id = kwargs.get("review_id")
             option_id = kwargs.get("id")
             if positional_id:
@@ -192,6 +195,8 @@ Examples:
             self._post_review(store, **kwargs)
         elif action == "show":
             self._show_review(store, **kwargs)
+        elif action == "edit":
+            self._edit_suggestion(store, **kwargs)
         elif action == "dismiss":
             self._dismiss_suggestions(store, **kwargs)
         elif action == "undismiss":
@@ -835,14 +840,9 @@ Examples:
             click.echo("Error: review ID is required for rebase", err=True)
             sys.exit(1)
 
-        if not suggestion_ids:
-            click.echo("Error: at least one suggestion ID is required for rebase", err=True)
-            click.echo("Usage: llm-sandbox review rebase <review-id> <suggestion-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
-            sys.exit(1)
-
         if not branch_name:
             click.echo("Error: --branch is required for rebase", err=True)
-            click.echo("Usage: llm-sandbox review rebase <review-id> <suggestion-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
+            click.echo("Usage: llm-sandbox review rebase <review-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
             sys.exit(1)
 
         # Load the review
@@ -857,26 +857,39 @@ Examples:
             click.echo("Error: Review does not have base_ref and head_ref (cannot rebase)", err=True)
             sys.exit(1)
 
-        # Find suggestions by ID
+        # Find suggestions by ID, or use all non-ignored suggestions if none specified
         suggestions = []
         not_found = []
 
-        for suggestion_id in suggestion_ids:
-            found = False
-            for item in review.feedback:
-                if item.get_short_id() == suggestion_id:
-                    if not item.suggested_code:
-                        click.echo(f"Warning: Suggestion {suggestion_id} has no suggested code, skipping", err=True)
-                    else:
-                        suggestions.append(item)
-                    found = True
-                    break
-            if not found:
-                not_found.append(suggestion_id)
+        if suggestion_ids:
+            # Use specified suggestion IDs
+            for suggestion_id in suggestion_ids:
+                found = False
+                for item in review.feedback:
+                    if item.get_short_id() == suggestion_id:
+                        if not item.suggested_code:
+                            click.echo(f"Warning: Suggestion {suggestion_id} has no suggested code, skipping", err=True)
+                        else:
+                            suggestions.append(item)
+                        found = True
+                        break
+                if not found:
+                    not_found.append(suggestion_id)
 
-        if not_found:
-            click.echo(f"Error: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
-            sys.exit(1)
+            if not_found:
+                click.echo(f"Error: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+                sys.exit(1)
+        else:
+            # Use all non-ignored suggestions with suggested code
+            for item in review.feedback:
+                if not item.ignore and item.suggested_code:
+                    suggestions.append(item)
+
+            if not suggestions:
+                click.echo("No non-ignored suggestions with code found in review", err=True)
+                sys.exit(1)
+
+            click.echo(f"No suggestion IDs specified, using all {len(suggestions)} non-ignored suggestions")
 
         if not suggestions:
             click.echo("Error: No valid suggestions to apply", err=True)
@@ -957,6 +970,42 @@ Examples:
         if undismissed_count > 0:
             store.save(review_id, review)
             click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+
+    def _edit_suggestion(self, store: ReviewStore, **kwargs):
+        """Edit a suggestion interactively."""
+        review_id = kwargs.get("id")
+        suggestion_ids = kwargs.get("suggestion_ids", ())
+
+        # Note: review_id validation is done in execute() method
+        if not review_id:
+            click.echo("Error: review ID is required for edit", err=True)
+            sys.exit(1)
+
+        if not suggestion_ids or len(suggestion_ids) != 1:
+            click.echo("Error: exactly one suggestion ID is required for edit", err=True)
+            click.echo("Usage: llm-sandbox review edit <review-id> <suggestion-id>", err=True)
+            sys.exit(1)
+
+        suggestion_id = suggestion_ids[0]
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Edit the suggestion
+        editor = ReviewEditor(store.project_dir, review)
+        try:
+            modified = editor.edit_suggestion(suggestion_id)
+            if modified:
+                # Save the updated review
+                store.save(review_id, review)
+                click.echo(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+        except RuntimeError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
     def _display_diff_line(self, line: str):
         """Display a diff line with appropriate coloring.
