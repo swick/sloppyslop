@@ -10,6 +10,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import click
+
 
 class MCPTool(ABC):
     """Represents an MCP tool."""
@@ -1070,14 +1072,31 @@ class SpawnAgentTool(MCPTool):
             # Create task to run the agent in background
             async def run_background_agent():
                 # Inherit verbose setting from parent runner
-                results = await self.runner.run_agents([agent_config], verbose=self.runner._verbose)
-                return results[0]
+                verbose = self.runner._verbose
+                if verbose:
+                    click.echo(f"\n{'='*60}")
+                    click.echo(f"[Background Agent {agent_id}] Starting at depth {child_spawn_depth}")
+                    click.echo(f"{'='*60}")
+
+                try:
+                    results = await self.runner.run_agents([agent_config], verbose=verbose)
+                    if verbose:
+                        click.echo(f"\n[Background Agent {agent_id}] ✓ Completed successfully")
+                    return results[0]
+                except Exception as e:
+                    if verbose:
+                        click.echo(f"\n[Background Agent {agent_id}] ✗ Failed: {e}")
+                    raise
 
             # Use BackgroundTaskManager to spawn and track the task
             await self.runner._background_task_manager.spawn(agent_id, run_background_agent())
 
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
+
+            print(f"[DEBUG] SpawnAgentTool: Spawned agent '{agent_id}' at depth {child_spawn_depth}")
+            if self.runner._verbose:
+                click.echo(f"→ Spawned background agent '{agent_id}' (depth {child_spawn_depth}, {len(child_tool_names)} tools)")
 
             return {
                 "success": True,
@@ -1136,7 +1155,7 @@ class WaitForAgentsTool(MCPTool):
     async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
         """Wait for background agents to complete."""
         agent_ids = arguments.get("agent_ids")
-        timeout = arguments.get("timeout")
+        timeout = arguments.get("timeout", 300.0)  # Default 5 minute timeout
 
         try:
             # If no agent_ids specified, wait for all
@@ -1150,11 +1169,20 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
+            print(f"[DEBUG] WaitForAgentsTool: Waiting for agents {agent_ids} with timeout {timeout}s")
+            if self.runner._verbose:
+                click.echo(f"\nWaiting for {len(agent_ids)} background agent(s) to complete...")
+                for aid in agent_ids:
+                    click.echo(f"  - {aid}")
+
             # Use BackgroundTaskManager to wait for agents (handles validation internally)
             results = await self.runner._background_task_manager.wait_for(
                 agent_ids=agent_ids,
                 timeout=timeout
             )
+
+            if self.runner._verbose:
+                click.echo(f"✓ All {len(agent_ids)} agent(s) completed")
 
             # Process results to handle exceptions
             processed_results = {}

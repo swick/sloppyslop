@@ -1435,48 +1435,40 @@ Your workflow:
    - Focus your review on the diff itself - the actual lines that changed
 
 3. Spawn sub-agents for specific review tasks:
-   Break down the review into ~4 parallel tasks:
+   Break down the review into 2-4 parallel tasks based on the changes:
 
-   a) 2 agents for review guideline compliance (if guidelines exist):
+   a) If review guidelines exist: Spawn 1-2 agents for guideline compliance
       - Each independently audits changes for compliance with project review guidelines
       - Only flag clear violations where you can quote the exact rule
       - Consider only guidelines that apply to the changed files
 
-   b) 2 agents for bug detection:
-      - Agent 1: Scan for obvious bugs in the diff itself without reading extra context
-        * Focus only on what's visible in the changed lines
-        * Flag only significant bugs; ignore nitpicks and likely false positives
-      - Agent 2: Look for problems in the introduced code
-        * Security issues (SQL injection, XSS, hardcoded credentials, etc.)
-        * Logic errors that will produce wrong results
-        * Missing error handling for critical operations
+   b) Spawn 1-2 agents for bug detection:
+      - Security issues (SQL injection, XSS, hardcoded credentials, etc.)
+      - Logic errors that will produce wrong results
+      - Syntax errors, type errors, missing imports
+      - Missing error handling for critical operations
+      - Focus on what's visible in the diff
 
    For each sub-agent:
    - Use spawn_agent MCP tool
-   - Do not let them create new sub-agents (inheritable=False)
+   - Do not let them create new sub-agents (inheritable=False is already set)
    - Give them clear instructions to use record_review_feedback to record findings
    - Provide the relevant review criteria
    - Remind them to focus on HIGH SIGNAL issues only
+   - Tell them to self-validate their findings before recording them
 
 4. Wait for sub-agents to complete:
    - Use wait_for_agents MCP tool to wait for all spawned agents
    - Sub-agents will record their findings using the record_review_feedback MCP tool
 
-5. Validate findings:
+5. Review and assign probabilities:
    - Use get_review_feedback MCP tool to retrieve all recorded findings
-   - For each bug/logic issue, spawn a validation subagent to confirm it's real
-   - For each guideline violation, spawn a validation subagent to confirm:
-     * The guideline actually applies to this file (check the scope)
-     * The violation is real and clear
-   - Validation agents should return a simple yes/no on whether the issue is valid
-
-6. Assign probabilities and identify duplicates:
+   - Review each finding carefully - sub-agents should have self-validated
    - Use update_feedback MCP tool to:
-     * Assign confidence scores (0.0-1.0) based on validation results
-       - Validated issues: 0.8-1.0
-       - Uncertain issues: 0.3-0.7
-       - Likely false positives: 0.0-0.3
-     * Provide clear probability_reasoning explaining the score
+     * Assign confidence scores (0.0-1.0) with probability_reasoning
+       - Clear, validated issues: 0.8-1.0
+       - Uncertain but worth flagging: 0.5-0.7
+       - Likely false positives: 0.0-0.4
      * Mark duplicate findings (multiple sub-agents may identify the same issue)
        - Look for findings on the same file/line range
        - Look for findings describing the same problem
