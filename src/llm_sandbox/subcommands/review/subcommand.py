@@ -49,7 +49,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import click
 
@@ -70,6 +70,7 @@ from .targets import (
     GitHubPRTarget,
 )
 from .engine import ReviewWorkflow
+from .diff_generator import FeedbackDiffGenerator
 
 
 class ReviewSubcommand(Subcommand):
@@ -136,6 +137,13 @@ class ReviewSubcommand(Subcommand):
                 nargs=-1,  # Accept multiple arguments
                 required=False,
                 type=str,
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--diff"],
+                is_flag=True,
+                help="Show unified diffs for each suggestion (for show command)",
             )
         )
 
@@ -274,15 +282,12 @@ class ReviewSubcommand(Subcommand):
         sorted_feedback = review.filter_feedback(probability_threshold=0.5)
         self._display_feedback_statistics(review, sorted_feedback)
 
-        if not sorted_feedback:
-            click.echo("\nNo high-confidence suggestions. All files look good!")
-            return
-
-        # Generate summary
-        review.summary = workflow.build_summary_text(review_target, review, sorted_feedback)
-
-        # Update feedback list to only include filtered items
-        review.feedback = sorted_feedback
+        # Generate summary (even if no high-confidence suggestions)
+        if sorted_feedback:
+            review.summary = workflow.build_summary_text(review_target, review, sorted_feedback)
+        else:
+            # Generate minimal summary for reviews with no high-confidence issues
+            review.summary = f"Review completed for {review_target.get_description()}.\n\nNo high-confidence suggestions found. All files look good!"
 
         # Generate review ID if not specified
         if not review_id:
@@ -296,7 +301,7 @@ class ReviewSubcommand(Subcommand):
                 head_safe = re.sub(r'[^\w-]', '_', head_commit)
                 review_id = f"{base_safe}-{head_safe}-{timestamp}"
 
-        # Save review
+        # Save review (always save, even if no high-confidence suggestions)
         output_file = store.save(review_id, review)
 
         click.echo(f"\n{'='*60}")
@@ -304,7 +309,14 @@ class ReviewSubcommand(Subcommand):
         click.echo(f"{'='*60}")
         click.echo(f"\nReview ID: {review_id}")
         click.echo(f"Review completed for {review_target.get_description()}")
-        click.echo(f"Total suggestions: {len(review.feedback)}")
+
+        stats = review.get_statistics()
+        click.echo(f"Total findings: {stats['total']}")
+        click.echo(f"High-confidence suggestions: {len(sorted_feedback)}")
+
+        if not sorted_feedback:
+            click.echo("\nNo high-confidence suggestions. All files look good!")
+
         click.echo(f"\n✓ Review saved to: {output_file}")
 
 
@@ -430,6 +442,7 @@ class ReviewSubcommand(Subcommand):
         """Show a review with summary and suggestions by commit."""
         review_id = kwargs.get("id")
         commit_filters = kwargs.get("commits", ())  # Tuple of commit filters
+        show_diff = kwargs.get("diff", False)
 
         if not review_id:
             click.echo("Error: --id is required for show", err=True)
@@ -444,6 +457,9 @@ class ReviewSubcommand(Subcommand):
 
         # Parse commit filters to get set of matching commits
         matching_commits = self._parse_commit_filters(commit_filters, review, store.project_dir) if commit_filters else None
+
+        # Create diff generator if needed
+        diff_generator = FeedbackDiffGenerator(store.project_dir) if show_diff else None
 
         # Display header
         click.echo(f"\n{'='*60}")
@@ -515,19 +531,13 @@ class ReviewSubcommand(Subcommand):
                 short_sha = commit_sha[:7] if len(commit_sha) >= 7 else commit_sha
                 click.echo(f"\n[{short_sha}] ({len(items)} suggestions):")
                 for item in items:
-                    # Create short summary: file:line [category] - first 60 chars of reason
-                    reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
-                    # Remove newlines for compact display
-                    reason_short = reason_short.replace('\n', ' ').strip()
-                    click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+                    self._display_feedback_item(item, diff_generator)
 
             # Show items without commit info
             if no_commit:
                 click.echo(f"\n[no commit] ({len(no_commit)} suggestions):")
                 for item in no_commit:
-                    reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
-                    reason_short = reason_short.replace('\n', ' ').strip()
-                    click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+                    self._display_feedback_item(item, diff_generator)
         else:
             click.echo(f"\n{'='*60}")
             click.echo("No suggestions (all filtered)")
@@ -587,3 +597,63 @@ class ReviewSubcommand(Subcommand):
                         matching.add(commit)
 
         return matching
+
+    def _display_feedback_item(self, item: FeedbackItem, diff_generator: Optional[FeedbackDiffGenerator]):
+        """Display a single feedback item, with optional diff.
+
+        Args:
+            item: FeedbackItem to display
+            diff_generator: Optional diff generator for showing changes
+        """
+        if diff_generator is None:
+            # Compact format: one line summary
+            reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
+            reason_short = reason_short.replace('\n', ' ').strip()
+            click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+        else:
+            # Detailed format: show full reason and diff
+            click.echo(f"\n  • {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
+            click.echo(f"    Severity: {item.severity}")
+            if item.probability is not None:
+                click.echo(f"    Confidence: {item.probability:.2f}")
+            click.echo(f"\n    Reason:")
+            for line in item.reason.split('\n'):
+                click.echo(f"      {line}")
+
+            # Generate and show diff
+            try:
+                diff_text = diff_generator.generate_diff(item)
+                if diff_text:
+                    click.echo(f"\n    Diff:")
+                    for line in diff_text.split('\n'):
+                        self._display_diff_line(line)
+                else:
+                    click.echo(f"\n    (No diff available)")
+            except Exception as e:
+                click.echo(f"\n    (Error generating diff: {e})")
+
+            click.echo()  # Blank line between items
+
+    def _display_diff_line(self, line: str):
+        """Display a diff line with appropriate coloring.
+
+        Args:
+            line: Diff line to display
+        """
+        indent = "      "
+
+        if line.startswith('+++') or line.startswith('---'):
+            # File headers (bold)
+            click.secho(f"{indent}{line}", bold=True)
+        elif line.startswith('@@'):
+            # Hunk headers (cyan)
+            click.secho(f"{indent}{line}", fg='cyan')
+        elif line.startswith('+'):
+            # Additions (green)
+            click.secho(f"{indent}{line}", fg='green')
+        elif line.startswith('-'):
+            # Deletions (red)
+            click.secho(f"{indent}{line}", fg='red')
+        else:
+            # Context lines (no color)
+            click.echo(f"{indent}{line}")
