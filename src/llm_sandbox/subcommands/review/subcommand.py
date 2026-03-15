@@ -609,16 +609,14 @@ Examples:
         no_commit = []
         duplicates_skipped = 0
 
-        for item in review.feedback:
-            # Always skip ignored items
-            if item.ignore:
-                continue
+        # Start with active feedback if not showing all, otherwise all feedback
+        feedback_to_show = review.feedback if show_all else review.get_active_feedback()
 
-            # Skip duplicates unless --all is specified
-            if not show_all and item.duplicate_of is not None:
-                duplicates_skipped += 1
-                continue
+        # Count duplicates that were filtered out
+        if not show_all:
+            duplicates_skipped = len([f for f in review.feedback if f.duplicate_of is not None])
 
+        for item in feedback_to_show:
             # Apply suggestion ID filter if specified
             if matching_suggestion_ids is not None:
                 if item.get_short_id() not in matching_suggestion_ids:
@@ -880,16 +878,17 @@ Examples:
                 click.echo(f"Error: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
                 sys.exit(1)
         else:
-            # Use all non-ignored suggestions with suggested code
-            for item in review.feedback:
-                if not item.ignore and item.suggested_code:
+            # Use all active (non-duplicate, non-ignored) suggestions with suggested code
+            active_feedback = review.get_active_feedback()
+            for item in active_feedback:
+                if item.suggested_code:
                     suggestions.append(item)
 
             if not suggestions:
-                click.echo("No non-ignored suggestions with code found in review", err=True)
+                click.echo("No active suggestions with code found in review", err=True)
                 sys.exit(1)
 
-            click.echo(f"No suggestion IDs specified, using all {len(suggestions)} non-ignored suggestions")
+            click.echo(f"No suggestion IDs specified, using all {len(suggestions)} active suggestions")
 
         if not suggestions:
             click.echo("Error: No valid suggestions to apply", err=True)

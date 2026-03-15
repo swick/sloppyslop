@@ -337,9 +337,10 @@ class GitHubPRTarget(ReviewTarget):
             click.echo(f"\n{'='*60}")
 
         # Show sample inline comments
-        if review.feedback:
-            click.echo(f"\nSample inline comments ({min(3, len(review.feedback))} of {len(review.feedback)}):")
-            for i, suggestion in enumerate(review.feedback[:3], 1):
+        active_feedback = review.get_active_feedback()
+        if active_feedback:
+            click.echo(f"\nSample inline comments ({min(3, len(active_feedback))} of {len(active_feedback)}):")
+            for i, suggestion in enumerate(active_feedback[:3], 1):
                 comment_body = self._format_inline_comment(suggestion)
                 click.echo(f"\n  {i}. {suggestion.file}:{suggestion.line_start}-{suggestion.line_end} [{suggestion.category}]")
                 # Show first 2 lines of the comment body
@@ -379,7 +380,8 @@ class GitHubPRTarget(ReviewTarget):
         success_count = 0
         failed_suggestions = []
 
-        for i, suggestion in enumerate(review.feedback, 1):
+        active_feedback = review.get_active_feedback()
+        for i, suggestion in enumerate(active_feedback, 1):
             try:
                 body = self._format_inline_comment(suggestion)
                 self.github_client.post_review_comment(

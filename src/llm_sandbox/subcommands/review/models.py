@@ -313,6 +313,17 @@ class Review:
         if self.target_info is None:
             self.target_info = {}
 
+    def get_active_feedback(self) -> List[FeedbackItem]:
+        """Get active feedback items (non-duplicate, non-ignored).
+
+        Returns:
+            List of active feedback items
+        """
+        return [
+            f for f in self.feedback
+            if f.duplicate_of is None and not f.ignore
+        ]
+
     def filter_feedback(self, probability_threshold: float = 0.5) -> List[FeedbackItem]:
         """Filter feedback by probability and exclude duplicates."""
         # Filter: keep items with probability >= threshold AND not marked as duplicate
@@ -330,11 +341,12 @@ class Review:
         """Get review statistics."""
         duplicates = len([f for f in self.feedback if f.duplicate_of is not None])
         ignored = len([f for f in self.feedback if f.ignore])
+        active = len(self.get_active_feedback())
         return {
             "total": len(self.feedback),
             "duplicates": duplicates,
             "ignored": ignored,
-            "unique": len(self.feedback) - duplicates - ignored,
+            "unique": active,
         }
 
     def to_yaml(self) -> str:
