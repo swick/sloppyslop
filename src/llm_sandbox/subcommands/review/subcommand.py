@@ -55,6 +55,7 @@ Examples:
   llm-sandbox review list
   llm-sandbox review create --pr 123
   llm-sandbox review create --base main --head feature
+  llm-sandbox review create --pr 123 --probability-threshold 0.7
   llm-sandbox review show my-review
   llm-sandbox review show my-review --diff
   llm-sandbox review show my-review --commit abc123      # Filter by commit
@@ -126,6 +127,14 @@ Examples:
                 ["--with-token"],
                 type=str,
                 help="GitHub token for create/post actions (default: $GH_TOKEN)",
+            )
+        )
+        command.params.append(
+            click.Option(
+                ["--probability-threshold"],
+                type=float,
+                default=0.5,
+                help="Probability threshold for auto-ignoring low-confidence suggestions (default: 0.5)",
             )
         )
 
@@ -321,8 +330,19 @@ Examples:
         if review.metadata:
             self._display_agent_results(review.metadata.to_dict())
 
+        # Mark low-confidence suggestions as ignored
+        probability_threshold = kwargs.get("probability_threshold", 0.5)
+        ignored_count = 0
+        for item in review.feedback:
+            if item.probability is not None and item.probability < probability_threshold:
+                item.ignore = True
+                ignored_count += 1
+
+        if ignored_count > 0:
+            click.echo(f"\nAutomatically ignored {ignored_count} low-confidence suggestions (probability < {probability_threshold})")
+
         # Filter and display feedback
-        sorted_feedback = review.filter_feedback(probability_threshold=0.5)
+        sorted_feedback = review.filter_feedback(probability_threshold=probability_threshold)
         self._display_feedback_statistics(review, sorted_feedback)
 
         # Generate summary (even if no high-confidence suggestions)
