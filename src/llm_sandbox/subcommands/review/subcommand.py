@@ -86,7 +86,7 @@ class ReviewSubcommand(Subcommand):
                 ["action"],
                 required=False,
                 default="list",
-                type=click.Choice(["list", "create", "remove", "post"], case_sensitive=False),
+                type=click.Choice(["list", "create", "remove", "post", "show"], case_sensitive=False),
             )
         )
 
@@ -129,6 +129,16 @@ class ReviewSubcommand(Subcommand):
             )
         )
 
+        # Show options - commit filters
+        command.params.append(
+            click.Argument(
+                ["commits"],
+                nargs=-1,  # Accept multiple arguments
+                required=False,
+                type=str,
+            )
+        )
+
         return command
 
     def execute(self, project_dir: Path, **kwargs):
@@ -144,6 +154,8 @@ class ReviewSubcommand(Subcommand):
             self._create_review(store, **kwargs)
         elif action == "post":
             self._post_review(store, **kwargs)
+        elif action == "show":
+            self._show_review(store, **kwargs)
         else:
             click.echo(f"Error: Unknown action '{action}'", err=True)
             sys.exit(1)
@@ -413,3 +425,165 @@ class ReviewSubcommand(Subcommand):
         except Exception as e:
             click.echo(f"\n✗ Error posting review: {e}", err=True)
             sys.exit(1)
+
+    def _show_review(self, store: ReviewStore, **kwargs):
+        """Show a review with summary and suggestions by commit."""
+        review_id = kwargs.get("id")
+        commit_filters = kwargs.get("commits", ())  # Tuple of commit filters
+
+        if not review_id:
+            click.echo("Error: --id is required for show", err=True)
+            sys.exit(1)
+
+        # Load the review
+        try:
+            review = store.load(review_id)
+        except FileNotFoundError:
+            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            sys.exit(1)
+
+        # Parse commit filters to get set of matching commits
+        matching_commits = self._parse_commit_filters(commit_filters, review, store.project_dir) if commit_filters else None
+
+        # Display header
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Review: {review_id}")
+        click.echo(f"{'='*60}")
+
+        # Target info
+        if review.target_info and review.target_info.get("type"):
+            target_type = review.target_info["type"]
+            click.echo(f"\nTarget: {target_type}")
+            if target_type == "github_pr":
+                pr_number = review.target_info.get("pr_number")
+                repo_name = review.target_info.get("repo_name")
+                if pr_number and repo_name:
+                    click.echo(f"  PR: #{pr_number} ({repo_name})")
+            elif target_type == "local":
+                if review.base_ref and review.head_ref:
+                    click.echo(f"  Range: {review.base_ref}..{review.head_ref}")
+
+        # Summary
+        if review.summary:
+            click.echo(f"\n{'='*60}")
+            click.echo("Summary")
+            click.echo(f"{'='*60}")
+            # Show first 300 chars
+            summary_text = review.summary
+            if len(summary_text) > 300:
+                click.echo(summary_text[:300] + "...")
+            else:
+                click.echo(summary_text)
+
+        # Statistics
+        stats = review.get_statistics()
+        click.echo(f"\n{'='*60}")
+        click.echo("Statistics")
+        click.echo(f"{'='*60}")
+        click.echo(f"Total findings: {stats['total']}")
+        click.echo(f"Unique findings: {stats['unique']}")
+        click.echo(f"Duplicates: {stats['duplicates']}")
+        click.echo(f"Ignored: {stats['ignored']}")
+
+        # Group feedback by commit
+        from collections import defaultdict
+        by_commit = defaultdict(list)
+        no_commit = []
+
+        for item in review.feedback:
+            if item.duplicate_of is not None or item.ignore:
+                continue  # Skip duplicates and ignored items
+
+            # Apply commit filter if specified
+            if matching_commits is not None:
+                if not item.commit or item.commit not in matching_commits:
+                    continue  # Skip items that don't match filter
+
+            if item.commit:
+                by_commit[item.commit].append(item)
+            else:
+                no_commit.append(item)
+
+        # Display suggestions by commit
+        if by_commit or no_commit:
+            click.echo(f"\n{'='*60}")
+            click.echo("Suggestions by Commit")
+            click.echo(f"{'='*60}")
+
+            # Show commits with suggestions
+            for commit_sha, items in sorted(by_commit.items()):
+                short_sha = commit_sha[:7] if len(commit_sha) >= 7 else commit_sha
+                click.echo(f"\n[{short_sha}] ({len(items)} suggestions):")
+                for item in items:
+                    # Create short summary: file:line [category] - first 60 chars of reason
+                    reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
+                    # Remove newlines for compact display
+                    reason_short = reason_short.replace('\n', ' ').strip()
+                    click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+
+            # Show items without commit info
+            if no_commit:
+                click.echo(f"\n[no commit] ({len(no_commit)} suggestions):")
+                for item in no_commit:
+                    reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
+                    reason_short = reason_short.replace('\n', ' ').strip()
+                    click.echo(f"  • {item.file}:{item.line_start} [{item.category}] {reason_short}")
+        else:
+            click.echo(f"\n{'='*60}")
+            click.echo("No suggestions (all filtered)")
+            click.echo(f"{'='*60}")
+
+        click.echo()  # Empty line at end
+
+    def _parse_commit_filters(self, commit_filters: tuple, review: Review, project_dir: Path) -> set:
+        """Parse commit filters into set of matching commit SHAs.
+
+        Args:
+            commit_filters: Tuple of commit SHAs or ranges (e.g., "abc123", "abc123..def456")
+            review: Review object with feedback items
+            project_dir: Project directory for git operations
+
+        Returns:
+            Set of matching commit SHAs from the review's feedback
+        """
+        matching = set()
+
+        # Get all unique commits from feedback
+        all_commits = {item.commit for item in review.feedback if item.commit}
+
+        if not all_commits:
+            return matching
+
+        for filter_str in commit_filters:
+            if '..' in filter_str:
+                # Range: use git to expand, then filter against feedback commits
+                try:
+                    from llm_sandbox.git_ops import GitOperations
+                    git_ops = GitOperations(project_dir)
+
+                    # Parse the range
+                    parts = filter_str.split('..')
+                    if len(parts) != 2:
+                        click.echo(f"Warning: Invalid range format '{filter_str}', skipping", err=True)
+                        continue
+
+                    base, head = parts[0].strip(), parts[1].strip()
+
+                    # Get commits in range
+                    range_commits = git_ops.get_commits(base, head)
+                    range_shas = {c.hexsha for c in range_commits}
+
+                    # Find matches in feedback commits
+                    for commit in all_commits:
+                        if commit in range_shas:
+                            matching.add(commit)
+                except Exception as e:
+                    click.echo(f"Warning: Failed to expand range '{filter_str}': {e}", err=True)
+                    continue
+            else:
+                # Single commit: match by prefix
+                for commit in all_commits:
+                    if commit.startswith(filter_str):
+                        matching.add(commit)
+
+        return matching
