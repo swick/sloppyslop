@@ -60,6 +60,8 @@ Examples:
   llm-sandbox review show my-review a1b2c3 d4e5f6
   llm-sandbox review check my-review
   llm-sandbox review edit my-review a1b2c3
+  llm-sandbox review edit my-review a1b2c3 --reason
+  llm-sandbox review edit my-review --summary
   llm-sandbox review dismiss my-review a1b2c3 d4e5f6
   llm-sandbox review undismiss my-review a1b2c3
   llm-sandbox review rebase my-review --branch fix/suggestions
@@ -114,6 +116,10 @@ Examples:
 
         # REBASE options
         command.params.append(click.Option(["--branch"], type=str, help="[rebase] Branch name (required)"))
+
+        # EDIT options
+        command.params.append(click.Option(["--summary"], is_flag=True, help="[edit] Edit the review summary instead of a suggestion"))
+        command.params.append(click.Option(["--reason"], is_flag=True, help="[edit] Edit suggestion reason/summary instead of diff"))
 
         # Shared options
         command.params.append(click.Option(["--id"], type=str, help="Review ID (alternative to positional)"))
@@ -931,7 +937,12 @@ Examples:
         click.echo(f"{'='*60}")
         click.echo(f"\nReviewing {len(active_feedback)} active suggestions\n")
 
+        # Offer to edit summary first
         modified = False
+        if click.confirm("Edit review summary first?", default=False):
+            if editor.edit_review_summary():
+                modified = True
+
         for i, item in enumerate(active_feedback, 1):
             click.echo(f"\n{'='*60}")
             click.echo(f"Suggestion {i}/{len(active_feedback)}")
@@ -944,8 +955,8 @@ Examples:
             while True:
                 click.echo()
                 action = click.prompt(
-                    "Action ([e]dit, [d]ismiss, [a]ccept, [q]uit)",
-                    type=click.Choice(['e', 'd', 'a', 'q'], case_sensitive=False),
+                    "Action (edit [d]iff, edit [r]eason, [i]gnore, [a]ccept, [q]uit)",
+                    type=click.Choice(['d', 'r', 'i', 'a', 'q'], case_sensitive=False),
                     default='a',
                     show_choices=False
                 )
@@ -961,15 +972,15 @@ Examples:
                     # Accept - just move to next
                     break
 
-                elif action == 'd':
-                    # Dismiss
+                elif action == 'i':
+                    # Ignore (dismiss)
                     item.ignore = True
                     modified = True
                     click.echo(f"✓ Dismissed suggestion {item.get_short_id()}")
                     break
 
-                elif action == 'e':
-                    # Edit
+                elif action == 'd':
+                    # Edit diff
                     try:
                         if editor.edit_suggestion(item.get_short_id()):
                             modified = True
@@ -979,7 +990,22 @@ Examples:
                             click.echo(f"{'='*60}")
                             self._display_suggestion_full(item, diff_generator, show_separator=False)
                     except RuntimeError as e:
-                        click.echo(f"Error editing: {e}", err=True)
+                        click.echo(f"Error editing diff: {e}", err=True)
+                    # Continue loop to show prompt again
+                    continue
+
+                elif action == 'r':
+                    # Edit reason
+                    try:
+                        if editor.edit_item_reason(item.get_short_id()):
+                            modified = True
+                            # Redisplay after edit
+                            click.echo(f"\n{'='*60}")
+                            click.echo(f"Suggestion {i}/{len(active_feedback)} (after edit)")
+                            click.echo(f"{'='*60}")
+                            self._display_suggestion_full(item, diff_generator, show_separator=False)
+                    except RuntimeError as e:
+                        click.echo(f"Error editing reason: {e}", err=True)
                     # Continue loop to show prompt again
                     continue
 
@@ -991,21 +1017,16 @@ Examples:
             click.echo("\nNo changes made")
 
     def _edit_suggestion(self, store: ReviewStore, **kwargs):
-        """Edit a suggestion interactively."""
+        """Edit a suggestion or summary interactively."""
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())
+        edit_summary = kwargs.get("summary", False)
+        edit_reason = kwargs.get("reason", False)
 
         # Note: review_id validation is done in execute() method
         if not review_id:
             click.echo("Error: review ID is required for edit", err=True)
             sys.exit(1)
-
-        if not suggestion_ids or len(suggestion_ids) != 1:
-            click.echo("Error: exactly one suggestion ID is required for edit", err=True)
-            click.echo("Usage: llm-sandbox review edit <review-id> <suggestion-id>", err=True)
-            sys.exit(1)
-
-        suggestion_id = suggestion_ids[0]
 
         # Load the review
         try:
@@ -1014,17 +1035,41 @@ Examples:
             click.echo(f"Error: Review '{review_id}' not found.", err=True)
             sys.exit(1)
 
-        # Edit the suggestion
+        # Edit summary, reason, or suggestion
         editor = ReviewEditor(store.project_dir, review)
-        try:
-            modified = editor.edit_suggestion(suggestion_id)
+
+        if edit_summary:
+            # Edit the review summary
+            modified = editor.edit_review_summary()
             if modified:
-                # Save the updated review
                 store.save(review_id, review)
                 click.echo(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
-        except RuntimeError as e:
-            click.echo(f"Error: {e}", err=True)
-            sys.exit(1)
+        else:
+            # Edit a suggestion
+            if not suggestion_ids or len(suggestion_ids) != 1:
+                click.echo("Error: exactly one suggestion ID is required for edit", err=True)
+                click.echo("Usage: llm-sandbox review edit <review-id> <suggestion-id>", err=True)
+                click.echo("   or: llm-sandbox review edit <review-id> <suggestion-id> --reason", err=True)
+                click.echo("   or: llm-sandbox review edit <review-id> --summary", err=True)
+                sys.exit(1)
+
+            suggestion_id = suggestion_ids[0]
+
+            try:
+                if edit_reason:
+                    # Edit the suggestion reason
+                    modified = editor.edit_item_reason(suggestion_id)
+                else:
+                    # Edit the suggestion diff
+                    modified = editor.edit_suggestion(suggestion_id)
+
+                if modified:
+                    # Save the updated review
+                    store.save(review_id, review)
+                    click.echo(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            except RuntimeError as e:
+                click.echo(f"Error: {e}", err=True)
+                sys.exit(1)
 
     def _display_suggestion_full(self, item: FeedbackItem, diff_generator: FeedbackDiffGenerator, show_separator: bool = True) -> None:
         """Display a single suggestion with full details and diff.

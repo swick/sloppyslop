@@ -5,7 +5,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 import click
 
@@ -14,7 +14,52 @@ from .diff_generator import FeedbackDiffGenerator
 from .models import FeedbackItem, Review
 
 
-class ReviewEditor:
+class Editor:
+    """Base class for interactive editing using $EDITOR."""
+
+    def edit(self, initial_content: str, suffix: str = '.txt') -> Optional[str]:
+        """Open content in editor and return edited result.
+
+        Args:
+            initial_content: Initial content to edit
+            suffix: File suffix for temp file
+
+        Returns:
+            Edited content if modified, None if unchanged or cancelled
+        """
+        # Create temp file with initial content
+        with tempfile.NamedTemporaryFile(mode='w', suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(initial_content)
+
+        try:
+            # Get original content for comparison
+            with open(tmp_path, 'r') as f:
+                original_content = f.read()
+
+            # Open editor
+            editor = os.environ.get('EDITOR', 'vi')
+            subprocess.run([editor, tmp_path], check=True)
+
+            # Read edited content
+            with open(tmp_path, 'r') as f:
+                edited_content = f.read()
+
+            # Check if file was modified
+            if edited_content == original_content:
+                return None
+
+            return edited_content
+
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+class ReviewEditor(Editor):
     """Handles interactive editing of review suggestions."""
 
     def __init__(self, project_dir: Path, review: Review):
@@ -24,6 +69,7 @@ class ReviewEditor:
             project_dir: Project root directory
             review: Review object containing suggestions
         """
+        super().__init__()
         self.project_dir = project_dir
         self.review = review
         self.git_ops = GitOperations(project_dir)
@@ -58,45 +104,20 @@ class ReviewEditor:
         if not diff_text:
             raise RuntimeError(f"Could not generate diff for suggestion {suggestion_id}")
 
-        # Create temporary file with summary and diff
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.diff', delete=False) as tmp:
-            tmp_path = tmp.name
-            tmp.write(f"# Suggestion: {suggestion_id}\n")
-            tmp.write(f"# File: {item.file}:{item.line_start}-{item.line_end}\n")
-            tmp.write(f"# Commit: {item.commit}\n")
-            tmp.write(f"#\n")
-            tmp.write(f"# Reason:\n")
-            for line in item.reason.splitlines():
-                tmp.write(f"#   {line}\n")
-            tmp.write(f"#\n")
-            tmp.write(f"# Edit the diff below. Lines starting with # are ignored.\n")
-            tmp.write(f"# To cancel editing, exit without saving changes.\n")
-            tmp.write(f"\n")
-            tmp.write(diff_text)
-            tmp.write('\n')
+        # Create initial content for editor
+        initial_content = self._format_suggestion_for_edit(item, suggestion_id, diff_text)
 
-        try:
-            # Get original content for comparison
-            original_content = self._get_file_content_before_edit(tmp_path)
+        # Open in editor
+        edited_content = self.edit(initial_content, suffix='.diff')
+        if edited_content is None:
+            click.echo("No changes made to editor file")
+            return False
 
-            # Open editor
-            editor = os.environ.get('EDITOR', 'vi')
-            subprocess.run([editor, tmp_path], check=True)
-
-            # Read edited content
-            with open(tmp_path, 'r') as f:
-                edited_content = f.read()
-
-            # Check if file was modified
-            if edited_content == original_content:
-                click.echo("No changes made to editor file")
-                return False
-
-            # Parse the edited diff (remove comment lines)
-            edited_diff = self._parse_edited_diff(edited_content)
-            if not edited_diff:
-                click.echo("No valid diff found in edited file")
-                return False
+        # Parse the edited diff (remove comment lines)
+        edited_diff = self._parse_edited_diff(edited_content)
+        if not edited_diff:
+            click.echo("No valid diff found in edited file")
+            return False
 
             # Store original state for comparison
             original_suggested_code = item.suggested_code
@@ -133,17 +154,129 @@ class ReviewEditor:
                 click.echo(f"No changes to suggestion {suggestion_id}")
                 return False
 
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    def edit_review_summary(self) -> bool:
+        """Edit the review summary.
 
-    def _get_file_content_before_edit(self, tmp_path: str) -> str:
-        """Get the original content of temp file before editing."""
-        with open(tmp_path, 'r') as f:
-            return f.read()
+        Returns:
+            True if modified, False otherwise
+        """
+        new_summary = self.edit(self.review.summary or "", suffix='.md')
+
+        if new_summary is not None:
+            self.review.summary = new_summary
+            click.echo("✓ Summary updated")
+            return True
+        else:
+            click.echo("No changes made to summary")
+            return False
+
+    def edit_item_reason(self, suggestion_id: str) -> bool:
+        """Edit a suggestion's reason/summary.
+
+        Args:
+            suggestion_id: Short ID of the suggestion
+
+        Returns:
+            True if modified, False otherwise
+
+        Raises:
+            RuntimeError: If suggestion not found
+        """
+        # Find the suggestion
+        item = None
+        for feedback in self.review.feedback:
+            if feedback.get_short_id() == suggestion_id:
+                item = feedback
+                break
+
+        if item is None:
+            raise RuntimeError(f"Suggestion '{suggestion_id}' not found")
+
+        # Format initial content
+        initial_content = self._format_reason_for_edit(item, suggestion_id)
+
+        # Open in editor
+        edited_content = self.edit(initial_content, suffix='.txt')
+        if edited_content is None:
+            click.echo("No changes made")
+            return False
+
+        # Parse edited content (remove comment lines)
+        new_reason = self._parse_edited_reason(edited_content)
+        if new_reason == item.reason:
+            click.echo("No changes to reason")
+            return False
+
+        # Update the item
+        item.reason = new_reason
+        click.echo(f"✓ Updated reason for {suggestion_id}")
+        return True
+
+    def _format_reason_for_edit(self, item: FeedbackItem, suggestion_id: str) -> str:
+        """Format item reason for editing.
+
+        Args:
+            item: FeedbackItem being edited
+            suggestion_id: Short ID of suggestion
+
+        Returns:
+            Formatted content for editor
+        """
+        lines = []
+        lines.append(f"# Editing reason for suggestion: {suggestion_id}")
+        lines.append(f"# File: {item.file}:{item.line_start}-{item.line_end}")
+        lines.append(f"# Category: {item.category}")
+        lines.append(f"# Severity: {item.severity}")
+        lines.append("#")
+        lines.append("# Edit the reason below. Lines starting with # are ignored.")
+        lines.append("")
+        lines.append(item.reason)
+        return '\n'.join(lines)
+
+    def _parse_edited_reason(self, content: str) -> str:
+        """Parse edited reason, removing comment lines.
+
+        Args:
+            content: Edited file content
+
+        Returns:
+            Reason text without comments
+        """
+        lines = []
+        for line in content.splitlines():
+            # Skip comment lines
+            if line.startswith('#'):
+                continue
+            lines.append(line)
+
+        return '\n'.join(lines).strip()
+
+    def _format_suggestion_for_edit(self, item: FeedbackItem, suggestion_id: str, diff_text: str) -> str:
+        """Format suggestion and diff for editing.
+
+        Args:
+            item: FeedbackItem being edited
+            suggestion_id: Short ID of suggestion
+            diff_text: Unified diff text
+
+        Returns:
+            Formatted content for editor
+        """
+        lines = []
+        lines.append(f"# Suggestion: {suggestion_id}")
+        lines.append(f"# File: {item.file}:{item.line_start}-{item.line_end}")
+        lines.append(f"# Commit: {item.commit}")
+        lines.append("#")
+        lines.append("# Reason:")
+        for line in item.reason.splitlines():
+            lines.append(f"#   {line}")
+        lines.append("#")
+        lines.append("# Edit the diff below. Lines starting with # are ignored.")
+        lines.append("# To cancel editing, exit without saving changes.")
+        lines.append("")
+        lines.append(diff_text)
+        lines.append("")
+        return '\n'.join(lines)
 
     def _parse_edited_diff(self, content: str) -> Optional[str]:
         """Parse edited content, removing comment lines.
