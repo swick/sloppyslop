@@ -1183,4 +1183,65 @@ class WaitForAgentsTool(MCPTool):
             }
 
 
+class AskUserTool(MCPTool):
+    """Tool for asking the user a question and getting their response (interactive mode only)."""
+
+    def __init__(self, inheritable: bool = False):
+        """
+        Initialize ask user tool.
+
+        Args:
+            inheritable: Whether this tool can be inherited by spawned child agents (default: False)
+        """
+        super().__init__(
+            name="ask_user",
+            description="Ask the user a question and wait for their response. Use this to clarify requirements, get confirmation, or gather additional information from the user.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user",
+                    },
+                },
+                "required": ["question"],
+            },
+            inheritable=inheritable,
+        )
+
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
+        """Ask the user a question."""
+        question = arguments.get("question", "")
+
+        if not question:
+            return {
+                "success": False,
+                "error": "Question is required",
+            }
+
+        try:
+            # Import click here to avoid circular imports
+            import click
+
+            # Display the question and get user input
+            click.echo(f"\n{'='*60}")
+            click.echo("Agent Question:", nl=False)
+            click.secho(f" {question}", fg="cyan", bold=True)
+            click.echo('='*60)
+
+            # Get user response
+            response = click.prompt("Your answer", type=str)
+
+            return {
+                "success": True,
+                "response": response,
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to get user input: {str(e)}",
+            }
+
+
 
