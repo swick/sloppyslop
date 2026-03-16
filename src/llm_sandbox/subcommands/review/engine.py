@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from llm_sandbox import AgentConfig
+from llm_sandbox import Agent
 from llm_sandbox.events import EventEmitter
 from llm_sandbox.mcp_tools import (
     MCPTool,
@@ -441,14 +441,14 @@ class ReviewWorkflow:
         """Initialize review workflow."""
         self.events = EventEmitter()
 
-    def run(self, runner, review_target: "ReviewTarget", network: str, verbose: bool) -> Review:
+    async def run(self, runner, review_target: "ReviewTarget") -> Review:
         """Run the full review workflow with LLM agent.
 
+        Expects runner to already be setup (caller must call runner.setup() first).
+
         Args:
-            runner: SandboxRunner instance
+            runner: SandboxRunner instance (already setup)
             review_target: ReviewTarget instance (provides diff/commits data)
-            network: Network mode ("isolated" or "enabled")
-            verbose: Whether to show verbose output
 
         Returns:
             Review object with feedback and metadata
@@ -461,10 +461,10 @@ class ReviewWorkflow:
         agent_schema = self._build_agent_schema()
 
         # Run agent
-        result, all_feedback = asyncio.run(self._execute_async(
+        result, all_feedback = await self._execute_async(
             runner, review_target, base_ref, head_ref,
-            agent_prompt, agent_schema, network, verbose
-        ))
+            agent_prompt, agent_schema
+        )
 
         # Convert result dict to ReviewMetadata
         metadata = ReviewMetadata.from_dict(result)
@@ -704,55 +704,54 @@ The structured output should just be a high-level summary - the detailed finding
         base_ref,
         head_ref,
         agent_prompt,
-        agent_schema,
-        network,
-        verbose
+        agent_schema
     ):
-        """Async execution of code review workflow."""
-        async with runner:
-            # Setup the sandbox environment
-            await runner.setup(network=network)
+        """Async execution of code review workflow.
 
-            # Create checkout tool instance
-            checkout_tool = CheckoutCommitTool(runner)
+        Expects runner to already be setup.
+        """
+        # Create checkout tool instance
+        checkout_tool = CheckoutCommitTool(runner)
 
-            # Pre-checkout worktrees for head and base
-            self.events.emit(ReviewWorktreeCheckoutStarted())
+        # Pre-checkout worktrees for head and base
+        self.events.emit(ReviewWorktreeCheckoutStarted())
 
-            self.events.emit(ReviewWorktreeCreating(worktree_name="review-head", ref=head_ref))
-            head_result = await checkout_tool.execute({
-                "commit": head_ref,
-                "worktree_name": "review-head",
-            })
-            if not head_result["success"]:
-                raise RuntimeError(f"Failed to create worktree 'review-head': {head_result['error']}")
+        self.events.emit(ReviewWorktreeCreating(worktree_name="review-head", ref=head_ref))
+        head_result = await checkout_tool.execute({
+            "commit": head_ref,
+            "worktree_name": "review-head",
+        })
+        if not head_result["success"]:
+            raise RuntimeError(f"Failed to create worktree 'review-head': {head_result['error']}")
 
-            self.events.emit(ReviewWorktreeCreating(worktree_name="review-base", ref=base_ref))
-            base_result = await checkout_tool.execute({
-                "commit": base_ref,
-                "worktree_name": "review-base",
-            })
-            if not base_result["success"]:
-                raise RuntimeError(f"Failed to create worktree 'review-base': {base_result['error']}")
+        self.events.emit(ReviewWorktreeCreating(worktree_name="review-base", ref=base_ref))
+        base_result = await checkout_tool.execute({
+            "commit": base_ref,
+            "worktree_name": "review-base",
+        })
+        if not base_result["success"]:
+            raise RuntimeError(f"Failed to create worktree 'review-base': {base_result['error']}")
 
-            self.events.emit(ReviewWorktreesReady())
+        self.events.emit(ReviewWorktreesReady())
 
-            # Get valid commits for validation
-            commits = review_target.get_commits()
-            runner._review_commits = {c["sha"] for c in commits}
+        # Get valid commits for validation
+        commits = review_target.get_commits()
+        runner._review_commits = {c["sha"] for c in commits}
 
-            # Create MCP server with all built-in tools + review tools
-            mcp_server = PRReviewMCPServer(runner, review_target)
+        # Create MCP server with all built-in tools + review tools
+        mcp_server = PRReviewMCPServer(runner, review_target)
 
-            # Create agent config and run
-            agent = AgentConfig(
-                prompt=agent_prompt,
-                output_schema=agent_schema,
-                mcp_server=mcp_server,
-            )
-            results = await runner.run_agents([agent])
+        # Create and execute agent
+        agent = Agent(
+            runner=runner,
+            prompt=agent_prompt,
+            output_schema=agent_schema,
+            mcp_server=mcp_server,
+        )
+        await agent.execute()
+        result = await agent.wait()
 
-            # Get feedback BEFORE exiting context manager (before cleanup clears it)
-            all_feedback = list(runner._review_feedback)
+        # Get feedback (no need to worry about cleanup clearing it - that's caller's responsibility)
+        all_feedback = list(runner._review_feedback)
 
-            return results[0], all_feedback
+        return result, all_feedback

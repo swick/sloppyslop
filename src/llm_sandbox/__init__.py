@@ -6,7 +6,7 @@ from llm_sandbox.llm_provider import (
     create_llm_provider,
 )
 from llm_sandbox.mcp_tools import MCPServer, MCPTool
-from llm_sandbox.runner import SandboxRunner, AgentConfig
+from llm_sandbox.runner import SandboxRunner, Agent
 from llm_sandbox.subcommand import Subcommand
 
 __version__ = "0.1.0"
@@ -19,9 +19,9 @@ __all__ = [
     # MCP tools (async-only interface)
     "MCPServer",
     "MCPTool",
-    # Runner
+    # Runner and Agent
     "SandboxRunner",
-    "AgentConfig",
+    "Agent",
     # Subcommand
     "Subcommand",
 ]

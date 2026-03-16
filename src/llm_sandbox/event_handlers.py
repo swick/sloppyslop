@@ -34,7 +34,6 @@ from llm_sandbox.runner import (
     CleanupStarted,
     ContainerStarted,
     InstanceCreated,
-    ParallelAgentsStarted,
     WarningIssued,
     WorktreeRemoveFailed,
 )
@@ -143,18 +142,6 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
     runner.events.on(
         AgentFailed,
         lambda e: output.error(f"\n[Agent {e.agent_id}] Failed: {e.error}")
-    )
-
-    runner.events.on(
-        ParallelAgentsStarted,
-        lambda e: output.info(
-            f"\n{'='*60}\n"
-            f"Running {e.agent_count} agent(s) in parallel\n"
-            f"Shared environment:\n"
-            f"  - Container ID: {e.container_id[:12]}\n"
-            f"  - Instance ID: {e.instance_id}\n"
-            f"{'='*60}"
-        )
     )
 
     # Background agent events

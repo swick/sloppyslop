@@ -17,7 +17,7 @@ class Subcommand(ABC):
 
     Example:
         import asyncio
-        from llm_sandbox import AgentConfig
+        from llm_sandbox import Agent
         from llm_sandbox.config import load_config
         from llm_sandbox.runner import SandboxRunner
         from llm_sandbox.mcp_tools import MCPServer, ReadFileTool, ExecuteCommandTool
@@ -58,14 +58,28 @@ class Subcommand(ABC):
                         await runner.setup(keep_branches=["my-branch"], network=network)
                         mcp_server = AnalyzeMCPServer(runner)
 
-                        # Create agent config and run
-                        agent = AgentConfig(
+                        # Option 1: Using Agent class (recommended)
+                        from llm_sandbox import Agent
+
+                        agent = Agent(
+                            runner=runner,
                             prompt=f"Analyze this project with depth {depth}",
                             output_schema={"type": "object", ...},
                             mcp_server=mcp_server,
                         )
-                        results = await runner.run_agents([agent])
-                        result = results[0]
+                        await agent.execute()  # Start execution
+                        result = await agent.wait()  # Wait for result
+
+                        # Option 2: For background execution
+                        bg_agent = Agent(
+                            runner=runner,
+                            prompt="Background task",
+                            output_schema={"type": "object", ...},
+                            mcp_server=mcp_server,
+                        )
+                        await bg_agent.execute(background=True)  # Returns immediately
+                        # ... do other work ...
+                        bg_result = await bg_agent.wait()  # Wait when ready
 
                         click.echo(f"Analysis complete: {result}")
 
@@ -117,8 +131,16 @@ class Subcommand(ABC):
             Best practice is to use the async context manager pattern:
                 async with runner:
                     await runner.setup(network=network)
-                    # ... create mcp_server, agent, run agents ...
-                    results = await runner.run_agents([agent])
+                    # ... create mcp_server ...
+                    from llm_sandbox import Agent
+                    agent = Agent(
+                        runner=runner,
+                        prompt="...",
+                        output_schema={...},
+                        mcp_server=mcp_server
+                    )
+                    await agent.execute()
+                    result = await agent.wait()
         """
         pass
 

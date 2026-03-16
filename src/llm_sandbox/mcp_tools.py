@@ -1024,9 +1024,6 @@ class SpawnAgentTool(MCPTool):
                     "error": f"Maximum spawn depth ({self.MAX_SPAWN_DEPTH}) exceeded. Current depth: {parent_depth}",
                 }
 
-            # Import here to avoid circular dependency
-            from llm_sandbox import AgentConfig
-
             # Get parent's tools
             parent_tools = mcp_server.tools
 
@@ -1059,19 +1056,17 @@ class SpawnAgentTool(MCPTool):
             child_mcp_server = MCPServer(spawn_depth=child_spawn_depth)
             child_mcp_server.add_tools(tools_to_add)
 
-            # Create agent config
-            agent_config = AgentConfig(
+            # Create and spawn agent in background
+            from llm_sandbox import Agent
+
+            agent = Agent(
+                runner=self.runner,
                 prompt=task,
                 output_schema=output_schema,
                 mcp_server=child_mcp_server,
                 agent_id=agent_id,
             )
-
-            # Spawn agent in background using unified spawn method
-            spawned_agent_id = await self.runner.spawn_agent(
-                agent_config,
-                background=True
-            )
+            spawned_agent_id = await agent.execute(background=True)
 
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
@@ -1138,7 +1133,7 @@ class WaitForAgentsTool(MCPTool):
         try:
             # If no agent_ids specified, wait for all
             if not agent_ids:
-                agent_ids = self.runner._background_task_manager.get_running_agents()
+                agent_ids = self.runner._background_task_manager.get_running()
 
             if not agent_ids:
                 return {
@@ -1186,7 +1181,7 @@ class WaitForAgentsTool(MCPTool):
             return {
                 "success": False,
                 "error": f"Timeout after {timeout} seconds waiting for agents: {agent_ids}",
-                "remaining_agents": self.runner._background_task_manager.get_running_agents(),
+                "remaining_agents": self.runner._background_task_manager.get_running(),
             }
         except Exception as e:
             return {

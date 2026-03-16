@@ -10,7 +10,6 @@ from typing import List, Optional
 
 import click
 
-from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
 from llm_sandbox.event_handlers import wire_up_all_events
 from llm_sandbox.mcp_tools import CheckoutCommitTool
@@ -296,7 +295,13 @@ Examples:
         workflow.events.on(ReviewWorktreeCreating, lambda e: output.info(f"  Creating worktree '{e.worktree_name}' from {e.ref}..."))
         workflow.events.on(ReviewWorktreesReady, lambda e: output.info("  Worktrees created successfully!"))
 
-        review = workflow.run(runner, review_target, network, verbose)
+        # Execute workflow with async context manager
+        async def run_workflow():
+            async with runner:
+                await runner.setup(network=network)
+                return await workflow.run(runner, review_target)
+
+        review = asyncio.run(run_workflow())
 
         # Display agent results
         if review.metadata:

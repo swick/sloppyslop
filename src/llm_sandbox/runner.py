@@ -98,15 +98,6 @@ class AgentFailed:
 
 
 @dataclass
-class ParallelAgentsStarted:
-    """Event: Multiple agents started in parallel."""
-
-    agent_count: int
-    container_id: str
-    instance_id: str
-
-
-@dataclass
 class CleanupStarted:
     """Event: Cleanup phase started."""
 
@@ -168,7 +159,7 @@ class BackgroundAgentsAllCompleted:
 
 
 # Re-export for convenience
-__all__ = ["SandboxRunner", "AgentConfig"]
+__all__ = ["SandboxRunner", "Agent"]
 
 
 class BackgroundTaskManager:
@@ -236,9 +227,15 @@ class BackgroundTaskManager:
 
         return dict(zip(agent_ids, results))
 
-    async def cancel_all(self):
-        """Cancel all background tasks without recursion."""
+    async def cancel_all(self) -> int:
+        """
+        Cancel all remaining agents.
+
+        Returns:
+            Number of agents that were canceled
+        """
         async with self._lock:
+            agent_count = len(self._tasks)
             tasks = list(self._tasks.values())
             self._tasks.clear()
 
@@ -260,19 +257,164 @@ class BackgroundTaskManager:
             except Exception:
                 pass  # Ignore other errors during cleanup
 
-    def get_running_agents(self) -> List[str]:
+        return agent_count
+
+    def get_running(self) -> List[str]:
         """Get list of currently running agent IDs (non-async for compatibility)."""
         return list(self._tasks.keys())
 
 
 @dataclass
-class AgentConfig:
-    """Configuration for a single agent in parallel execution."""
+class Agent:
+    """Represents an agent that can be executed in the sandbox."""
 
-    prompt: str
-    output_schema: Dict[str, Any]
-    mcp_server: MCPServer
-    agent_id: Optional[str] = None
+    def __init__(
+        self,
+        runner: "SandboxRunner",
+        prompt: str,
+        output_schema: Dict[str, Any],
+        mcp_server: MCPServer,
+        agent_id: Optional[str] = None
+    ):
+        """
+        Initialize agent.
+
+        Args:
+            runner: SandboxRunner instance
+            prompt: Task description for the agent
+            output_schema: JSON schema for structured output
+            mcp_server: MCP server instance with available tools
+            agent_id: Optional agent identifier
+        """
+        self.runner = runner
+        self.prompt = prompt
+        self.output_schema = output_schema
+        self.mcp_server = mcp_server
+        self._agent_id = agent_id
+
+    async def execute(self, background: bool = False) -> str:
+        """
+        Start agent execution.
+
+        Args:
+            background: If True, run in background. If False, caller should wait.
+
+        Returns:
+            agent_id for tracking
+
+        Raises:
+            RuntimeError: If agent already started or runner not setup
+        """
+        if self._agent_id is not None:
+            raise RuntimeError("Agent already started")
+
+        # Validate runner is setup
+        if not self.runner.container_id or not self.runner.instance_id:
+            raise RuntimeError("Must call runner.setup() before executing agents")
+
+        # Generate agent_id if not provided
+        if not self._agent_id:
+            import uuid
+            self._agent_id = f"bg-{str(uuid.uuid4())[:8]}" if background else str(uuid.uuid4())[:8]
+
+        # Create execution coroutine
+        coro = self._execute(background)
+
+        # Spawn via task manager (tracks both foreground and background)
+        await self.runner._background_task_manager.spawn(self._agent_id, coro)
+
+        # Emit spawned event for background agents
+        if background:
+            spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
+            tool_count = len(self.mcp_server.tools) if self.mcp_server else 0
+            self.runner.events.emit(BackgroundAgentSpawned(
+                agent_id=self._agent_id,
+                spawn_depth=spawn_depth,
+                tool_count=tool_count
+            ))
+
+        return self._agent_id
+
+    async def _execute(self, background: bool) -> Dict[str, Any]:
+        """
+        Execute the agent with proper event handling.
+
+        Args:
+            background: Whether this is a background agent
+
+        Returns:
+            Agent execution result
+        """
+        try:
+            # Emit appropriate start event
+            if background:
+                spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
+                self.runner.events.emit(BackgroundAgentStarting(
+                    agent_id=self._agent_id,
+                    spawn_depth=spawn_depth
+                ))
+            else:
+                self.runner.events.emit(AgentStarted(agent_id=self._agent_id))
+
+            # Create agent-specific LLM provider
+            llm_provider = self.runner._create_agent_llm_provider(self._agent_id)
+
+            # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
+            result = await llm_provider.generate_structured(
+                self.prompt,
+                self.mcp_server,
+                self.output_schema,
+                verbose=self.runner._verbose,
+            )
+
+            # Emit completion event
+            if background:
+                self.runner.events.emit(BackgroundAgentCompleted(agent_id=self._agent_id))
+            else:
+                self.runner.events.emit(AgentCompleted(agent_id=self._agent_id))
+
+            return result
+
+        except Exception as e:
+            # Emit failure event
+            if background:
+                self.runner.events.emit(BackgroundAgentFailed(agent_id=self._agent_id, error=str(e)))
+            else:
+                self.runner.events.emit(AgentFailed(agent_id=self._agent_id, error=str(e)))
+            raise
+
+    async def wait(self, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Wait for agent to complete and return result.
+
+        Args:
+            timeout: Optional timeout in seconds
+
+        Returns:
+            Agent execution result
+
+        Raises:
+            RuntimeError: If execute() not called yet
+        """
+        if self._agent_id is None:
+            raise RuntimeError("Agent not started. Call execute() first.")
+
+        # Wait for this specific agent to complete
+        results = await self.runner._background_task_manager.wait_for(
+            agent_ids=[self._agent_id],
+            timeout=timeout
+        )
+        result = results[self._agent_id]
+
+        if isinstance(result, Exception):
+            raise result
+
+        return result
+
+    @property
+    def agent_id(self) -> Optional[str]:
+        """Get the agent ID (None if not started yet)."""
+        return self._agent_id
 
 
 class SandboxRunner:
@@ -583,208 +725,6 @@ class SandboxRunner:
         self._agent_llm_providers[agent_id] = provider
         return provider
 
-    async def _execute_agent(
-        self,
-        agent_id: str,
-        agent: AgentConfig,
-        background: bool
-    ) -> Dict[str, Any]:
-        """
-        Execute a single agent with proper event handling.
-
-        Args:
-            agent_id: Unique agent identifier
-            agent: Agent configuration
-            background: Whether this is a background agent
-
-        Returns:
-            Agent execution result
-        """
-        try:
-            # Emit appropriate start event
-            if background:
-                spawn_depth = agent.mcp_server.spawn_depth if agent.mcp_server else 0
-                self.events.emit(BackgroundAgentStarting(
-                    agent_id=agent_id,
-                    spawn_depth=spawn_depth
-                ))
-            else:
-                self.events.emit(AgentStarted(agent_id=agent_id))
-
-            # Create agent-specific LLM provider
-            llm_provider = self._create_agent_llm_provider(agent_id)
-
-            # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
-            result = await llm_provider.generate_structured(
-                agent.prompt,
-                agent.mcp_server,
-                agent.output_schema,
-                verbose=self._verbose,
-            )
-
-            # Emit completion event
-            if background:
-                self.events.emit(BackgroundAgentCompleted(agent_id=agent_id))
-            else:
-                self.events.emit(AgentCompleted(agent_id=agent_id))
-
-            return result
-
-        except Exception as e:
-            # Emit failure event
-            if background:
-                self.events.emit(BackgroundAgentFailed(agent_id=agent_id, error=str(e)))
-            else:
-                self.events.emit(AgentFailed(agent_id=agent_id, error=str(e)))
-            raise
-
-    async def spawn_agent(
-        self,
-        agent: AgentConfig,
-        background: bool = False,
-    ) -> str:
-        """
-        Spawn a single agent (foreground or background).
-
-        This is the unified entry point for all agent spawning.
-        All agents are tracked by the task manager.
-
-        Args:
-            agent: Agent configuration
-            background: If True, agent runs in background. If False, caller must wait for it.
-
-        Returns:
-            agent_id for tracking
-
-        Raises:
-            RuntimeError: If setup() not called first
-        """
-        if not self.container_id or not self.instance_id:
-            raise RuntimeError("Must call setup() before spawning agents")
-
-        # Generate agent_id if not provided
-        agent_id = agent.agent_id or (
-            f"bg-{str(uuid.uuid4())[:8]}" if background else str(uuid.uuid4())[:8]
-        )
-
-        # Create execution coroutine
-        coro = self._execute_agent(agent_id, agent, background)
-
-        # Spawn via task manager (tracks both foreground and background)
-        await self._background_task_manager.spawn(agent_id, coro)
-
-        # Emit spawned event for background agents
-        if background:
-            spawn_depth = agent.mcp_server.spawn_depth if agent.mcp_server else 0
-            tool_count = len(agent.mcp_server.tools) if agent.mcp_server else 0
-            self.events.emit(BackgroundAgentSpawned(
-                agent_id=agent_id,
-                spawn_depth=spawn_depth,
-                tool_count=tool_count
-            ))
-
-        return agent_id
-
-    async def wait_for_agents(
-        self,
-        agent_ids: Optional[List[str]] = None,
-        timeout: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """
-        Wait for specific agents or all agents to complete.
-
-        Args:
-            agent_ids: List of agent IDs to wait for (None = all)
-            timeout: Optional timeout in seconds
-
-        Returns:
-            Dict mapping agent_id to result
-        """
-        # Emit waiting event if there are agents to wait for
-        running = self._background_task_manager.get_running_agents()
-        if agent_ids:
-            wait_ids = [aid for aid in agent_ids if aid in running]
-        else:
-            wait_ids = running
-
-        if wait_ids:
-            self.events.emit(BackgroundAgentsWaiting(
-                agent_count=len(wait_ids),
-                agent_ids=wait_ids
-            ))
-
-        results = await self._background_task_manager.wait_for(agent_ids, timeout)
-
-        if wait_ids:
-            self.events.emit(BackgroundAgentsAllCompleted(agent_count=len(wait_ids)))
-
-        return results
-
-    async def run_agents(
-        self,
-        agents: List[AgentConfig],
-    ) -> List[Dict[str, Any]]:
-        """
-        Execute agents in parallel using shared environment.
-
-        All agents share:
-        - Same container
-        - Same instance_id
-        - Same worktrees_base_dir
-        - Same created_worktrees list (synchronized)
-
-        Each agent gets:
-        - Separate LLM conversation history
-        - Separate MCP server (provided in AgentConfig)
-
-        Must call setup() before calling this method.
-
-        Args:
-            agents: List of agent configurations
-
-        Returns:
-            List of structured outputs from each agent
-        """
-        if not self.container_id or not self.instance_id:
-            raise RuntimeError("Must call setup() before running agents")
-
-        try:
-            self.events.emit(ParallelAgentsStarted(
-                agent_count=len(agents),
-                container_id=self.container_id,
-                instance_id=self.instance_id
-            ))
-
-            # Spawn all agents (foreground, tracked by task manager)
-            agent_ids = []
-            for agent in agents:
-                agent_id = await self.spawn_agent(agent, background=False)
-                agent_ids.append(agent_id)
-
-            # Wait for all to complete
-            results_dict = await self._background_task_manager.wait_for(agent_ids)
-
-            # Convert to list maintaining order
-            final_results = []
-            for agent_id in agent_ids:
-                result = results_dict[agent_id]
-                if isinstance(result, Exception):
-                    final_results.append({
-                        "success": False,
-                        "error": str(result),
-                        "agent_id": agent_id,
-                    })
-                else:
-                    final_results.append(result)
-
-            return final_results
-
-        finally:
-            # Clear agent LLM providers
-            self._agent_llm_providers.clear()
-            # Don't cancel background agents here - let them run to completion
-            # They'll be cleaned up by explicit cleanup() call if needed
-
     async def _cleanup_async(self) -> None:
         """
         Async cleanup - properly awaits/cancels all tasks.
@@ -799,10 +739,9 @@ class SandboxRunner:
 
         # Cancel background agents with proper async handling
         if self._background_task_manager:
-            running_agents = self._background_task_manager.get_running_agents()
-            if running_agents:
-                self.events.emit(BackgroundAgentsCanceling(agent_count=len(running_agents)))
-            await self._background_task_manager.cancel_all()
+            canceled_count = await self._background_task_manager.cancel_all()
+            if canceled_count > 0:
+                self.events.emit(BackgroundAgentsCanceling(agent_count=canceled_count))
 
         # Clear review feedback
         self._review_feedback.clear()
@@ -821,55 +760,6 @@ class SandboxRunner:
                 self.container_id = None
 
         # Cleanup worktrees (sync)
-        try:
-            self.events.emit(CleanupStarted(component='worktrees'))
-            self._cleanup_worktrees(self._keep_branches)
-        except Exception as e:
-            self.events.emit(WarningIssued(
-                message=f"Failed to cleanup worktrees: {e}",
-                context="cleanup"
-            ))
-
-    def cleanup(self) -> None:
-        """
-        Cleanup container and worktrees (sync wrapper for backwards compatibility).
-
-        Safe to call multiple times.
-
-        Note: Prefer using async context manager pattern for proper async cleanup.
-        """
-        # Skip if already cleaned up
-        if self._cleaned_up:
-            return
-
-        self._cleaned_up = True
-
-        # Cancel background agents (best effort, can't await in sync context)
-        if self._background_task_manager:
-            running_agents = self._background_task_manager.get_running_agents()
-            if running_agents:
-                self.events.emit(WarningIssued(
-                    message=f"{len(running_agents)} background agent(s) still running - use async context manager for proper cleanup",
-                    context="cleanup"
-                ))
-
-        # Clear review feedback
-        self._review_feedback.clear()
-
-        # Cleanup container
-        if self.container_id:
-            try:
-                self.events.emit(CleanupStarted(component='container'))
-                self.container_manager.cleanup(self.container_id)
-            except Exception as e:
-                self.events.emit(WarningIssued(
-                    message=f"Failed to cleanup container: {e}",
-                    context="cleanup"
-                ))
-            finally:
-                self.container_id = None
-
-        # Cleanup worktrees
         try:
             self.events.emit(CleanupStarted(component='worktrees'))
             self._cleanup_worktrees(self._keep_branches)

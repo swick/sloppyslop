@@ -5,7 +5,6 @@ from pathlib import Path
 
 import click
 
-from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
 from llm_sandbox.container import Image
 from llm_sandbox.event_handlers import wire_up_all_events
@@ -168,11 +167,14 @@ Explore the project thoroughly before generating the Containerfile."""
 
             output.info("\nGenerating Containerfile with LLM...")
 
-            # Create agent config and run
-            agent = AgentConfig(
+            # Create and execute agent
+            from llm_sandbox import Agent
+
+            agent = Agent(
+                runner=runner,
                 prompt=prompt,
                 output_schema=output_schema,
                 mcp_server=mcp_server,
             )
-            results = await runner.run_agents([agent])
-            return results[0]
+            await agent.execute()
+            return await agent.wait()
