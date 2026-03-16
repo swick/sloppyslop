@@ -11,7 +11,8 @@ from typing import List, Optional
 import click
 
 from llm_sandbox.config import load_config
-from llm_sandbox.event_handlers import wire_up_all_events
+from llm_sandbox.container import ContainerManager, DEFAULT_IMAGE
+from llm_sandbox.event_handlers import wire_up_runner_events, create_image_pull_callback
 from llm_sandbox.mcp_tools import CheckoutCommitTool
 from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
@@ -233,8 +234,22 @@ Examples:
         review_id = kwargs.get("id")
         project_dir = store.project_dir
 
-        # Load config and create runner
+        # Load config
         config = load_config(project_dir)
+
+        # Determine image tag
+        if config.image and config.image.image:
+            image_tag = config.image.image
+        else:
+            image_tag = DEFAULT_IMAGE
+
+        # Pull image if needed
+        container_manager = ContainerManager()
+        if not container_manager.image_exists(image_tag):
+            pull_callback = create_image_pull_callback(output)
+            container_manager.pull_image(image_tag, progress_callback=pull_callback)
+
+        # Create runner
         runner = SandboxRunner(
             project_dir,
             config,
@@ -243,7 +258,7 @@ Examples:
         )
 
         # Wire up event handlers
-        wire_up_all_events(runner, output)
+        wire_up_runner_events(runner, output)
 
         # Display instance and container info
         output.info(f"Instance ID: {runner.instance_id}")

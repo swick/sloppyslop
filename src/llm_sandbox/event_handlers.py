@@ -72,24 +72,6 @@ def create_image_build_callback(output: OutputService):
     return handle_image_build
 
 
-def wire_up_container_events(container_manager, output: OutputService) -> None:
-    """Wire up container manager event handlers.
-
-    Args:
-        container_manager: ContainerManager instance
-        output: OutputService for formatting output
-    """
-    # Image pull events
-    container_manager.events.on(
-        ImagePullProgress,
-        create_image_pull_callback(output)
-    )
-
-    # Image build events
-    container_manager.events.on(
-        ImageBuildProgress,
-        create_image_build_callback(output)
-    )
 
 
 def wire_up_runner_events(runner, output: OutputService) -> None:
@@ -198,19 +180,3 @@ def wire_up_agent_llm_events(agent, output: OutputService) -> None:
     )
 
 
-def wire_up_all_events(runner, output: OutputService) -> None:
-    """Wire up all event handlers for a runner and its components.
-
-    Convenience function that wires up events for the runner and its container manager.
-    Note: Agent LLM events must be wired up separately using wire_up_agent_llm_events()
-    after creating the agent.
-
-    Args:
-        runner: SandboxRunner instance
-        output: OutputService for formatting output
-    """
-    # Wire up runner events
-    wire_up_runner_events(runner, output)
-
-    # Wire up container manager events
-    wire_up_container_events(runner.container_manager, output)

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_sandbox.config import Config, get_provider_config
-from llm_sandbox.container import ContainerManager, Image
+from llm_sandbox.container import ContainerManager, DEFAULT_IMAGE, Image
 from llm_sandbox.events import EventEmitter
 from llm_sandbox.git_ops import GitOperations
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
@@ -397,9 +397,15 @@ class SandboxRunner:
         if image:
             # Use provided image directly
             image_tag = image
+        elif self.config.image and self.config.image.image:
+            # Use image from config if specified
+            image_tag = self.config.image.image
         else:
-            # Use image from config or default
-            image_tag = self.config.image.image if self.config.image else "registry.fedoraproject.org/fedora-toolbox:44"
+            # Use default image
+            image_tag = DEFAULT_IMAGE
+
+        # Store image tag for reference
+        self.image_tag = image_tag
 
         # Step 3: Create and start container
         container_info = self.container_manager.create_container(

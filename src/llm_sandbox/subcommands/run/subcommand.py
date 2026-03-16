@@ -8,7 +8,8 @@ from pathlib import Path
 import click
 
 from llm_sandbox.config import load_config
-from llm_sandbox.event_handlers import wire_up_all_events
+from llm_sandbox.container import ContainerManager, DEFAULT_IMAGE
+from llm_sandbox.event_handlers import wire_up_runner_events, create_image_pull_callback
 from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import Subcommand
@@ -110,8 +111,25 @@ class RunSubcommand(Subcommand):
         # Create output service
         output = create_output_service(format="text", verbose=verbose)
 
-        # Load config and create runner
+        # Load config
         config = load_config(project_dir)
+
+        # Determine image tag
+        image = kwargs.get("image")
+        if image:
+            image_tag = image
+        elif config.image and config.image.image:
+            image_tag = config.image.image
+        else:
+            image_tag = DEFAULT_IMAGE
+
+        # Pull image if needed
+        container_manager = ContainerManager()
+        if not container_manager.image_exists(image_tag):
+            pull_callback = create_image_pull_callback(output)
+            container_manager.pull_image(image_tag, progress_callback=pull_callback)
+
+        # Create runner
         runner = SandboxRunner(
             project_dir,
             config,
@@ -120,8 +138,8 @@ class RunSubcommand(Subcommand):
             network=network,
         )
 
-        # Wire up all event handlers
-        wire_up_all_events(runner, output)
+        # Wire up event handlers
+        wire_up_runner_events(runner, output)
 
         # Display instance and container info
         output.info(f"Instance ID: {runner.instance_id}")

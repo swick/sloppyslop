@@ -19,6 +19,10 @@ from requests_futures.sessions import FuturesSession
 from llm_sandbox.models import ContainerInfo
 
 
+# Constants
+DEFAULT_IMAGE = "registry.fedoraproject.org/fedora-toolbox:44"
+
+
 # Exceptions
 
 class PodmanConnectionError(Exception):
@@ -35,6 +39,8 @@ class PodmanConnectionError(Exception):
 @dataclass
 class Image:
     """Represents a single, existing container image."""
+
+    DEFAULT_IMAGE = DEFAULT_IMAGE  # Class constant for default image tag
 
     tag: str
     """Image tag (e.g., 'python:3.11' or 'my-image:latest')"""
