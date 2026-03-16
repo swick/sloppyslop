@@ -1121,7 +1121,7 @@ class WaitForAgentsTool(MCPTool):
         try:
             # If no agent_ids specified, wait for all
             if not agent_ids:
-                agent_ids = self.runner._task_manager.get_running()
+                agent_ids = self.runner.get_running_agents()
 
             if not agent_ids:
                 return {
@@ -1130,8 +1130,8 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
-            # Use TaskManager to wait for agents (handles validation internally)
-            results = await self.runner._task_manager.wait_for(
+            # Wait for agents to complete
+            results = await self.runner.wait_for_agents(
                 agent_ids=agent_ids,
                 timeout=timeout
             )
@@ -1157,7 +1157,7 @@ class WaitForAgentsTool(MCPTool):
             return {
                 "success": False,
                 "error": f"Timeout after {timeout} seconds waiting for agents: {agent_ids}",
-                "remaining_agents": self.runner._task_manager.get_running(),
+                "remaining_agents": self.runner.get_running_agents(),
             }
         except Exception as e:
             return {

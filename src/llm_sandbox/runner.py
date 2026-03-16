@@ -67,142 +67,6 @@ class Warning:
 __all__ = ["SandboxRunner", "Agent"]
 
 
-class TaskManager:
-    """Manages lifecycle of agent tasks (foreground and background) with proper synchronization."""
-
-    def __init__(self, events: EventEmitter):
-        """Initialize task manager.
-
-        Args:
-            events: EventEmitter instance for emitting agent lifecycle events
-        """
-        self._tasks: Dict[str, asyncio.Task] = {}
-        self._agents: Dict[str, "Agent"] = {}
-        self._lock = asyncio.Lock()
-        self._events = events
-
-    async def spawn(self, agent: "Agent", coro):
-        """
-        Spawn background task with proper tracking.
-
-        Args:
-            agent: Agent instance being spawned
-            coro: Coroutine to run as background task
-
-        Returns:
-            agent_id for tracking
-
-        Raises:
-            ValueError: If agent_id already exists
-        """
-        async with self._lock:
-            agent_id = agent._agent_id
-            if agent_id in self._tasks:
-                raise ValueError(f"Agent {agent_id} already exists")
-
-            # Create task without establishing parent-child relationship
-            # to prevent deep recursion during cancellation (Python 3.14+)
-            import sys
-            if sys.version_info >= (3, 11):
-                # Use copied context to break parent-child task hierarchy
-                import contextvars
-                ctx = contextvars.copy_context()
-                task = asyncio.get_running_loop().create_task(coro, context=ctx)
-            else:
-                task = asyncio.create_task(coro)
-
-            self._tasks[agent_id] = task
-            self._agents[agent_id] = agent
-        return agent_id
-
-    async def wait_for(
-        self,
-        agent_ids: Optional[List[str]] = None,
-        timeout: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """
-        Wait for specific agents or all agents.
-
-        Args:
-            agent_ids: List of agent IDs to wait for (None = all)
-            timeout: Optional timeout in seconds
-
-        Returns:
-            Dict mapping agent_id to result
-        """
-        async with self._lock:
-            if agent_ids is None:
-                agent_ids = list(self._tasks.keys())
-            tasks = [self._tasks[aid] for aid in agent_ids if aid in self._tasks]
-
-        # Wait outside lock to avoid deadlock
-        if timeout:
-            results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout
-            )
-        else:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Remove completed tasks
-        async with self._lock:
-            for agent_id in agent_ids:
-                self._tasks.pop(agent_id, None)
-
-        return dict(zip(agent_ids, results))
-
-    async def cancel_all(self) -> int:
-        """
-        Cancel all remaining agents.
-
-        Returns:
-            Number of agents that were canceled
-        """
-        async with self._lock:
-            agent_ids = list(self._tasks.keys())
-            tasks = list(self._tasks.values())
-            agents = [self._agents[aid] for aid in agent_ids]
-            self._tasks.clear()
-            self._agents.clear()
-
-        # Cancel all tasks with increased recursion limit for deeply nested agents
-        import sys
-        old_limit = sys.getrecursionlimit()
-        try:
-            # Temporarily increase recursion limit for cancellation
-            sys.setrecursionlimit(max(old_limit, 10000))
-
-            for agent, task in zip(agents, tasks):
-                if not task.done():
-                    try:
-                        task.cancel()
-                        self._events.emit(AgentCancelled(agent=agent))
-                    except RecursionError:
-                        # Even with increased limit, very deep nesting can fail
-                        # Emit event but don't re-raise - wait() below will clean up
-                        self._events.emit(AgentCancelled(agent=agent))
-                    except Exception:
-                        pass  # Ignore other errors during cancellation
-
-            # Wait for all tasks to complete, suppressing CancelledError
-            if tasks:
-                try:
-                    await asyncio.wait(tasks, timeout=5.0)
-                except asyncio.TimeoutError:
-                    pass  # Some tasks didn't finish in time, that's ok
-                except Exception:
-                    pass  # Ignore other errors during cleanup
-        finally:
-            # Restore original recursion limit
-            sys.setrecursionlimit(old_limit)
-
-        return len(agent_ids)
-
-    def get_running(self) -> List[str]:
-        """Get list of currently running agent IDs (non-async for compatibility)."""
-        return list(self._tasks.keys())
-
-
 @dataclass
 class Agent:
     """Represents an agent that can be executed in the sandbox."""
@@ -259,6 +123,10 @@ class Agent:
             agent_id = str(uuid.uuid4())[:8]
         self._agent_id = agent_id
 
+        # Task tracking
+        self._task: Optional[asyncio.Task] = None
+        self._result: Any = None
+
     async def execute(self) -> str:
         """
         Start agent execution.
@@ -278,11 +146,27 @@ class Agent:
         if not self.runner.container_id or not self.runner.instance_id:
             raise RuntimeError("Runner not properly initialized")
 
-        # Create execution coroutine
-        coro = self._execute()
+        # Check for duplicate agent_id
+        if self._agent_id in self.runner._agents:
+            raise ValueError(f"Agent {self._agent_id} already exists")
 
-        # Spawn via task manager (tracks both foreground and background)
-        await self.runner._task_manager.spawn(self, coro)
+        # Register agent
+        self.runner._agents[self._agent_id] = self
+
+        # Wrap execution to capture result
+        async def _wrapped_execute():
+            try:
+                result = await self._execute()
+                self._result = result
+                return result
+            except Exception as e:
+                self._result = e
+                raise
+
+        # Create task in TaskGroup
+        if not self.runner._task_group:
+            raise RuntimeError("Runner not in async context. Use 'async with runner:'")
+        self._task = self.runner._task_group.create_task(_wrapped_execute())
 
         return self._agent_id
 
@@ -335,20 +219,20 @@ class Agent:
         Raises:
             RuntimeError: If execute() not called yet
         """
-        if not self._execution_started:
+        if not self._task:
             raise RuntimeError("Agent not started. Call execute() first.")
 
-        # Wait for this specific agent to complete
-        results = await self.runner._task_manager.wait_for(
-            agent_ids=[self._agent_id],
-            timeout=timeout
-        )
-        result = results[self._agent_id]
+        # Wait for task to complete
+        if timeout:
+            await asyncio.wait_for(self._task, timeout=timeout)
+        else:
+            await self._task
 
-        if isinstance(result, Exception):
-            raise result
+        # Return stored result
+        if isinstance(self._result, Exception):
+            raise self._result
 
-        return result
+        return self._result
 
     @property
     def agent_id(self) -> str:
@@ -396,10 +280,10 @@ class SandboxRunner:
         self.created_worktrees: List[str] = []  # Track worktree names
 
         # Parallel execution support
-        # Initialize locks immediately so they're always available
         self._git_lock = asyncio.Lock()
         self._worktrees_lock = asyncio.Lock()
-        self._task_manager = TaskManager(self.events)
+        self._agents: Dict[str, Agent] = {}  # Track agents by ID
+        self._task_group: Optional[asyncio.TaskGroup] = None
 
         # Review feedback storage (for PR review workflow)
         # Type is List[FeedbackItem] but kept as List[Any] to avoid circular dependency
@@ -458,20 +342,33 @@ class SandboxRunner:
 
     async def __aenter__(self):
         """Async context manager entry."""
+        # Enter TaskGroup context
+        tg_context = asyncio.TaskGroup()
+        self._task_group = await tg_context.__aenter__()
+        self._tg_context = tg_context
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async cleanup - properly awaits/cancels all tasks."""
+        # Emit cancelled events for any remaining agents
+        for agent in list(self._agents.values()):
+            self.events.emit(AgentCancelled(agent=agent))
+
+        # Exit TaskGroup context (handles task cancellation automatically)
+        try:
+            await self._tg_context.__aexit__(exc_type, exc_val, exc_tb)
+        except* Exception:
+            pass  # Suppress ExceptionGroup from task cancellations
+
+        # Clean up container and worktrees
         await self._cleanup_async()
         return False  # Don't suppress exceptions
 
     def __del__(self):
-        """Destructor - ensure cleanup happens."""
-        # Only do minimal cleanup - avoid calling cleanup() from __del__
-        # as it can cause issues with event loops
-        if hasattr(self, '_task_manager'):
-            # Can't use await in __del__, just mark for cleanup
-            pass
+        """Destructor - minimal cleanup."""
+        # TaskGroup handles task cleanup automatically in __aexit__
+        # Can't use await in __del__, so nothing to do here
+        pass
 
     def _generate_instance_id(self) -> str:
         """
@@ -605,16 +502,13 @@ class SandboxRunner:
         Async cleanup - properly awaits/cancels all tasks.
 
         Safe to call multiple times.
+        Note: Task cancellation is handled by TaskGroup's __aexit__
         """
         # Skip if already cleaned up
         if self._cleaned_up:
             return
 
         self._cleaned_up = True
-
-        # Cancel background agents with proper async handling
-        if self._task_manager:
-            await self._task_manager.cancel_all()
 
         # Clear review feedback
         self._review_feedback.clear()
@@ -633,3 +527,55 @@ class SandboxRunner:
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
             self.events.emit(Warning(f"Failed to cleanup worktrees: {e}", "cleanup"))
+
+    # Agent management methods (for MCP tools)
+
+    async def wait_for_agents(
+        self,
+        agent_ids: Optional[List[str]] = None,
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Wait for specific agents to complete.
+
+        Args:
+            agent_ids: List of agent IDs to wait for (None = all agents)
+            timeout: Optional timeout in seconds
+
+        Returns:
+            Dict mapping agent_id to result
+        """
+        if agent_ids is None:
+            agent_ids = list(self._agents.keys())
+
+        # Get tasks for specified agents
+        tasks = []
+        for agent_id in agent_ids:
+            agent = self._agents.get(agent_id)
+            if agent and agent._task:
+                tasks.append(agent._task)
+
+        # Wait for tasks to complete
+        if timeout:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
+        else:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect results
+        results = {}
+        for agent_id in agent_ids:
+            agent = self._agents.get(agent_id)
+            if agent:
+                result = agent._result
+                if isinstance(result, Exception):
+                    results[agent_id] = result
+                else:
+                    results[agent_id] = result
+            else:
+                results[agent_id] = None
+
+        return results
+
+    def get_running_agents(self) -> List[str]:
+        """Get list of currently running agent IDs."""
+        return list(self._agents.keys())
