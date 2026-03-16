@@ -1094,20 +1094,21 @@ class WaitForAgentsTool(MCPTool):
         """
         super().__init__(
             name="wait_for_agents",
-            description="Wait for one or more background agents to complete and retrieve their results. If no agent_ids specified, waits for all background agents.",
+            description="Wait for one or more background agents (that you spawned) to complete and retrieve their results. Only allows waiting for direct children to prevent circular dependencies.",
             parameters={
                 "type": "object",
                 "properties": {
                     "agent_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of agent IDs to wait for (waits for all if not specified)",
+                        "description": "List of agent IDs to wait for (required - must be agents you spawned)",
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (optional, waits indefinitely if not specified)",
+                        "description": "Timeout in seconds (optional, default 300s)",
                     },
                 },
+                "required": ["agent_ids"],
             },
             inheritable=inheritable,
         )
@@ -1119,20 +1120,36 @@ class WaitForAgentsTool(MCPTool):
         timeout = arguments.get("timeout", 300.0)  # Default 5 minute timeout
 
         try:
-            # If no agent_ids specified, wait for all
-            if not agent_ids:
-                agent_ids = self.runner.get_running_agents()
-
+            # Require agent_ids
             if not agent_ids:
                 return {
-                    "success": True,
-                    "results": {},
-                    "message": "No background agents to wait for",
+                    "success": False,
+                    "error": "agent_ids is required - specify which agents to wait for",
                 }
 
-            # Wait for agents to complete
-            results = await self.runner.wait_for_agents(
-                agent_ids=agent_ids,
+            # Require calling agent
+            if not agent:
+                return {
+                    "success": False,
+                    "error": "No calling agent context available",
+                }
+
+            # Look up agents by ID
+            agents_to_wait = []
+            for agent_id in agent_ids:
+                child_agent = self.runner._agents.get(agent_id)
+                if child_agent:
+                    agents_to_wait.append(child_agent)
+
+            if not agents_to_wait:
+                return {
+                    "success": False,
+                    "error": f"No agents found with IDs: {agent_ids}",
+                }
+
+            # Wait for agents (validates parent-child relationship inside)
+            results = await agent.wait_for_agents(
+                agents=agents_to_wait,
                 timeout=timeout
             )
 

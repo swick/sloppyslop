@@ -222,17 +222,88 @@ class Agent:
         if not self._task:
             raise RuntimeError("Agent not started. Call execute() first.")
 
-        # Wait for task to complete
+        # Wait for task to complete using Event (avoids await chain and recursive cancel)
+        completion_event = asyncio.Event()
+
+        def on_task_done(task):
+            completion_event.set()
+
+        self._task.add_done_callback(on_task_done)
+
+        # Wait for completion event (not the task itself!)
         if timeout:
-            await asyncio.wait_for(self._task, timeout=timeout)
+            await asyncio.wait_for(completion_event.wait(), timeout=timeout)
         else:
-            await self._task
+            await completion_event.wait()
 
         # Return stored result
         if isinstance(self._result, Exception):
             raise self._result
 
         return self._result
+
+    async def wait_for_agents(
+        self,
+        agents: List["Agent"],
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Wait for child agents to complete.
+
+        Args:
+            agents: List of Agent objects to wait for (must be direct children)
+            timeout: Optional timeout in seconds
+
+        Returns:
+            Dict mapping agent_id to result
+
+        Raises:
+            ValueError: If any agent is not a direct child
+        """
+        # Validate all agents are direct children
+        for agent in agents:
+            if agent.parent != self:
+                raise ValueError(f"Agent {agent.agent_id} is not a child of {self.agent_id}")
+
+        # Get tasks for agents
+        tasks = []
+        agent_ids = []
+        for agent in agents:
+            if agent._task:
+                tasks.append(agent._task)
+                agent_ids.append(agent.agent_id)
+
+        # Wait for tasks to complete using Event (avoids await chain and recursive cancel)
+        if tasks:
+            completion_event = asyncio.Event()
+            completed_count = 0
+
+            def on_task_done(task):
+                nonlocal completed_count
+                completed_count += 1
+                if completed_count == len(tasks):
+                    completion_event.set()
+
+            # Add callback to each task
+            for task in tasks:
+                task.add_done_callback(on_task_done)
+
+            # Wait for completion event (not the tasks themselves!)
+            if timeout:
+                await asyncio.wait_for(completion_event.wait(), timeout=timeout)
+            else:
+                await completion_event.wait()
+
+        # Collect results
+        results = {}
+        for agent in agents:
+            result = agent._result
+            if isinstance(result, Exception):
+                results[agent.agent_id] = result
+            else:
+                results[agent.agent_id] = result
+
+        return results
 
     @property
     def agent_id(self) -> str:
@@ -527,54 +598,6 @@ class SandboxRunner:
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
             self.events.emit(Warning(f"Failed to cleanup worktrees: {e}", "cleanup"))
-
-    # Agent management methods (for MCP tools)
-
-    async def wait_for_agents(
-        self,
-        agent_ids: Optional[List[str]] = None,
-        timeout: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """
-        Wait for specific agents to complete.
-
-        Args:
-            agent_ids: List of agent IDs to wait for (None = all agents)
-            timeout: Optional timeout in seconds
-
-        Returns:
-            Dict mapping agent_id to result
-        """
-        if agent_ids is None:
-            agent_ids = list(self._agents.keys())
-
-        # Get tasks for specified agents
-        tasks = []
-        for agent_id in agent_ids:
-            agent = self._agents.get(agent_id)
-            if agent and agent._task:
-                tasks.append(agent._task)
-
-        # Wait for tasks to complete
-        if timeout:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
-        else:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Collect results
-        results = {}
-        for agent_id in agent_ids:
-            agent = self._agents.get(agent_id)
-            if agent:
-                result = agent._result
-                if isinstance(result, Exception):
-                    results[agent_id] = result
-                else:
-                    results[agent_id] = result
-            else:
-                results[agent_id] = None
-
-        return results
 
     def get_running_agents(self) -> List[str]:
         """Get list of currently running agent IDs."""
