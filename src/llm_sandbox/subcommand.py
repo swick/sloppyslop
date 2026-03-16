@@ -1,6 +1,7 @@
 """Base class for custom subcommands."""
 
 import asyncio
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -87,7 +88,7 @@ class Subcommand(ABC):
                         # Note: Background agents are spawned as children via SpawnAgentTool
                         # which automatically sets spawn_depth based on parent depth
 
-                        click.echo(f"Analysis complete: {result}")
+                        output.info(f"Analysis complete: {result}")
 
                 asyncio.run(main())
     """
@@ -230,9 +231,10 @@ def discover_subcommands(project_dir: Optional[Path] = None) -> Dict[str, type]:
                             subcommands[attr.name] = attr
 
             except Exception as e:
-                click.echo(
-                    f"Warning: Failed to load subcommand from {file_path}: {e}",
-                    err=True,
+                # Note: Can't use OutputService here - this runs at import time
+                # before any OutputService exists (during module initialization)
+                sys.stderr.write(
+                    f"Warning: Failed to load subcommand from {file_path}: {e}\n"
                 )
 
     return subcommands

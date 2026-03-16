@@ -626,7 +626,7 @@ Examples:
                 else:
                     os.environ.pop('LESS', None)
         else:
-            # Output is short, print directly
+            # Output is short, print directly (via click.echo for consistency)
             click.echo(output_text, nl=False)
 
     def _render_review(self, review, store, suggestion_ids, commit_filter, show_diff, show_all, review_id):
