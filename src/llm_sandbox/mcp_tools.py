@@ -1051,7 +1051,6 @@ class SpawnAgentTool(MCPTool):
                 tools_to_add = [tool for tool in parent_tools.values() if tool.inheritable]
 
             # Create MCP server with inherited tools from parent
-            child_spawn_depth = parent_depth + 1
             child_mcp_server = MCPServer()
             child_mcp_server.add_tools(tools_to_add)
 
@@ -1064,7 +1063,6 @@ class SpawnAgentTool(MCPTool):
                 output_schema=output_schema,
                 mcp_server=child_mcp_server,
                 agent_id=agent_id,
-                spawn_depth=child_spawn_depth,
                 parent=agent
             )
             spawned_agent_id = await child_agent.execute()
@@ -1076,9 +1074,9 @@ class SpawnAgentTool(MCPTool):
                 "success": True,
                 "agent_id": spawned_agent_id,
                 "status": "spawned",
-                "spawn_depth": child_spawn_depth,
+                "spawn_depth": child_agent.spawn_depth,
                 "tools": child_tool_names,
-                "message": f"Agent '{spawned_agent_id}' spawned in background at depth {child_spawn_depth} with {len(child_tool_names)} tools. Use wait_for_agents to retrieve result.",
+                "message": f"Agent '{spawned_agent_id}' spawned in background at depth {child_agent.spawn_depth} with {len(child_tool_names)} tools. Use wait_for_agents to retrieve result.",
             }
 
         except ValueError as e:

@@ -84,17 +84,8 @@ class Subcommand(ABC):
                         await agent.execute()  # Start execution
                         result = await agent.wait()  # Wait for result
 
-                        # Option 2: For background execution
-                        bg_agent = Agent(
-                            runner=runner,
-                            prompt="Background task",
-                            output_schema={"type": "object", ...},
-                            mcp_server=mcp_server,
-                            spawn_depth=1  # Background agent (depth > 0)
-                        )
-                        await bg_agent.execute()  # Returns immediately
-                        # ... do other work ...
-                        bg_result = await bg_agent.wait()  # Wait when ready
+                        # Note: Background agents are spawned as children via SpawnAgentTool
+                        # which automatically sets spawn_depth based on parent depth
 
                         click.echo(f"Analysis complete: {result}")
 

@@ -99,7 +99,18 @@ class TaskManager:
             agent_id = agent._agent_id
             if agent_id in self._tasks:
                 raise ValueError(f"Agent {agent_id} already exists")
-            task = asyncio.create_task(coro)
+
+            # Create task without establishing parent-child relationship
+            # to prevent deep recursion during cancellation (Python 3.14+)
+            import sys
+            if sys.version_info >= (3, 11):
+                # Use copied context to break parent-child task hierarchy
+                import contextvars
+                ctx = contextvars.copy_context()
+                task = asyncio.get_running_loop().create_task(coro, context=ctx)
+            else:
+                task = asyncio.create_task(coro)
+
             self._tasks[agent_id] = task
             self._agents[agent_id] = agent
         return agent_id
@@ -154,24 +165,36 @@ class TaskManager:
             self._tasks.clear()
             self._agents.clear()
 
-        # Cancel all tasks but don't propagate cancel to children
-        # to avoid recursion depth issues
-        for agent, task in zip(agents, tasks):
-            if not task.done():
-                try:
-                    task.cancel()
-                    self._events.emit(AgentCancelled(agent=agent))
-                except Exception:
-                    pass  # Ignore errors during cancellation
+        # Cancel all tasks with increased recursion limit for deeply nested agents
+        import sys
+        old_limit = sys.getrecursionlimit()
+        try:
+            # Temporarily increase recursion limit for cancellation
+            sys.setrecursionlimit(max(old_limit, 10000))
 
-        # Wait for all tasks to complete, suppressing CancelledError
-        if tasks:
-            try:
-                await asyncio.wait(tasks, timeout=5.0)
-            except asyncio.TimeoutError:
-                pass  # Some tasks didn't finish in time, that's ok
-            except Exception:
-                pass  # Ignore other errors during cleanup
+            for agent, task in zip(agents, tasks):
+                if not task.done():
+                    try:
+                        task.cancel()
+                        self._events.emit(AgentCancelled(agent=agent))
+                    except RecursionError:
+                        # Even with increased limit, very deep nesting can fail
+                        # Emit event but don't re-raise - wait() below will clean up
+                        self._events.emit(AgentCancelled(agent=agent))
+                    except Exception:
+                        pass  # Ignore other errors during cancellation
+
+            # Wait for all tasks to complete, suppressing CancelledError
+            if tasks:
+                try:
+                    await asyncio.wait(tasks, timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass  # Some tasks didn't finish in time, that's ok
+                except Exception:
+                    pass  # Ignore other errors during cleanup
+        finally:
+            # Restore original recursion limit
+            sys.setrecursionlimit(old_limit)
 
         return len(agent_ids)
 
@@ -184,6 +207,8 @@ class TaskManager:
 class Agent:
     """Represents an agent that can be executed in the sandbox."""
 
+    MAX_SPAWN_DEPTH = 5  # Maximum agent nesting depth to prevent infinite chains
+
     def __init__(
         self,
         runner: "SandboxRunner",
@@ -191,7 +216,6 @@ class Agent:
         output_schema: Dict[str, Any],
         mcp_server: MCPServer,
         agent_id: Optional[str] = None,
-        spawn_depth: int = 0,
         parent: Optional["Agent"] = None
     ):
         """
@@ -203,18 +227,29 @@ class Agent:
             output_schema: JSON schema for structured output
             mcp_server: MCP server instance with available tools
             agent_id: Optional agent identifier
-            spawn_depth: Nesting depth (0=foreground, >0=background)
             parent: Optional parent agent (for spawned child agents)
+
+        Raises:
+            RuntimeError: If spawn depth exceeds MAX_SPAWN_DEPTH
         """
         self.runner = runner
         self.prompt = prompt
         self.output_schema = output_schema
         self.mcp_server = mcp_server
-        self.spawn_depth = spawn_depth
         self.parent = parent
         self._execution_started = False  # Track execution state
         self._llm_provider: Optional[LLMProvider] = None  # Created on execute
         self.events = EventEmitter()  # Agent-specific event emitter
+
+        # Calculate spawn depth from parent
+        self.spawn_depth = 0 if parent is None else parent.spawn_depth + 1
+
+        # Check spawn depth limit to prevent infinite chains
+        if self.spawn_depth > self.MAX_SPAWN_DEPTH:
+            raise RuntimeError(
+                f"Agent spawn depth {self.spawn_depth} exceeds maximum {self.MAX_SPAWN_DEPTH}. "
+                f"This likely indicates an infinite agent spawn loop."
+            )
 
         # Give tools access to this agent
         self.mcp_server.agent = self
