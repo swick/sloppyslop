@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_sandbox.config import Config, get_provider_config
-from llm_sandbox.container import ContainerManager
+from llm_sandbox.container import ContainerManager, Image
 from llm_sandbox.events import EventEmitter
 from llm_sandbox.git_ops import GitOperations
-from llm_sandbox.image import Image, ImageBuildStarted, ImageSelected
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
 from llm_sandbox.mcp_tools import MCPServer
 
@@ -539,21 +538,13 @@ class SandboxRunner:
             timestamp=datetime.now()
         ))
 
-        # Step 2: Get container image (build if necessary)
+        # Step 2: Get container image tag
         if image:
             # Use provided image directly
             image_tag = image
         else:
-            # Use image manager to get/build image from config
-            image_manager = Image(
-                self.config.image,
-                self.project_path,
-                self.container_manager,
-            )
-            # Forward image events to runner's event emitter
-            image_manager.events.on(ImageSelected, lambda e: self.events.emit(e))
-            image_manager.events.on(ImageBuildStarted, lambda e: self.events.emit(e))
-            image_tag = image_manager.get_image()
+            # Use image from config or default
+            image_tag = self.config.image.image if self.config.image else "registry.fedoraproject.org/fedora-toolbox:44"
 
         # Step 3: Create and start container
         container_info = self.container_manager.create_container(

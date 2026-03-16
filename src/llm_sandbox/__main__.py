@@ -16,9 +16,7 @@ from llm_sandbox.config import (
     get_provider_config,
     load_config,
 )
-from llm_sandbox.container import ContainerManager
-from llm_sandbox.event_handlers import wire_up_container_events, wire_up_image_events
-from llm_sandbox.image import Image
+from llm_sandbox.container import ContainerManager, PodmanConnectionError
 from llm_sandbox.llm_provider import create_llm_provider
 from llm_sandbox.output import create_output_service
 from llm_sandbox.subcommand import discover_subcommands
@@ -124,21 +122,72 @@ def build(force: bool, verbose: bool):
     # Load config
     config = load_config(project_dir)
 
-    # Create container manager and image manager
-    container_manager = ContainerManager()
+    # Check that we have a build config
+    if not config.image or not config.image.build:
+        output.error("No build configuration found. Project is configured to use a pre-built image.")
+        output.info("Run 'llm-sandbox gen-containerfile <image-name>' to set up a Containerfile.")
+        sys.exit(1)
+
+    # Create container manager
+    try:
+        container_manager = ContainerManager()
+    except PodmanConnectionError as e:
+        output.error("Cannot connect to podman API.")
+        output.error(f"\nSocket location: {e.socket_path}")
+        output.error(f"Error details: {e.original_error}")
+        output.info("\nPodman rootless service is required for llm-sandbox.")
+        output.info("\nTo enable and start the service:")
+        output.info("  systemctl --user enable --now podman.socket")
+        output.info("\nTo check status:")
+        output.info("  systemctl --user status podman.socket")
+        output.info("\nTo verify socket exists:")
+        output.info(f"  ls -l {e.socket_path}")
+        sys.exit(1)
 
     # Wire up event handlers for progress display
+    from llm_sandbox.event_handlers import wire_up_container_events
     wire_up_container_events(container_manager, output)
 
-    image_manager = Image(config.image, project_dir, container_manager)
-    wire_up_image_events(image_manager, output)
-
     try:
-        # Build image
-        image_tag = image_manager.build(force=force)
+        # Get build config
+        build_config = config.image.build
+        containerfile_path = project_dir / build_config.containerfile
+        tag = config.image.image
 
-        output.success(f"Successfully built image: {image_tag}")
-        output.info(f"\nThe image will be used on the next run.")
+        # Validate Containerfile exists
+        if not containerfile_path.exists():
+            raise RuntimeError(
+                f"Containerfile not found: {containerfile_path}\n"
+                f"Run 'llm-sandbox gen-containerfile <image-name>' to set up the project."
+            )
+
+        # Check if we should build
+        should_build = force
+        if not force:
+            image = container_manager.get_image(tag)
+            if not image:
+                should_build = True
+                output.info(f"Image does not exist, building: {tag}")
+            else:
+                output.info(f"Image already exists: {tag}")
+                if not build_config.auto_rebuild:
+                    output.info("Skipping build (auto_rebuild disabled). Use --force to rebuild.")
+                    return
+
+                # Check if Containerfile is newer
+                containerfile_mtime = containerfile_path.stat().st_mtime
+                if containerfile_mtime > image.created_at.timestamp():
+                    should_build = True
+                    output.info("Containerfile is newer than image, rebuilding")
+                else:
+                    output.info("Image is up-to-date")
+                    return
+
+        if should_build:
+            # Build image
+            image = container_manager.build_image(containerfile_path, project_dir, tag)
+            output.success(f"Successfully built image: {image.tag}")
+            output.info(f"\nThe image will be used on the next run.")
 
     except RuntimeError as e:
         output.error(str(e))

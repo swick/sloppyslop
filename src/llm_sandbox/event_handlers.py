@@ -10,10 +10,6 @@ from llm_sandbox.container import (
     ImagePullProgress,
     ImagePullState,
 )
-from llm_sandbox.image import (
-    ImageBuildStarted,
-    ImageSelected,
-)
 from llm_sandbox.llm_provider import (
     LLMIterationStarted,
     LLMJSONParseError,
@@ -86,17 +82,6 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
     runner.events.on(
         InstanceCreated,
         lambda e: output.info(f"Instance ID: {e.instance_id}")
-    )
-
-    # Image events (forwarded from Image manager)
-    runner.events.on(
-        ImageSelected,
-        lambda e: output.info(f"Using image: {e.image}" + (f" ({e.reason})" if e.reason != "Pre-built image" else ""))
-    )
-
-    runner.events.on(
-        ImageBuildStarted,
-        lambda e: output.info(f"Building image: {e.image_tag} ({e.reason})")
     )
 
     runner.events.on(
@@ -204,24 +189,6 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
     runner.events.on(
         WarningIssued,
         lambda e: output.warning(f"{e.message} [{e.context}]" if e.context else e.message)
-    )
-
-
-def wire_up_image_events(image, output: OutputService) -> None:
-    """Wire up image manager event handlers.
-
-    Args:
-        image: Image instance
-        output: OutputService for formatting output
-    """
-    image.events.on(
-        ImageSelected,
-        lambda e: output.info(f"Using image: {e.image}" + (f" ({e.reason})" if e.reason != "Pre-built image" else ""))
-    )
-
-    image.events.on(
-        ImageBuildStarted,
-        lambda e: output.info(f"Building image: {e.image_tag} ({e.reason})")
     )
 
 

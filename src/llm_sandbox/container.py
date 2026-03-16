@@ -20,6 +20,36 @@ from llm_sandbox.events import EventEmitter
 from llm_sandbox.models import ContainerInfo
 
 
+# Exceptions
+
+class PodmanConnectionError(Exception):
+    """Cannot connect to podman API."""
+
+    def __init__(self, socket_path: str, original_error: Exception):
+        self.socket_path = socket_path
+        self.original_error = original_error
+        super().__init__(f"Cannot connect to podman API at {socket_path}: {original_error}")
+
+
+# Image dataclass
+
+@dataclass
+class Image:
+    """Represents a single, existing container image."""
+
+    tag: str
+    """Image tag (e.g., 'python:3.11' or 'my-image:latest')"""
+
+    image_id: str
+    """Image ID (hash)"""
+
+    created_at: datetime
+    """When the image was created"""
+
+    size: Optional[int] = None
+    """Image size in bytes"""
+
+
 # ContainerManager event types
 
 class ImagePullState(Enum):
@@ -83,36 +113,23 @@ class ContainerManager:
         return f"/run/user/{uid}/podman/podman.sock"
 
     def _check_podman(self) -> None:
-        """Check if podman API is available."""
+        """Check if podman API is available.
+
+        Raises:
+            PodmanConnectionError: If cannot connect to podman API
+        """
         try:
             response = self.session.get(f"{self.base_url}/v4.0.0/libpod/version")
             response.raise_for_status()
         except Exception as e:
-            error_message = (
-                f"Cannot connect to podman API.\n"
-                f"\n"
-                f"Socket location: {self.socket_path}\n"
-                f"Error details: {e}\n"
-                f"\n"
-                f"Podman rootless service is required for llm-sandbox.\n"
-                f"\n"
-                f"To enable and start the service:\n"
-                f"  systemctl --user enable --now podman.socket\n"
-                f"\n"
-                f"To check status:\n"
-                f"  systemctl --user status podman.socket\n"
-                f"\n"
-                f"To verify socket exists:\n"
-                f"  ls -l {self.socket_path}"
-            )
-            raise RuntimeError(error_message)
+            raise PodmanConnectionError(self.socket_path, e) from e
 
     def build_image(
         self,
         containerfile_path: Path,
         context_path: Path,
         tag: str,
-    ) -> str:
+    ) -> Image:
         """
         Build container image.
 
@@ -122,7 +139,7 @@ class ContainerManager:
             tag: Image tag
 
         Returns:
-            Image ID
+            Image object for the built image
         """
         self.events.emit(ImageBuildProgress(
             state=ImageBuildState.STARTED,
@@ -175,13 +192,18 @@ class ContainerManager:
                 # Fallback: get image ID from tag
                 image_id = self._get_image_id(tag)
 
+            # Get full image info
+            image = self.get_image(tag)
+            if not image:
+                raise RuntimeError(f"Image built but not found: {tag}")
+
             self.events.emit(ImageBuildProgress(
                 state=ImageBuildState.COMPLETED,
                 tag=tag,
-                image_id=image_id
+                image_id=image.image_id
             ))
 
-            return image_id
+            return image
 
         except Exception as e:
             self.events.emit(ImageBuildProgress(
@@ -202,6 +224,36 @@ class ContainerManager:
             return data['Id']
         except Exception as e:
             raise RuntimeError(f"Image not found: {tag}") from e
+
+    def get_image(self, tag: str) -> Optional[Image]:
+        """
+        Get image information if it exists locally.
+
+        Args:
+            tag: Image tag to look up
+
+        Returns:
+            Image object if found, None otherwise
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v4.0.0/libpod/images/{tag}/json"
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse created timestamp
+            created_str = data['Created']
+            created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+
+            return Image(
+                tag=tag,
+                image_id=data['Id'],
+                created_at=created_dt,
+                size=data.get('Size')
+            )
+        except Exception:
+            return None
 
     def create_container(
         self,
@@ -329,12 +381,15 @@ class ContainerManager:
         except Exception:
             return False
 
-    def pull_image(self, reference: str) -> None:
+    def pull_image(self, reference: str) -> Image:
         """
         Pull container image from registry.
 
         Args:
             reference: Image reference (e.g., "docker.io/library/python:3.11")
+
+        Returns:
+            Image object for the pulled image
 
         Raises:
             RuntimeError: If image pull fails
@@ -375,10 +430,17 @@ class ContainerManager:
                     except json.JSONDecodeError:
                         continue
 
+            # Get image info after pulling
+            image = self.get_image(reference)
+            if not image:
+                raise RuntimeError(f"Image pulled but not found: {reference}")
+
             self.events.emit(ImagePullProgress(
                 state=ImagePullState.COMPLETED,
                 reference=reference
             ))
+
+            return image
 
         except Exception as e:
             self.events.emit(ImagePullProgress(
