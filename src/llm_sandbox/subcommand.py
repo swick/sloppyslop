@@ -50,7 +50,7 @@ class Subcommand(ABC):
 
                 # Load config and create runner
                 config = load_config(project_dir)
-                runner = SandboxRunner(project_dir, config)
+                runner = SandboxRunner(project_dir, config, verbose=verbose)
 
                 # Setup sandbox, run agent, and cleanup
                 async def main():
@@ -64,7 +64,7 @@ class Subcommand(ABC):
                             output_schema={"type": "object", ...},
                             mcp_server=mcp_server,
                         )
-                        results = await runner.run_agents([agent], verbose=verbose)
+                        results = await runner.run_agents([agent])
                         result = results[0]
 
                         click.echo(f"Analysis complete: {result}")
@@ -112,13 +112,13 @@ class Subcommand(ABC):
                 from llm_sandbox.runner import SandboxRunner
 
                 config = load_config(project_dir)
-                runner = SandboxRunner(project_dir, config)
+                runner = SandboxRunner(project_dir, config, verbose=verbose)
 
             Best practice is to use the async context manager pattern:
                 async with runner:
                     await runner.setup(network=network)
                     # ... create mcp_server, agent, run agents ...
-                    results = await runner.run_agents([agent], verbose=verbose)
+                    results = await runner.run_agents([agent])
         """
         pass
 

@@ -750,7 +750,7 @@ The structured output should just be a high-level summary - the detailed finding
                 output_schema=agent_schema,
                 mcp_server=mcp_server,
             )
-            results = await runner.run_agents([agent], verbose=verbose)
+            results = await runner.run_agents([agent])
 
             # Get feedback BEFORE exiting context manager (before cleanup clears it)
             all_feedback = list(runner._review_feedback)

@@ -113,7 +113,7 @@ class RunSubcommand(Subcommand):
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config)
+        runner = SandboxRunner(project_dir, config, verbose=verbose)
 
         # Wire up all event handlers
         wire_up_all_events(runner, output)
@@ -197,5 +197,5 @@ class RunSubcommand(Subcommand):
                 output_schema=output_schema,
                 mcp_server=mcp_server,
             )
-            results = await runner.run_agents([agent], verbose=verbose)
+            results = await runner.run_agents([agent])
             return results[0]

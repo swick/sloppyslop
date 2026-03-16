@@ -236,7 +236,7 @@ Examples:
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config)
+        runner = SandboxRunner(project_dir, config, verbose=verbose)
 
         # Wire up event handlers
         wire_up_all_events(runner, output)

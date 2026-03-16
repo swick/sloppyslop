@@ -278,13 +278,14 @@ class AgentConfig:
 class SandboxRunner:
     """Orchestrates one-shot LLM prompt execution in sandbox."""
 
-    def __init__(self, project_path: Path, config: Config):
+    def __init__(self, project_path: Path, config: Config, verbose: bool = False):
         """
         Initialize sandbox runner.
 
         Args:
             project_path: Path to project directory
             config: Merged configuration (global + project overrides)
+            verbose: Enable verbose output for all agents
         """
         self.project_path = project_path
         self.config = config
@@ -320,7 +321,7 @@ class SandboxRunner:
         self._keep_branches: List[str] = []
         self._network_mode: str = "none"
         self._cleaned_up: bool = False
-        self._verbose: bool = False  # Current verbose setting for spawned agents
+        self._verbose: bool = verbose  # Verbose setting for all spawned agents
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -582,44 +583,146 @@ class SandboxRunner:
         self._agent_llm_providers[agent_id] = provider
         return provider
 
-    async def _run_single_agent(
+    async def _execute_agent(
         self,
+        agent_id: str,
         agent: AgentConfig,
-        verbose: bool
+        background: bool
     ) -> Dict[str, Any]:
         """
-        Run single agent using shared environment.
+        Execute a single agent with proper event handling.
 
         Args:
+            agent_id: Unique agent identifier
             agent: Agent configuration
-            verbose: Enable verbose output
+            background: Whether this is a background agent
 
         Returns:
             Agent execution result
         """
-        agent_id = agent.agent_id or str(uuid.uuid4())[:8]
+        try:
+            # Emit appropriate start event
+            if background:
+                spawn_depth = agent.mcp_server.spawn_depth if agent.mcp_server else 0
+                self.events.emit(BackgroundAgentStarting(
+                    agent_id=agent_id,
+                    spawn_depth=spawn_depth
+                ))
+            else:
+                self.events.emit(AgentStarted(agent_id=agent_id))
 
-        self.events.emit(AgentStarted(agent_id=agent_id))
+            # Create agent-specific LLM provider
+            llm_provider = self._create_agent_llm_provider(agent_id)
 
-        # Create agent-specific LLM provider
-        llm_provider = self._create_agent_llm_provider(agent_id)
+            # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
+            result = await llm_provider.generate_structured(
+                agent.prompt,
+                agent.mcp_server,
+                agent.output_schema,
+                verbose=self._verbose,
+            )
 
-        # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
-        result = await llm_provider.generate_structured(
-            agent.prompt,
-            agent.mcp_server,
-            agent.output_schema,
-            verbose=verbose,
+            # Emit completion event
+            if background:
+                self.events.emit(BackgroundAgentCompleted(agent_id=agent_id))
+            else:
+                self.events.emit(AgentCompleted(agent_id=agent_id))
+
+            return result
+
+        except Exception as e:
+            # Emit failure event
+            if background:
+                self.events.emit(BackgroundAgentFailed(agent_id=agent_id, error=str(e)))
+            else:
+                self.events.emit(AgentFailed(agent_id=agent_id, error=str(e)))
+            raise
+
+    async def spawn_agent(
+        self,
+        agent: AgentConfig,
+        background: bool = False,
+    ) -> str:
+        """
+        Spawn a single agent (foreground or background).
+
+        This is the unified entry point for all agent spawning.
+        All agents are tracked by the task manager.
+
+        Args:
+            agent: Agent configuration
+            background: If True, agent runs in background. If False, caller must wait for it.
+
+        Returns:
+            agent_id for tracking
+
+        Raises:
+            RuntimeError: If setup() not called first
+        """
+        if not self.container_id or not self.instance_id:
+            raise RuntimeError("Must call setup() before spawning agents")
+
+        # Generate agent_id if not provided
+        agent_id = agent.agent_id or (
+            f"bg-{str(uuid.uuid4())[:8]}" if background else str(uuid.uuid4())[:8]
         )
 
-        self.events.emit(AgentCompleted(agent_id=agent_id))
+        # Create execution coroutine
+        coro = self._execute_agent(agent_id, agent, background)
 
-        return result
+        # Spawn via task manager (tracks both foreground and background)
+        await self._background_task_manager.spawn(agent_id, coro)
+
+        # Emit spawned event for background agents
+        if background:
+            spawn_depth = agent.mcp_server.spawn_depth if agent.mcp_server else 0
+            tool_count = len(agent.mcp_server.tools) if agent.mcp_server else 0
+            self.events.emit(BackgroundAgentSpawned(
+                agent_id=agent_id,
+                spawn_depth=spawn_depth,
+                tool_count=tool_count
+            ))
+
+        return agent_id
+
+    async def wait_for_agents(
+        self,
+        agent_ids: Optional[List[str]] = None,
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        Wait for specific agents or all agents to complete.
+
+        Args:
+            agent_ids: List of agent IDs to wait for (None = all)
+            timeout: Optional timeout in seconds
+
+        Returns:
+            Dict mapping agent_id to result
+        """
+        # Emit waiting event if there are agents to wait for
+        running = self._background_task_manager.get_running_agents()
+        if agent_ids:
+            wait_ids = [aid for aid in agent_ids if aid in running]
+        else:
+            wait_ids = running
+
+        if wait_ids:
+            self.events.emit(BackgroundAgentsWaiting(
+                agent_count=len(wait_ids),
+                agent_ids=wait_ids
+            ))
+
+        results = await self._background_task_manager.wait_for(agent_ids, timeout)
+
+        if wait_ids:
+            self.events.emit(BackgroundAgentsAllCompleted(agent_count=len(wait_ids)))
+
+        return results
 
     async def run_agents(
         self,
         agents: List[AgentConfig],
-        verbose: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Execute agents in parallel using shared environment.
@@ -638,16 +741,12 @@ class SandboxRunner:
 
         Args:
             agents: List of agent configurations
-            verbose: Enable verbose output (optional)
 
         Returns:
             List of structured outputs from each agent
         """
         if not self.container_id or not self.instance_id:
             raise RuntimeError("Must call setup() before running agents")
-
-        # Store verbose flag so spawned agents can inherit it
-        self._verbose = verbose
 
         try:
             self.events.emit(ParallelAgentsStarted(
@@ -656,21 +755,20 @@ class SandboxRunner:
                 instance_id=self.instance_id
             ))
 
-            # Run all agents in parallel
-            results = await asyncio.gather(*[
-                self._run_single_agent(agent, verbose)
-                for agent in agents
-            ], return_exceptions=True)
+            # Spawn all agents (foreground, tracked by task manager)
+            agent_ids = []
+            for agent in agents:
+                agent_id = await self.spawn_agent(agent, background=False)
+                agent_ids.append(agent_id)
 
-            # Process results, convert exceptions to error dicts
+            # Wait for all to complete
+            results_dict = await self._background_task_manager.wait_for(agent_ids)
+
+            # Convert to list maintaining order
             final_results = []
-            for i, result in enumerate(results):
+            for agent_id in agent_ids:
+                result = results_dict[agent_id]
                 if isinstance(result, Exception):
-                    agent_id = agents[i].agent_id or f"agent-{i}"
-                    self.events.emit(AgentFailed(
-                        agent_id=agent_id,
-                        error=str(result)
-                    ))
                     final_results.append({
                         "success": False,
                         "error": str(result),
@@ -684,8 +782,6 @@ class SandboxRunner:
         finally:
             # Clear agent LLM providers
             self._agent_llm_providers.clear()
-            # Reset verbose flag
-            self._verbose = False
             # Don't cancel background agents here - let them run to completion
             # They'll be cleaned up by explicit cleanup() call if needed
 

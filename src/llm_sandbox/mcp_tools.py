@@ -1067,56 +1067,22 @@ class SpawnAgentTool(MCPTool):
                 agent_id=agent_id,
             )
 
-            # Create task to run the agent in background
-            async def run_background_agent():
-                # Import events here to avoid circular imports
-                from llm_sandbox.runner import BackgroundAgentStarting, BackgroundAgentCompleted, BackgroundAgentFailed
-
-                # Emit event that background agent is starting
-                self.runner.events.emit(BackgroundAgentStarting(
-                    agent_id=agent_id,
-                    spawn_depth=child_spawn_depth
-                ))
-
-                try:
-                    # Inherit verbose setting from parent runner
-                    verbose = self.runner._verbose
-                    results = await self.runner.run_agents([agent_config], verbose=verbose)
-
-                    # Emit event that background agent completed
-                    self.runner.events.emit(BackgroundAgentCompleted(
-                        agent_id=agent_id
-                    ))
-                    return results[0]
-                except Exception as e:
-                    # Emit event that background agent failed
-                    self.runner.events.emit(BackgroundAgentFailed(
-                        agent_id=agent_id,
-                        error=str(e)
-                    ))
-                    raise
-
-            # Use BackgroundTaskManager to spawn and track the task
-            await self.runner._background_task_manager.spawn(agent_id, run_background_agent())
+            # Spawn agent in background using unified spawn method
+            spawned_agent_id = await self.runner.spawn_agent(
+                agent_config,
+                background=True
+            )
 
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
 
-            # Emit event that background agent was spawned
-            from llm_sandbox.runner import BackgroundAgentSpawned
-            self.runner.events.emit(BackgroundAgentSpawned(
-                agent_id=agent_id,
-                spawn_depth=child_spawn_depth,
-                tool_count=len(child_tool_names)
-            ))
-
             return {
                 "success": True,
-                "agent_id": agent_id,
+                "agent_id": spawned_agent_id,
                 "status": "spawned",
                 "spawn_depth": child_spawn_depth,
                 "tools": child_tool_names,
-                "message": f"Agent '{agent_id}' spawned in background at depth {child_spawn_depth} with {len(child_tool_names)} tools. Use wait_for_agents to retrieve result.",
+                "message": f"Agent '{spawned_agent_id}' spawned in background at depth {child_spawn_depth} with {len(child_tool_names)} tools. Use wait_for_agents to retrieve result.",
             }
 
         except ValueError as e:
