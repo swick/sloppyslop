@@ -40,6 +40,7 @@ class LLMResponseReceived:
 
     stop_reason: str
     usage: dict
+    content_preview: str = ""
 
 
 @dataclass
@@ -48,6 +49,7 @@ class LLMToolsExecuting:
 
     tool_count: int
     tool_names: List[str]
+    tool_params: List[Dict[str, Any]]
 
 
 @dataclass
@@ -56,6 +58,7 @@ class LLMToolCompleted:
 
     tool_name: str
     success: bool
+    result: Any = None
 
 
 @dataclass
@@ -329,6 +332,32 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 max_iterations=max_iterations
             ))
 
+            # Emit message sent event
+            if self.conversation_history:
+                last_msg = self.conversation_history[-1]
+                role = last_msg.get("role", "unknown")
+                content = last_msg.get("content", "")
+
+                # Extract content preview and tool uses
+                if isinstance(content, str):
+                    content_preview = content[:100]
+                    tool_uses = []
+                elif isinstance(content, list):
+                    # Content is a list of blocks (tool results, text, etc.)
+                    text_parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+                    tool_results = [block.get("tool_use_id", "") for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
+                    content_preview = " ".join(text_parts)[:100]
+                    tool_uses = tool_results
+                else:
+                    content_preview = str(content)[:100]
+                    tool_uses = []
+
+                events.emit(LLMMessageSent(
+                    role=role,
+                    content_preview=content_preview,
+                    tool_uses=tool_uses
+                ))
+
             # Make API call
             if self.backend == "vertex-ai":
                 # Vertex AI - use sync client with asyncio.to_thread
@@ -360,9 +389,22 @@ When you're done analyzing, provide your final answer in the structured JSON for
             # Add assistant response to conversation
             self._add_assistant_message(response.content)
 
+            # Extract content preview from response
+            content_preview = ""
+            if hasattr(response, 'content') and response.content:
+                for block in response.content:
+                    if hasattr(block, 'type'):
+                        if block.type == "text" and hasattr(block, 'text'):
+                            content_preview = block.text[:100]
+                            break
+                        elif block.type == "tool_use" and hasattr(block, 'name'):
+                            content_preview = f"[tool_use: {block.name}]"
+                            break
+
             events.emit(LLMResponseReceived(
                 stop_reason=response.stop_reason,
-                usage=response.usage.__dict__ if hasattr(response, 'usage') else {}
+                usage=response.usage.__dict__ if hasattr(response, 'usage') else {},
+                content_preview=content_preview
             ))
 
             # Log assistant message
@@ -403,7 +445,8 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                 events.emit(LLMToolsExecuting(
                     tool_count=len(tool_blocks),
-                    tool_names=[b.name for b in tool_blocks]
+                    tool_names=[b.name for b in tool_blocks],
+                    tool_params=[b.input if hasattr(b, 'input') else {} for b in tool_blocks]
                 ))
 
                 # Execute tools in parallel
@@ -416,17 +459,19 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 tool_results = []
                 for block, result_data in zip(tool_blocks, tool_results_data):
                     if isinstance(result_data, Exception):
-                        events.emit(LLMToolCompleted(
-                            tool_name=block.name,
-                            success=False
-                        ))
                         result = {"success": False, "error": str(result_data)}
-                    else:
                         events.emit(LLMToolCompleted(
                             tool_name=block.name,
-                            success=True
+                            success=False,
+                            result=result
                         ))
+                    else:
                         result = result_data
+                        events.emit(LLMToolCompleted(
+                            tool_name=block.name,
+                            success=True,
+                            result=result
+                        ))
 
                     tool_results.append({
                         "type": "tool_result",

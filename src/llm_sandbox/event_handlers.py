@@ -13,6 +13,7 @@ from llm_sandbox.container import (
 from llm_sandbox.llm_provider import (
     LLMIterationStarted,
     LLMJSONParseError,
+    LLMMessageSent,
     LLMResponseReceived,
     LLMToolCompleted,
     LLMToolsExecuting,
@@ -158,19 +159,50 @@ def wire_up_agent_llm_events(agent, output: OutputService) -> None:
     )
 
     agent.events.on(
-        LLMResponseReceived,
-        lambda e: output.verbose(f"Response stop reason: {e.stop_reason}")
+        LLMMessageSent,
+        lambda e: output.verbose(f"→ Sending {e.role} message: {e.content_preview}{'...' if len(e.content_preview) == 100 else ''}")
     )
 
     agent.events.on(
-        LLMToolsExecuting,
-        lambda e: output.verbose(f"→ Executing {e.tool_count} tool(s): {', '.join(e.tool_names)}")
+        LLMResponseReceived,
+        lambda e: output.verbose(
+            f"← Response ({e.stop_reason}): {e.content_preview}{'...' if len(e.content_preview) == 100 else ''}"
+            if e.content_preview else
+            f"← Response stop reason: {e.stop_reason}"
+        )
     )
+
+    def _format_tool_params(params):
+        """Format tool parameters for display."""
+        if not params:
+            return ""
+        # Show first few keys or truncate
+        param_str = str(params)
+        if len(param_str) > 50:
+            return param_str[:50] + "..."
+        return param_str
+
+    agent.events.on(
+        LLMToolsExecuting,
+        lambda e: output.verbose(
+            f"→ Executing {e.tool_count} tool(s): " +
+            ", ".join(f"{name}({_format_tool_params(params)})" for name, params in zip(e.tool_names, e.tool_params))
+        )
+    )
+
+    def _format_tool_result(result):
+        """Format tool result for display."""
+        if not result:
+            return ""
+        result_str = str(result)
+        if len(result_str) > 100:
+            return result_str[:100] + "..."
+        return result_str
 
     agent.events.on(
         LLMToolCompleted,
         lambda e: output.verbose(
-            f"← Tool {e.tool_name}: {'✓' if e.success else '✗'}"
+            f"← Tool {e.tool_name}: {'✓' if e.success else '✗'} {_format_tool_result(e.result)}"
         )
     )
 
