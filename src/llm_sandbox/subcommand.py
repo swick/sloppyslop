@@ -81,8 +81,9 @@ class Subcommand(ABC):
                             prompt="Background task",
                             output_schema={"type": "object", ...},
                             mcp_server=mcp_server,
+                            is_background=True
                         )
-                        await bg_agent.execute(background=True)  # Returns immediately
+                        await bg_agent.execute()  # Returns immediately
                         # ... do other work ...
                         bg_result = await bg_agent.wait()  # Wait when ready
 

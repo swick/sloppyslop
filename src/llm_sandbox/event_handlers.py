@@ -22,19 +22,12 @@ from llm_sandbox.runner import (
     AgentCompleted,
     AgentFailed,
     AgentStarted,
-    BackgroundAgentCompleted,
-    BackgroundAgentFailed,
     BackgroundAgentSpawned,
-    BackgroundAgentStarting,
     BackgroundAgentsAllCompleted,
     BackgroundAgentsCanceling,
     BackgroundAgentsWaiting,
     BranchDeleted,
     BranchKept,
-    CleanupStarted,
-    ContainerStarted,
-    InstanceCreated,
-    WarningIssued,
     WorktreeRemoveFailed,
 )
 
@@ -90,23 +83,7 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
         runner: SandboxRunner instance
         output: OutputService for formatting output
     """
-    # Setup events
-    runner.events.on(
-        InstanceCreated,
-        lambda e: output.info(f"Instance ID: {e.instance_id}")
-    )
-
-    runner.events.on(
-        ContainerStarted,
-        lambda e: output.success(f"Container started: {e.container_id[:12]}")
-    )
-
     # Cleanup events
-    runner.events.on(
-        CleanupStarted,
-        lambda e: output.verbose(f"Cleaning up {e.component}...")
-    )
-
     runner.events.on(
         BackgroundAgentsCanceling,
         lambda e: output.info(f"Canceling {e.agent_count} background agent(s)...")
@@ -128,20 +105,38 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
         lambda e: output.warning(f"Failed to remove worktree {e.name}: {e.error}")
     )
 
-    # Agent execution
+    # Agent execution (unified handling)
+    def _format_agent_label(agent_id: str, is_background: bool) -> str:
+        """Format agent label with optional 'Background' prefix."""
+        prefix = "Background " if is_background else ""
+        return f"{prefix}Agent {agent_id}"
+
     runner.events.on(
         AgentStarted,
-        lambda e: output.verbose(f"\n[Agent {e.agent_id}] Starting execution...")
+        lambda e: output.verbose(
+            f"\n{'='*60}\n"
+            f"[{_format_agent_label(e.agent_id, e.is_background)}] "
+            f"Starting at depth {e.spawn_depth}\n"
+            f"{'='*60}"
+            if e.is_background else
+            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] Starting execution..."
+        )
     )
 
     runner.events.on(
         AgentCompleted,
-        lambda e: output.verbose(f"\n[Agent {e.agent_id}] Completed successfully")
+        lambda e: output.verbose(
+            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] "
+            f"✓ Completed successfully"
+        )
     )
 
     runner.events.on(
         AgentFailed,
-        lambda e: output.error(f"\n[Agent {e.agent_id}] Failed: {e.error}")
+        lambda e: output.error(
+            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] "
+            f"Failed: {e.error}"
+        )
     )
 
     # Background agent events
@@ -151,25 +146,6 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
             f"→ Spawned background agent '{e.agent_id}' "
             f"(depth {e.spawn_depth}, {e.tool_count} tools)"
         )
-    )
-
-    runner.events.on(
-        BackgroundAgentStarting,
-        lambda e: output.verbose(
-            f"\n{'='*60}\n"
-            f"[Background Agent {e.agent_id}] Starting at depth {e.spawn_depth}\n"
-            f"{'='*60}"
-        )
-    )
-
-    runner.events.on(
-        BackgroundAgentCompleted,
-        lambda e: output.verbose(f"\n[Background Agent {e.agent_id}] ✓ Completed successfully")
-    )
-
-    runner.events.on(
-        BackgroundAgentFailed,
-        lambda e: output.verbose(f"\n[Background Agent {e.agent_id}] ✗ Failed: {e.error}")
     )
 
     runner.events.on(
@@ -183,12 +159,6 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
     runner.events.on(
         BackgroundAgentsAllCompleted,
         lambda e: output.verbose(f"✓ All {e.agent_count} agent(s) completed")
-    )
-
-    # Warnings
-    runner.events.on(
-        WarningIssued,
-        lambda e: output.warning(f"{e.message} [{e.context}]" if e.context else e.message)
     )
 
 

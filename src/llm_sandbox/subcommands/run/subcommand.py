@@ -118,10 +118,15 @@ class RunSubcommand(Subcommand):
             verbose=verbose,
             keep_branches=list(keep_branch) if keep_branch else [],
             network=network,
+            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
         )
 
         # Wire up all event handlers
         wire_up_all_events(runner, output)
+
+        # Display instance and container info
+        output.info(f"Instance ID: {runner.instance_id}")
+        output.success(f"Container started: {runner.container_id[:12]}")
 
         # Validate prompt input
         if not prompt and not prompt_file:

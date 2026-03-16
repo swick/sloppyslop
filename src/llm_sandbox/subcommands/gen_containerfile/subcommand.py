@@ -80,10 +80,15 @@ class GenContainerfileSubcommand(Subcommand):
             verbose=verbose,
             network="enabled",
             image=Image.DEFAULT_IMAGE,
+            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
         )
 
         # Wire up all event handlers
         wire_up_all_events(runner, output)
+
+        # Display instance and container info
+        output.info(f"Instance ID: {runner.instance_id}")
+        output.success(f"Container started: {runner.container_id[:12]}")
 
         output.info(f"Generating Containerfile")
         output.info(f"Project directory: {project_dir}")

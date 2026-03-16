@@ -235,10 +235,20 @@ Examples:
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config, verbose=verbose, network=network)
+        runner = SandboxRunner(
+            project_dir,
+            config,
+            verbose=verbose,
+            network=network,
+            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
+        )
 
         # Wire up event handlers
         wire_up_all_events(runner, output)
+
+        # Display instance and container info
+        output.info(f"Instance ID: {runner.instance_id}")
+        output.success(f"Container started: {runner.container_id[:12]}")
 
         # Validate arguments
         if pr_number and (base_commit or head_commit):

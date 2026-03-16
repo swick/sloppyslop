@@ -19,23 +19,6 @@ from llm_sandbox.mcp_tools import MCPServer
 
 # SandboxRunner event types
 @dataclass
-class InstanceCreated:
-    """Event: Instance ID generated."""
-
-    instance_id: str
-    timestamp: datetime
-
-
-@dataclass
-class ContainerStarted:
-    """Event: Container started."""
-
-    container_id: str
-    image: str
-    timestamp: datetime
-
-
-@dataclass
 class WorktreeCreated:
     """Event: Worktree created."""
 
@@ -68,18 +51,12 @@ class BranchKept:
 
 
 @dataclass
-class WarningIssued:
-    """Event: Generic warning message."""
-
-    message: str
-    context: str = ""
-
-
-@dataclass
 class AgentStarted:
     """Event: Agent started execution."""
 
     agent_id: str
+    is_background: bool = False
+    spawn_depth: int = 0  # Only meaningful if is_background=True
 
 
 @dataclass
@@ -87,6 +64,7 @@ class AgentCompleted:
     """Event: Agent completed successfully."""
 
     agent_id: str
+    is_background: bool = False
 
 
 @dataclass
@@ -95,13 +73,7 @@ class AgentFailed:
 
     agent_id: str
     error: str
-
-
-@dataclass
-class CleanupStarted:
-    """Event: Cleanup phase started."""
-
-    component: str  # 'container', 'worktrees', or 'background_agents'
+    is_background: bool = False
 
 
 @dataclass
@@ -118,29 +90,6 @@ class BackgroundAgentSpawned:
     agent_id: str
     spawn_depth: int
     tool_count: int
-
-
-@dataclass
-class BackgroundAgentStarting:
-    """Event: Background agent starting execution."""
-
-    agent_id: str
-    spawn_depth: int
-
-
-@dataclass
-class BackgroundAgentCompleted:
-    """Event: Background agent completed successfully."""
-
-    agent_id: str
-
-
-@dataclass
-class BackgroundAgentFailed:
-    """Event: Background agent failed."""
-
-    agent_id: str
-    error: str
 
 
 @dataclass
@@ -162,11 +111,11 @@ class BackgroundAgentsAllCompleted:
 __all__ = ["SandboxRunner", "Agent"]
 
 
-class BackgroundTaskManager:
-    """Manages lifecycle of background agent tasks with proper synchronization."""
+class TaskManager:
+    """Manages lifecycle of agent tasks (foreground and background) with proper synchronization."""
 
     def __init__(self):
-        """Initialize background task manager."""
+        """Initialize task manager."""
         self._tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
@@ -274,7 +223,8 @@ class Agent:
         prompt: str,
         output_schema: Dict[str, Any],
         mcp_server: MCPServer,
-        agent_id: Optional[str] = None
+        agent_id: Optional[str] = None,
+        is_background: bool = False
     ):
         """
         Initialize agent.
@@ -285,19 +235,25 @@ class Agent:
             output_schema: JSON schema for structured output
             mcp_server: MCP server instance with available tools
             agent_id: Optional agent identifier
+            is_background: Whether this is a background agent
         """
         self.runner = runner
         self.prompt = prompt
         self.output_schema = output_schema
         self.mcp_server = mcp_server
+        self.is_background = is_background
+        self._execution_started = False  # Track execution state
+        self._llm_provider: Optional[LLMProvider] = None  # Created on execute
+
+        # Generate agent_id immediately if not provided
+        if agent_id is None:
+            prefix = "bg-" if is_background else ""
+            agent_id = f"{prefix}{str(uuid.uuid4())[:8]}"
         self._agent_id = agent_id
 
-    async def execute(self, background: bool = False) -> str:
+    async def execute(self) -> str:
         """
         Start agent execution.
-
-        Args:
-            background: If True, run in background. If False, caller should wait.
 
         Returns:
             agent_id for tracking
@@ -305,26 +261,23 @@ class Agent:
         Raises:
             RuntimeError: If agent already started or runner not setup
         """
-        if self._agent_id is not None:
+        # Validate not already started
+        if self._execution_started:
             raise RuntimeError("Agent already started")
+        self._execution_started = True
 
         # Validate runner is setup
         if not self.runner.container_id or not self.runner.instance_id:
             raise RuntimeError("Runner not properly initialized")
 
-        # Generate agent_id if not provided
-        if not self._agent_id:
-            import uuid
-            self._agent_id = f"bg-{str(uuid.uuid4())[:8]}" if background else str(uuid.uuid4())[:8]
-
         # Create execution coroutine
-        coro = self._execute(background)
+        coro = self._execute(self.is_background)
 
         # Spawn via task manager (tracks both foreground and background)
-        await self.runner._background_task_manager.spawn(self._agent_id, coro)
+        await self.runner._task_manager.spawn(self._agent_id, coro)
 
         # Emit spawned event for background agents
-        if background:
+        if self.is_background:
             spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
             tool_count = len(self.mcp_server.tools) if self.mcp_server else 0
             self.runner.events.emit(BackgroundAgentSpawned(
@@ -346,21 +299,22 @@ class Agent:
             Agent execution result
         """
         try:
-            # Emit appropriate start event
-            if background:
-                spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
-                self.runner.events.emit(BackgroundAgentStarting(
-                    agent_id=self._agent_id,
-                    spawn_depth=spawn_depth
-                ))
-            else:
-                self.runner.events.emit(AgentStarted(agent_id=self._agent_id))
+            # Emit start event
+            spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
+            self.runner.events.emit(AgentStarted(
+                agent_id=self._agent_id,
+                is_background=background,
+                spawn_depth=spawn_depth
+            ))
 
             # Create agent-specific LLM provider
-            llm_provider = self.runner._create_agent_llm_provider(self._agent_id)
+            self._llm_provider = create_llm_provider(
+                self.runner.provider_name,
+                self.runner.provider_config
+            )
 
             # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
-            result = await llm_provider.generate_structured(
+            result = await self._llm_provider.generate_structured(
                 self.prompt,
                 self.mcp_server,
                 self.output_schema,
@@ -368,19 +322,20 @@ class Agent:
             )
 
             # Emit completion event
-            if background:
-                self.runner.events.emit(BackgroundAgentCompleted(agent_id=self._agent_id))
-            else:
-                self.runner.events.emit(AgentCompleted(agent_id=self._agent_id))
+            self.runner.events.emit(AgentCompleted(
+                agent_id=self._agent_id,
+                is_background=background
+            ))
 
             return result
 
         except Exception as e:
             # Emit failure event
-            if background:
-                self.runner.events.emit(BackgroundAgentFailed(agent_id=self._agent_id, error=str(e)))
-            else:
-                self.runner.events.emit(AgentFailed(agent_id=self._agent_id, error=str(e)))
+            self.runner.events.emit(AgentFailed(
+                agent_id=self._agent_id,
+                error=str(e),
+                is_background=background
+            ))
             raise
 
     async def wait(self, timeout: Optional[float] = None) -> Dict[str, Any]:
@@ -396,11 +351,11 @@ class Agent:
         Raises:
             RuntimeError: If execute() not called yet
         """
-        if self._agent_id is None:
+        if not self._execution_started:
             raise RuntimeError("Agent not started. Call execute() first.")
 
         # Wait for this specific agent to complete
-        results = await self.runner._background_task_manager.wait_for(
+        results = await self.runner._task_manager.wait_for(
             agent_ids=[self._agent_id],
             timeout=timeout
         )
@@ -412,8 +367,8 @@ class Agent:
         return result
 
     @property
-    def agent_id(self) -> Optional[str]:
-        """Get the agent ID (None if not started yet)."""
+    def agent_id(self) -> str:
+        """Get the agent ID (always available after construction)."""
         return self._agent_id
 
 
@@ -428,6 +383,7 @@ class SandboxRunner:
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
         image: Optional[str] = None,
+        warning_callback: Optional[callable] = None,
     ):
         """
         Initialize sandbox runner and setup environment.
@@ -439,6 +395,7 @@ class SandboxRunner:
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional, uses config if not specified)
             image: Image name/tag override (optional, uses config if not specified)
+            warning_callback: Optional callback for warnings (receives message: str, context: str)
         """
         self.project_path = project_path
         self.config = config
@@ -449,6 +406,9 @@ class SandboxRunner:
         # Event emitter for progress and status updates
         self.events = EventEmitter()
 
+        # Warning callback
+        self._warning_callback = warning_callback
+
         # Public API - Components for tool access
         self.container_manager = ContainerManager()
         self.git_ops = GitOperations(project_path)
@@ -457,11 +417,10 @@ class SandboxRunner:
         self.created_worktrees: List[str] = []  # Track worktree names
 
         # Parallel execution support
-        self._agent_llm_providers: Dict[str, LLMProvider] = {}
         # Initialize locks immediately so they're always available
         self._git_lock = asyncio.Lock()
         self._worktrees_lock = asyncio.Lock()
-        self._background_task_manager = BackgroundTaskManager()
+        self._task_manager = TaskManager()
 
         # Review feedback storage (for PR review workflow)
         # Type is List[FeedbackItem] but kept as List[Any] to avoid circular dependency
@@ -489,10 +448,6 @@ class SandboxRunner:
             self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
         )
         self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
-        self.events.emit(InstanceCreated(
-            instance_id=self.instance_id,
-            timestamp=datetime.now()
-        ))
 
         # Step 2: Get container image tag
         if image:
@@ -512,11 +467,6 @@ class SandboxRunner:
         self.container_id = container_info.container_id
 
         self.container_manager.start_container(self.container_id)
-        self.events.emit(ContainerStarted(
-            container_id=self.container_id,
-            image=container_info.image,
-            timestamp=datetime.now()
-        ))
 
         # Create symlink in container so worktree .git files work
         self._setup_git_symlink()
@@ -534,7 +484,7 @@ class SandboxRunner:
         """Destructor - ensure cleanup happens."""
         # Only do minimal cleanup - avoid calling cleanup() from __del__
         # as it can cause issues with event loops
-        if hasattr(self, '_background_task_manager'):
+        if hasattr(self, '_task_manager'):
             # Can't use await in __del__, just mark for cleanup
             pass
 
@@ -549,6 +499,17 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
+    def _warn(self, message: str, context: str = "") -> None:
+        """
+        Issue a warning via the warning callback if set.
+
+        Args:
+            message: Warning message
+            context: Optional context information
+        """
+        if self._warning_callback:
+            self._warning_callback(message, context)
+
     def _setup_git_symlink(self) -> None:
         """
         Create symlink in container so worktree .git files work correctly.
@@ -558,47 +519,36 @@ class SandboxRunner:
 
         Solution: Create symlink /host/path/to/project/.git -> /project/.git
         This way git can follow the path in the .git file.
+
+        Raises:
+            RuntimeError: If directory creation or symlink creation fails
         """
         if not self.container_id:
-            return
+            raise RuntimeError("Container ID not set")
 
-        try:
-            # Get the absolute path to the project on the host
-            host_project_path = str(self.project_path.absolute())
+        # Get the absolute path to the project on the host
+        host_project_path = str(self.project_path.absolute())
 
-            # Create the project directory structure in the container
-            # (everything up to but not including .git)
-            exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
-                self.container_id,
-                f"mkdir -p {host_project_path}",
-                workdir="/",
-            ))
+        # Create the project directory structure in the container
+        # (everything up to but not including .git)
+        exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
+            self.container_id,
+            f"mkdir -p {host_project_path}",
+            workdir="/",
+        ))
 
-            if exit_code != 0:
-                self.events.emit(WarningIssued(
-                    message=f"Failed to create directory structure for git symlink: {stderr}",
-                    context="setup_git_symlink"
-                ))
-                return
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to create directory structure for git symlink: {stderr}")
 
-            # Create symlink from host path to /project/.git
-            exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
-                self.container_id,
-                f"ln -sf /project/.git {host_project_path}/.git",
-                workdir="/",
-            ))
+        # Create symlink from host path to /project/.git
+        exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
+            self.container_id,
+            f"ln -sf /project/.git {host_project_path}/.git",
+            workdir="/",
+        ))
 
-            if exit_code != 0:
-                self.events.emit(WarningIssued(
-                    message=f"Failed to create git symlink: {stderr}",
-                    context="setup_git_symlink"
-                ))
-
-        except Exception as e:
-            self.events.emit(WarningIssued(
-                message=f"Failed to setup git symlink: {e}",
-                context="setup_git_symlink"
-            ))
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to create git symlink: {stderr}")
 
     def _cleanup_worktrees(self, keep_branches: List[str]) -> None:
         """
@@ -629,10 +579,7 @@ class SandboxRunner:
                         pass
 
                     if not branch_exists:
-                        self.events.emit(WarningIssued(
-                            message=f"Branch {full_branch_name} does not exist, skipping",
-                            context="cleanup_worktrees"
-                        ))
+                        self._warn(f"Branch {full_branch_name} does not exist, skipping", "cleanup_worktrees")
                         continue
 
                     # Create a copy of the branch with the new name (force overwrite if exists)
@@ -643,15 +590,9 @@ class SandboxRunner:
                     ))
 
                 except Exception as e:
-                    self.events.emit(WarningIssued(
-                        message=f"Failed to copy branch {full_branch_name}: {e}",
-                        context="cleanup_worktrees"
-                    ))
+                    self._warn(f"Failed to copy branch {full_branch_name}: {e}", "cleanup_worktrees")
             else:
-                self.events.emit(WarningIssued(
-                    message=f"Branch {branch_name} was not created in this session",
-                    context="cleanup_worktrees"
-                ))
+                self._warn(f"Branch {branch_name} was not created in this session", "cleanup_worktrees")
 
         # Step 2: Now remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -678,39 +619,16 @@ class SandboxRunner:
                     self.git_ops.delete_branch(branch_name)
                     self.events.emit(BranchDeleted(branch_name=branch_name))
                 except Exception as e:
-                    self.events.emit(WarningIssued(
-                        message=f"Failed to delete branch {branch_name}: {e}",
-                        context="cleanup_worktrees"
-                    ))
+                    self._warn(f"Failed to delete branch {branch_name}: {e}", "cleanup_worktrees")
         except Exception as e:
-            self.events.emit(WarningIssued(
-                message=f"Failed to list remaining branches: {e}",
-                context="cleanup_worktrees"
-            ))
+            self._warn(f"Failed to list remaining branches: {e}", "cleanup_worktrees")
 
         # Remove instance directory
         if self.worktrees_base_dir.exists():
             try:
                 shutil.rmtree(self.worktrees_base_dir)
             except Exception as e:
-                self.events.emit(WarningIssued(
-                    message=f"Failed to remove instance directory: {e}",
-                    context="cleanup_worktrees"
-                ))
-
-    def _create_agent_llm_provider(self, agent_id: str) -> LLMProvider:
-        """
-        Create LLM provider for agent with isolated conversation.
-
-        Args:
-            agent_id: Unique agent identifier
-
-        Returns:
-            LLM provider instance
-        """
-        provider = create_llm_provider(self.provider_name, self.provider_config)
-        self._agent_llm_providers[agent_id] = provider
-        return provider
+                self._warn(f"Failed to remove instance directory: {e}", "cleanup_worktrees")
 
     async def _cleanup_async(self) -> None:
         """
@@ -725,8 +643,8 @@ class SandboxRunner:
         self._cleaned_up = True
 
         # Cancel background agents with proper async handling
-        if self._background_task_manager:
-            canceled_count = await self._background_task_manager.cancel_all()
+        if self._task_manager:
+            canceled_count = await self._task_manager.cancel_all()
             if canceled_count > 0:
                 self.events.emit(BackgroundAgentsCanceling(agent_count=canceled_count))
 
@@ -736,22 +654,14 @@ class SandboxRunner:
         # Cleanup container (sync is fine)
         if self.container_id:
             try:
-                self.events.emit(CleanupStarted(component='container'))
                 self.container_manager.cleanup(self.container_id)
             except Exception as e:
-                self.events.emit(WarningIssued(
-                    message=f"Failed to cleanup container: {e}",
-                    context="cleanup"
-                ))
+                self._warn(f"Failed to cleanup container: {e}", "cleanup")
             finally:
                 self.container_id = None
 
         # Cleanup worktrees (sync)
         try:
-            self.events.emit(CleanupStarted(component='worktrees'))
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
-            self.events.emit(WarningIssued(
-                message=f"Failed to cleanup worktrees: {e}",
-                context="cleanup"
-            ))
+            self._warn(f"Failed to cleanup worktrees: {e}", "cleanup")

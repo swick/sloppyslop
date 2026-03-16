@@ -1065,8 +1065,9 @@ class SpawnAgentTool(MCPTool):
                 output_schema=output_schema,
                 mcp_server=child_mcp_server,
                 agent_id=agent_id,
+                is_background=True
             )
-            spawned_agent_id = await agent.execute(background=True)
+            spawned_agent_id = await agent.execute()
 
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
@@ -1133,7 +1134,7 @@ class WaitForAgentsTool(MCPTool):
         try:
             # If no agent_ids specified, wait for all
             if not agent_ids:
-                agent_ids = self.runner._background_task_manager.get_running()
+                agent_ids = self.runner._task_manager.get_running()
 
             if not agent_ids:
                 return {
@@ -1149,8 +1150,8 @@ class WaitForAgentsTool(MCPTool):
                 agent_count=len(agent_ids)
             ))
 
-            # Use BackgroundTaskManager to wait for agents (handles validation internally)
-            results = await self.runner._background_task_manager.wait_for(
+            # Use TaskManager to wait for agents (handles validation internally)
+            results = await self.runner._task_manager.wait_for(
                 agent_ids=agent_ids,
                 timeout=timeout
             )
@@ -1181,7 +1182,7 @@ class WaitForAgentsTool(MCPTool):
             return {
                 "success": False,
                 "error": f"Timeout after {timeout} seconds waiting for agents: {agent_ids}",
-                "remaining_agents": self.runner._background_task_manager.get_running(),
+                "remaining_agents": self.runner._task_manager.get_running(),
             }
         except Exception as e:
             return {
