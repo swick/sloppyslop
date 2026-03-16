@@ -8,7 +8,10 @@ import subprocess
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from llm_sandbox.runner import Agent
 
 
 class MCPTool(ABC):
@@ -38,13 +41,14 @@ class MCPTool(ABC):
         }
 
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """
         Execute the tool with given arguments.
 
         Args:
             arguments: Tool arguments
-            mcp_server: Optional MCP server instance (for tools that need access to parent context)
+            agent: Agent instance (provides access to runner, mcp_server, spawn_depth, etc.)
+                   May be None when called directly outside agent context.
 
         Returns:
             Tool execution result
@@ -55,15 +59,10 @@ class MCPTool(ABC):
 class MCPServer(ABC):
     """Abstract base class for MCP servers."""
 
-    def __init__(self, spawn_depth: int = 0):
-        """
-        Initialize MCP server with tools dictionary.
-
-        Args:
-            spawn_depth: Depth of agent spawning (0 = root agent, increments for each spawned child)
-        """
+    def __init__(self):
+        """Initialize MCP server with tools dictionary."""
         self.tools: Dict[str, MCPTool] = {}
-        self.spawn_depth: int = spawn_depth
+        self.agent: Optional["Agent"] = None  # Set by Agent.__init__
 
     def add_tool(self, tool: MCPTool) -> None:
         """
@@ -111,7 +110,7 @@ class MCPServer(ABC):
             }
 
         tool = self.tools[tool_name]
-        return await tool.execute(arguments, mcp_server=self)
+        return await tool.execute(arguments, self.agent)
 
 
 # Container tools
@@ -148,7 +147,7 @@ class ExecuteCommandTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Execute shell command in container."""
         command = arguments["command"]
         workdir = arguments.get("workdir", "/worktrees")
@@ -217,7 +216,7 @@ class GitCommitTool(MCPTool):
             return f"/worktrees/{worktree_name}"
         return "/worktrees"
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Commit files with message (blocking)."""
         files = arguments["files"]
         message = arguments["message"]
@@ -322,7 +321,7 @@ class CheckoutCommitTool(MCPTool):
         short_uuid = str(uuid.uuid4())[:8]
         return f"wt-{short_uuid}"
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Create worktree from commit (blocking)."""
         commit = arguments["commit"]
         worktree_name = arguments.get("worktree_name")
@@ -449,7 +448,7 @@ class ReadFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Read file from worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -536,7 +535,7 @@ class WriteFileTool(MCPTool):
         except Exception as e:
             return False, f"Invalid path: {str(e)}", Path()
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Write file to worktree (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -677,7 +676,7 @@ class EditFileTool(MCPTool):
 
         return True, ""
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Edit file in worktree by replacing line ranges (blocking)."""
         worktree = arguments["worktree"]
         path = arguments["path"]
@@ -767,7 +766,7 @@ class GlobTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Find files matching pattern in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
@@ -848,7 +847,7 @@ class GrepTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Search file contents in worktree (blocking)."""
         worktree = arguments["worktree"]
         pattern = arguments["pattern"]
@@ -1000,23 +999,23 @@ class SpawnAgentTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Spawn sub-agent in background."""
         task = arguments["task"]
         output_schema = arguments["output_schema"]
-        agent_id = arguments.get("agent_id", f"bg-{str(uuid.uuid4())[:8]}")
+        agent_id = arguments.get("agent_id", str(uuid.uuid4())[:8])
         requested_tools = arguments.get("tools")
 
         try:
-            if mcp_server is None:
-                # Fallback: no parent server available, return error
+            if agent is None:
+                # Fallback: no parent agent available, return error
                 return {
                     "success": False,
-                    "error": "Cannot spawn agent: parent MCP server not available",
+                    "error": "Cannot spawn agent: parent agent not available",
                 }
 
             # Check spawn depth to prevent infinite recursion
-            parent_depth = mcp_server.spawn_depth
+            parent_depth = agent.spawn_depth
 
             if parent_depth >= self.MAX_SPAWN_DEPTH:
                 return {
@@ -1024,8 +1023,8 @@ class SpawnAgentTool(MCPTool):
                     "error": f"Maximum spawn depth ({self.MAX_SPAWN_DEPTH}) exceeded. Current depth: {parent_depth}",
                 }
 
-            # Get parent's tools
-            parent_tools = mcp_server.tools
+            # Get parent's tools from agent's MCP server
+            parent_tools = agent.mcp_server.tools
 
             # Determine which tools to give the child agent
             if requested_tools is not None:
@@ -1051,23 +1050,24 @@ class SpawnAgentTool(MCPTool):
                 # Inherit all inheritable parent tools
                 tools_to_add = [tool for tool in parent_tools.values() if tool.inheritable]
 
-            # Create MCP server with inherited tools from parent and incremented spawn depth
+            # Create MCP server with inherited tools from parent
             child_spawn_depth = parent_depth + 1
-            child_mcp_server = MCPServer(spawn_depth=child_spawn_depth)
+            child_mcp_server = MCPServer()
             child_mcp_server.add_tools(tools_to_add)
 
             # Create and spawn agent in background
             from llm_sandbox import Agent
 
-            agent = Agent(
+            child_agent = Agent(
                 runner=self.runner,
                 prompt=task,
                 output_schema=output_schema,
                 mcp_server=child_mcp_server,
                 agent_id=agent_id,
-                is_background=True
+                spawn_depth=child_spawn_depth,
+                parent=agent
             )
-            spawned_agent_id = await agent.execute()
+            spawned_agent_id = await child_agent.execute()
 
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
@@ -1126,7 +1126,7 @@ class WaitForAgentsTool(MCPTool):
         )
         self.runner = runner
 
-    async def execute(self, arguments: Dict[str, Any], mcp_server: Optional["MCPServer"] = None) -> Dict[str, Any]:
+    async def execute(self, arguments: Dict[str, Any], agent: Optional["Agent"]) -> Dict[str, Any]:
         """Wait for background agents to complete."""
         agent_ids = arguments.get("agent_ids")
         timeout = arguments.get("timeout", 300.0)  # Default 5 minute timeout
@@ -1143,23 +1143,11 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
-            # Emit event that we're waiting for background agents
-            from llm_sandbox.runner import BackgroundAgentsWaiting, BackgroundAgentsAllCompleted
-            self.runner.events.emit(BackgroundAgentsWaiting(
-                agent_ids=agent_ids,
-                agent_count=len(agent_ids)
-            ))
-
             # Use TaskManager to wait for agents (handles validation internally)
             results = await self.runner._task_manager.wait_for(
                 agent_ids=agent_ids,
                 timeout=timeout
             )
-
-            # Emit event that all background agents completed
-            self.runner.events.emit(BackgroundAgentsAllCompleted(
-                agent_count=len(agent_ids)
-            ))
 
             # Process results to handle exceptions
             processed_results = {}

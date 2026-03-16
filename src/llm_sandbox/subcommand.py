@@ -81,7 +81,7 @@ class Subcommand(ABC):
                             prompt="Background task",
                             output_schema={"type": "object", ...},
                             mcp_server=mcp_server,
-                            is_background=True
+                            spawn_depth=1  # Background agent (depth > 0)
                         )
                         await bg_agent.execute()  # Returns immediately
                         # ... do other work ...

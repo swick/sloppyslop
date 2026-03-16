@@ -5,13 +5,15 @@ import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Union
 
 from anthropic import AsyncAnthropic, Anthropic, AnthropicVertex
 
 from llm_sandbox.config import AnthropicConfig, VertexAIConfig
 from llm_sandbox.events import EventEmitter
-from llm_sandbox.mcp_tools import MCPServer
+
+if TYPE_CHECKING:
+    from llm_sandbox.runner import Agent
 
 
 # LLMProvider event types
@@ -112,7 +114,6 @@ class LLMProvider(ABC):
         self.base_system_prompt = ""
         self.conversation_history: List[Dict[str, Any]] = []
         self.verbose: bool = False
-        self.events = EventEmitter()
 
     def set_system_prompt(self, prompt: str) -> None:
         """
@@ -166,8 +167,9 @@ class LLMProvider(ABC):
     async def generate_structured(
         self,
         prompt: str,
-        mcp_server: MCPServer,
+        agent: "Agent",
         output_schema: Dict[str, Any],
+        events: EventEmitter,
         max_iterations: int = 25,
         verbose: bool = False,
     ) -> Dict[str, Any]:
@@ -176,8 +178,9 @@ class LLMProvider(ABC):
 
         Args:
             prompt: User prompt
-            mcp_server: MCP server instance for tool execution
+            agent: Agent instance (provides mcp_server for tool execution)
             output_schema: JSON schema for structured output
+            events: EventEmitter for emitting LLM events
             max_iterations: Maximum tool use iterations
             verbose: Enable verbose output
 
@@ -261,8 +264,9 @@ class ClaudeProvider(LLMProvider):
     async def generate_structured(
         self,
         prompt: str,
-        mcp_server: MCPServer,
+        agent: "Agent",
         output_schema: Dict[str, Any],
+        events: EventEmitter,
         max_iterations: int = 200,
         verbose: bool = False,
     ) -> Dict[str, Any]:
@@ -273,7 +277,8 @@ class ClaudeProvider(LLMProvider):
 
         Args:
             prompt: User prompt
-            mcp_server: MCP server instance for tool execution
+            agent: Agent instance (provides mcp_server for tool execution)
+            events: EventEmitter for emitting LLM events
             output_schema: JSON schema for structured output
             max_iterations: Maximum tool use iterations
             verbose: Enable verbose output
@@ -284,6 +289,9 @@ class ClaudeProvider(LLMProvider):
         # Set verbose mode and clear conversation history
         self.verbose = verbose
         self._clear_conversation()
+
+        # Get MCP server from agent
+        mcp_server = agent.mcp_server
 
         # Get available tools
         tools = mcp_server.get_tools()
@@ -316,7 +324,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
         while iteration < max_iterations:
             iteration += 1
 
-            self.events.emit(LLMIterationStarted(
+            events.emit(LLMIterationStarted(
                 iteration=iteration,
                 max_iterations=max_iterations
             ))
@@ -352,7 +360,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
             # Add assistant response to conversation
             self._add_assistant_message(response.content)
 
-            self.events.emit(LLMResponseReceived(
+            events.emit(LLMResponseReceived(
                 stop_reason=response.stop_reason,
                 usage=response.usage.__dict__ if hasattr(response, 'usage') else {}
             ))
@@ -377,7 +385,7 @@ When you're done analyzing, provide your final answer in the structured JSON for
                             result = json.loads(json_text)
                             return result
                         except json.JSONDecodeError as e:
-                            self.events.emit(LLMJSONParseError(
+                            events.emit(LLMJSONParseError(
                                 error=str(e),
                                 json_text=json_text
                             ))
@@ -393,14 +401,14 @@ When you're done analyzing, provide your final answer in the structured JSON for
             if response.stop_reason == "tool_use":
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
 
-                self.events.emit(LLMToolsExecuting(
+                events.emit(LLMToolsExecuting(
                     tool_count=len(tool_blocks),
                     tool_names=[b.name for b in tool_blocks]
                 ))
 
                 # Execute tools in parallel
                 tool_results_data = await asyncio.gather(*[
-                    self._execute_single_tool(mcp_server, block)
+                    self._execute_single_tool(agent, block)
                     for block in tool_blocks
                 ], return_exceptions=True)
 
@@ -408,13 +416,13 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 tool_results = []
                 for block, result_data in zip(tool_blocks, tool_results_data):
                     if isinstance(result_data, Exception):
-                        self.events.emit(LLMToolCompleted(
+                        events.emit(LLMToolCompleted(
                             tool_name=block.name,
                             success=False
                         ))
                         result = {"success": False, "error": str(result_data)}
                     else:
-                        self.events.emit(LLMToolCompleted(
+                        events.emit(LLMToolCompleted(
                             tool_name=block.name,
                             success=True
                         ))
@@ -438,9 +446,9 @@ When you're done analyzing, provide your final answer in the structured JSON for
             f"Failed to generate structured output after {max_iterations} iterations"
         )
 
-    async def _execute_single_tool(self, mcp_server, block) -> Dict[str, Any]:
+    async def _execute_single_tool(self, agent: "Agent", block) -> Dict[str, Any]:
         """Execute a single tool."""
-        result = await mcp_server.execute_tool(block.name, block.input)
+        result = await agent.mcp_server.execute_tool(block.name, block.input)
         return result
 
     async def validate(self) -> Dict[str, Any]:

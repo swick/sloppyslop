@@ -118,7 +118,6 @@ class RunSubcommand(Subcommand):
             verbose=verbose,
             keep_branches=list(keep_branch) if keep_branch else [],
             network=network,
-            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
         )
 
         # Wire up all event handlers
@@ -169,7 +168,8 @@ class RunSubcommand(Subcommand):
                 prompt,
                 output_schema,
                 network,
-                verbose
+                verbose,
+                output
             ))
 
             # Output result as JSON
@@ -189,7 +189,8 @@ class RunSubcommand(Subcommand):
         prompt,
         output_schema,
         network,
-        verbose
+        verbose,
+        output
     ):
         """Async execution of run command."""
         async with runner:

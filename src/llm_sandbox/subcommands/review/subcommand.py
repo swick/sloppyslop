@@ -240,7 +240,6 @@ Examples:
             config,
             verbose=verbose,
             network=network,
-            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
         )
 
         # Wire up event handlers

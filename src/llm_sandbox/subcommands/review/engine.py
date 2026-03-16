@@ -718,7 +718,7 @@ The structured output should just be a high-level summary - the detailed finding
         head_result = await checkout_tool.execute({
             "commit": head_ref,
             "worktree_name": "review-head",
-        })
+        }, agent=None)
         if not head_result["success"]:
             raise RuntimeError(f"Failed to create worktree 'review-head': {head_result['error']}")
 
@@ -726,7 +726,7 @@ The structured output should just be a high-level summary - the detailed finding
         base_result = await checkout_tool.execute({
             "commit": base_ref,
             "worktree_name": "review-base",
-        })
+        }, agent=None)
         if not base_result["success"]:
             raise RuntimeError(f"Failed to create worktree 'review-base': {base_result['error']}")
 

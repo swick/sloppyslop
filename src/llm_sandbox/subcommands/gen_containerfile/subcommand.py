@@ -80,7 +80,6 @@ class GenContainerfileSubcommand(Subcommand):
             verbose=verbose,
             network="enabled",
             image=Image.DEFAULT_IMAGE,
-            warning_callback=lambda msg, ctx: output.warning(f"{msg} [{ctx}]" if ctx else msg),
         )
 
         # Wire up all event handlers

@@ -19,16 +19,12 @@ from llm_sandbox.llm_provider import (
 )
 from llm_sandbox.output import OutputService
 from llm_sandbox.runner import (
+    AgentCancelled,
     AgentCompleted,
     AgentFailed,
     AgentStarted,
-    BackgroundAgentSpawned,
-    BackgroundAgentsAllCompleted,
-    BackgroundAgentsCanceling,
-    BackgroundAgentsWaiting,
-    BranchDeleted,
     BranchKept,
-    WorktreeRemoveFailed,
+    Warning,
 )
 
 
@@ -76,6 +72,26 @@ def create_image_build_callback(output: OutputService):
     return handle_image_build
 
 
+def wire_up_container_events(container_manager, output: OutputService) -> None:
+    """Wire up container manager event handlers.
+
+    Args:
+        container_manager: ContainerManager instance
+        output: OutputService for formatting output
+    """
+    # Image pull events
+    container_manager.events.on(
+        ImagePullProgress,
+        create_image_pull_callback(output)
+    )
+
+    # Image build events
+    container_manager.events.on(
+        ImageBuildProgress,
+        create_image_build_callback(output)
+    )
+
+
 def wire_up_runner_events(runner, output: OutputService) -> None:
     """Wire up sandbox runner event handlers.
 
@@ -83,10 +99,16 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
         runner: SandboxRunner instance
         output: OutputService for formatting output
     """
+    # Warnings
+    runner.events.on(
+        Warning,
+        lambda e: output.warning(f"{e.message} [{e.context}]" if e.context else e.message)
+    )
+
     # Cleanup events
     runner.events.on(
-        BackgroundAgentsCanceling,
-        lambda e: output.info(f"Canceling {e.agent_count} background agent(s)...")
+        AgentCancelled,
+        lambda e: output.verbose(f"Cancelled agent: {e.agent.agent_id}")
     )
 
     # Branch operations
@@ -95,38 +117,36 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
         lambda e: output.info(f"Keeping branch: {e.original_name} → {e.new_name}")
     )
 
-    runner.events.on(
-        BranchDeleted,
-        lambda e: output.verbose(f"Deleted branch: {e.branch_name}")
-    )
-
-    runner.events.on(
-        WorktreeRemoveFailed,
-        lambda e: output.warning(f"Failed to remove worktree {e.name}: {e.error}")
-    )
-
     # Agent execution (unified handling)
-    def _format_agent_label(agent_id: str, is_background: bool) -> str:
+    def _format_agent_label(agent_id: str, spawn_depth: int) -> str:
         """Format agent label with optional 'Background' prefix."""
-        prefix = "Background " if is_background else ""
+        prefix = "Background " if spawn_depth > 0 else ""
         return f"{prefix}Agent {agent_id}"
 
-    runner.events.on(
-        AgentStarted,
-        lambda e: output.verbose(
-            f"\n{'='*60}\n"
-            f"[{_format_agent_label(e.agent_id, e.is_background)}] "
-            f"Starting at depth {e.spawn_depth}\n"
-            f"{'='*60}"
-            if e.is_background else
-            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] Starting execution..."
-        )
-    )
+    # Wire up LLM events for all agents (including sub-agents)
+    def _on_agent_started(e):
+        # Wire up this agent's LLM events
+        wire_up_agent_llm_events(e.agent, output)
+
+        # Display start message
+        if e.agent.spawn_depth > 0:
+            output.verbose(
+                f"\n{'='*60}\n"
+                f"[{_format_agent_label(e.agent.agent_id, e.agent.spawn_depth)}] "
+                f"Starting at depth {e.agent.spawn_depth}\n"
+                f"{'='*60}"
+            )
+        else:
+            output.verbose(
+                f"\n[{_format_agent_label(e.agent.agent_id, e.agent.spawn_depth)}] Starting execution..."
+            )
+
+    runner.events.on(AgentStarted, _on_agent_started)
 
     runner.events.on(
         AgentCompleted,
         lambda e: output.verbose(
-            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] "
+            f"\n[{_format_agent_label(e.agent.agent_id, e.agent.spawn_depth)}] "
             f"✓ Completed successfully"
         )
     )
@@ -134,42 +154,19 @@ def wire_up_runner_events(runner, output: OutputService) -> None:
     runner.events.on(
         AgentFailed,
         lambda e: output.error(
-            f"\n[{_format_agent_label(e.agent_id, e.is_background)}] "
+            f"\n[{_format_agent_label(e.agent.agent_id, e.agent.spawn_depth)}] "
             f"Failed: {e.error}"
         )
     )
 
-    # Background agent events
-    runner.events.on(
-        BackgroundAgentSpawned,
-        lambda e: output.verbose(
-            f"→ Spawned background agent '{e.agent_id}' "
-            f"(depth {e.spawn_depth}, {e.tool_count} tools)"
-        )
-    )
-
-    runner.events.on(
-        BackgroundAgentsWaiting,
-        lambda e: output.verbose(
-            f"\nWaiting for {e.agent_count} background agent(s) to complete...\n" +
-            "\n".join(f"  - {aid}" for aid in e.agent_ids)
-        )
-    )
-
-    runner.events.on(
-        BackgroundAgentsAllCompleted,
-        lambda e: output.verbose(f"✓ All {e.agent_count} agent(s) completed")
-    )
-
-
-def wire_up_llm_events(llm_provider, output: OutputService) -> None:
-    """Wire up LLM provider event handlers.
+def wire_up_agent_llm_events(agent, output: OutputService) -> None:
+    """Wire up LLM event handlers for an agent.
 
     Args:
-        llm_provider: LLMProvider instance
+        agent: Agent instance (with events EventEmitter)
         output: OutputService for formatting output
     """
-    llm_provider.events.on(
+    agent.events.on(
         LLMIterationStarted,
         lambda e: output.verbose(
             f"\n{'='*60}\n"
@@ -178,24 +175,24 @@ def wire_up_llm_events(llm_provider, output: OutputService) -> None:
         )
     )
 
-    llm_provider.events.on(
+    agent.events.on(
         LLMResponseReceived,
         lambda e: output.verbose(f"Response stop reason: {e.stop_reason}")
     )
 
-    llm_provider.events.on(
+    agent.events.on(
         LLMToolsExecuting,
         lambda e: output.verbose(f"→ Executing {e.tool_count} tool(s): {', '.join(e.tool_names)}")
     )
 
-    llm_provider.events.on(
+    agent.events.on(
         LLMToolCompleted,
         lambda e: output.verbose(
             f"← Tool {e.tool_name}: {'✓' if e.success else '✗'}"
         )
     )
 
-    llm_provider.events.on(
+    agent.events.on(
         LLMJSONParseError,
         lambda e: output.error(f"Failed to parse JSON from LLM response: {e.error}")
     )
@@ -204,8 +201,9 @@ def wire_up_llm_events(llm_provider, output: OutputService) -> None:
 def wire_up_all_events(runner, output: OutputService) -> None:
     """Wire up all event handlers for a runner and its components.
 
-    Convenience function that wires up events for the runner, its container manager,
-    and its LLM provider (if available).
+    Convenience function that wires up events for the runner and its container manager.
+    Note: Agent LLM events must be wired up separately using wire_up_agent_llm_events()
+    after creating the agent.
 
     Args:
         runner: SandboxRunner instance
@@ -216,7 +214,3 @@ def wire_up_all_events(runner, output: OutputService) -> None:
 
     # Wire up container manager events
     wire_up_container_events(runner.container_manager, output)
-
-    # Wire up LLM provider events (if available)
-    if runner.llm_provider:
-        wire_up_llm_events(runner.llm_provider, output)

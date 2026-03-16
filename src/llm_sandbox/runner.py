@@ -19,30 +19,6 @@ from llm_sandbox.mcp_tools import MCPServer
 
 # SandboxRunner event types
 @dataclass
-class WorktreeCreated:
-    """Event: Worktree created."""
-
-    name: str
-    path: str
-    branch: str
-
-
-@dataclass
-class WorktreeRemoveFailed:
-    """Event: Worktree removal failed."""
-
-    name: str
-    error: str
-
-
-@dataclass
-class BranchDeleted:
-    """Event: Branch deleted."""
-
-    branch_name: str
-
-
-@dataclass
 class BranchKept:
     """Event: Branch kept (renamed) during cleanup."""
 
@@ -54,57 +30,37 @@ class BranchKept:
 class AgentStarted:
     """Event: Agent started execution."""
 
-    agent_id: str
-    is_background: bool = False
-    spawn_depth: int = 0  # Only meaningful if is_background=True
+    agent: "Agent"
 
 
 @dataclass
 class AgentCompleted:
     """Event: Agent completed successfully."""
 
-    agent_id: str
-    is_background: bool = False
+    agent: "Agent"
 
 
 @dataclass
 class AgentFailed:
     """Event: Agent failed with error."""
 
-    agent_id: str
+    agent: "Agent"
     error: str
-    is_background: bool = False
 
 
 @dataclass
-class BackgroundAgentsCanceling:
-    """Event: Background agents being canceled."""
+class AgentCancelled:
+    """Event: Agent cancelled during cleanup."""
 
-    agent_count: int
-
-
-@dataclass
-class BackgroundAgentSpawned:
-    """Event: Background agent spawned."""
-
-    agent_id: str
-    spawn_depth: int
-    tool_count: int
+    agent: "Agent"
 
 
 @dataclass
-class BackgroundAgentsWaiting:
-    """Event: Waiting for background agents to complete."""
+class Warning:
+    """Event: Warning message."""
 
-    agent_ids: List[str]
-    agent_count: int
-
-
-@dataclass
-class BackgroundAgentsAllCompleted:
-    """Event: All background agents completed."""
-
-    agent_count: int
+    message: str
+    context: str = ""
 
 
 # Re-export for convenience
@@ -114,17 +70,23 @@ __all__ = ["SandboxRunner", "Agent"]
 class TaskManager:
     """Manages lifecycle of agent tasks (foreground and background) with proper synchronization."""
 
-    def __init__(self):
-        """Initialize task manager."""
-        self._tasks: Dict[str, asyncio.Task] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, events: EventEmitter):
+        """Initialize task manager.
 
-    async def spawn(self, agent_id: str, coro):
+        Args:
+            events: EventEmitter instance for emitting agent lifecycle events
+        """
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._agents: Dict[str, "Agent"] = {}
+        self._lock = asyncio.Lock()
+        self._events = events
+
+    async def spawn(self, agent: "Agent", coro):
         """
         Spawn background task with proper tracking.
 
         Args:
-            agent_id: Unique agent identifier
+            agent: Agent instance being spawned
             coro: Coroutine to run as background task
 
         Returns:
@@ -134,10 +96,12 @@ class TaskManager:
             ValueError: If agent_id already exists
         """
         async with self._lock:
+            agent_id = agent._agent_id
             if agent_id in self._tasks:
                 raise ValueError(f"Agent {agent_id} already exists")
             task = asyncio.create_task(coro)
             self._tasks[agent_id] = task
+            self._agents[agent_id] = agent
         return agent_id
 
     async def wait_for(
@@ -184,16 +148,19 @@ class TaskManager:
             Number of agents that were canceled
         """
         async with self._lock:
-            agent_count = len(self._tasks)
+            agent_ids = list(self._tasks.keys())
             tasks = list(self._tasks.values())
+            agents = [self._agents[aid] for aid in agent_ids]
             self._tasks.clear()
+            self._agents.clear()
 
         # Cancel all tasks but don't propagate cancel to children
         # to avoid recursion depth issues
-        for task in tasks:
+        for agent, task in zip(agents, tasks):
             if not task.done():
                 try:
                     task.cancel()
+                    self._events.emit(AgentCancelled(agent=agent))
                 except Exception:
                     pass  # Ignore errors during cancellation
 
@@ -206,7 +173,7 @@ class TaskManager:
             except Exception:
                 pass  # Ignore other errors during cleanup
 
-        return agent_count
+        return len(agent_ids)
 
     def get_running(self) -> List[str]:
         """Get list of currently running agent IDs (non-async for compatibility)."""
@@ -224,7 +191,8 @@ class Agent:
         output_schema: Dict[str, Any],
         mcp_server: MCPServer,
         agent_id: Optional[str] = None,
-        is_background: bool = False
+        spawn_depth: int = 0,
+        parent: Optional["Agent"] = None
     ):
         """
         Initialize agent.
@@ -235,20 +203,25 @@ class Agent:
             output_schema: JSON schema for structured output
             mcp_server: MCP server instance with available tools
             agent_id: Optional agent identifier
-            is_background: Whether this is a background agent
+            spawn_depth: Nesting depth (0=foreground, >0=background)
+            parent: Optional parent agent (for spawned child agents)
         """
         self.runner = runner
         self.prompt = prompt
         self.output_schema = output_schema
         self.mcp_server = mcp_server
-        self.is_background = is_background
+        self.spawn_depth = spawn_depth
+        self.parent = parent
         self._execution_started = False  # Track execution state
         self._llm_provider: Optional[LLMProvider] = None  # Created on execute
+        self.events = EventEmitter()  # Agent-specific event emitter
+
+        # Give tools access to this agent
+        self.mcp_server.agent = self
 
         # Generate agent_id immediately if not provided
         if agent_id is None:
-            prefix = "bg-" if is_background else ""
-            agent_id = f"{prefix}{str(uuid.uuid4())[:8]}"
+            agent_id = str(uuid.uuid4())[:8]
         self._agent_id = agent_id
 
     async def execute(self) -> str:
@@ -271,41 +244,23 @@ class Agent:
             raise RuntimeError("Runner not properly initialized")
 
         # Create execution coroutine
-        coro = self._execute(self.is_background)
+        coro = self._execute()
 
         # Spawn via task manager (tracks both foreground and background)
-        await self.runner._task_manager.spawn(self._agent_id, coro)
-
-        # Emit spawned event for background agents
-        if self.is_background:
-            spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
-            tool_count = len(self.mcp_server.tools) if self.mcp_server else 0
-            self.runner.events.emit(BackgroundAgentSpawned(
-                agent_id=self._agent_id,
-                spawn_depth=spawn_depth,
-                tool_count=tool_count
-            ))
+        await self.runner._task_manager.spawn(self, coro)
 
         return self._agent_id
 
-    async def _execute(self, background: bool) -> Dict[str, Any]:
+    async def _execute(self) -> Dict[str, Any]:
         """
         Execute the agent with proper event handling.
-
-        Args:
-            background: Whether this is a background agent
 
         Returns:
             Agent execution result
         """
         try:
             # Emit start event
-            spawn_depth = self.mcp_server.spawn_depth if self.mcp_server else 0
-            self.runner.events.emit(AgentStarted(
-                agent_id=self._agent_id,
-                is_background=background,
-                spawn_depth=spawn_depth
-            ))
+            self.runner.events.emit(AgentStarted(agent=self))
 
             # Create agent-specific LLM provider
             self._llm_provider = create_llm_provider(
@@ -316,26 +271,20 @@ class Agent:
             # Execute agent (uses shared instance_id, container_id, worktrees_base_dir)
             result = await self._llm_provider.generate_structured(
                 self.prompt,
-                self.mcp_server,
+                self,
                 self.output_schema,
+                self.events,
                 verbose=self.runner._verbose,
             )
 
             # Emit completion event
-            self.runner.events.emit(AgentCompleted(
-                agent_id=self._agent_id,
-                is_background=background
-            ))
+            self.runner.events.emit(AgentCompleted(agent=self))
 
             return result
 
         except Exception as e:
             # Emit failure event
-            self.runner.events.emit(AgentFailed(
-                agent_id=self._agent_id,
-                error=str(e),
-                is_background=background
-            ))
+            self.runner.events.emit(AgentFailed(agent=self, error=str(e)))
             raise
 
     async def wait(self, timeout: Optional[float] = None) -> Dict[str, Any]:
@@ -383,7 +332,6 @@ class SandboxRunner:
         keep_branches: Optional[List[str]] = None,
         network: Optional[str] = None,
         image: Optional[str] = None,
-        warning_callback: Optional[callable] = None,
     ):
         """
         Initialize sandbox runner and setup environment.
@@ -395,7 +343,6 @@ class SandboxRunner:
             keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
             network: Network mode override (optional, uses config if not specified)
             image: Image name/tag override (optional, uses config if not specified)
-            warning_callback: Optional callback for warnings (receives message: str, context: str)
         """
         self.project_path = project_path
         self.config = config
@@ -405,9 +352,6 @@ class SandboxRunner:
 
         # Event emitter for progress and status updates
         self.events = EventEmitter()
-
-        # Warning callback
-        self._warning_callback = warning_callback
 
         # Public API - Components for tool access
         self.container_manager = ContainerManager()
@@ -420,7 +364,7 @@ class SandboxRunner:
         # Initialize locks immediately so they're always available
         self._git_lock = asyncio.Lock()
         self._worktrees_lock = asyncio.Lock()
-        self._task_manager = TaskManager()
+        self._task_manager = TaskManager(self.events)
 
         # Review feedback storage (for PR review workflow)
         # Type is List[FeedbackItem] but kept as List[Any] to avoid circular dependency
@@ -499,17 +443,6 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
-    def _warn(self, message: str, context: str = "") -> None:
-        """
-        Issue a warning via the warning callback if set.
-
-        Args:
-            message: Warning message
-            context: Optional context information
-        """
-        if self._warning_callback:
-            self._warning_callback(message, context)
-
     def _setup_git_symlink(self) -> None:
         """
         Create symlink in container so worktree .git files work correctly.
@@ -579,7 +512,7 @@ class SandboxRunner:
                         pass
 
                     if not branch_exists:
-                        self._warn(f"Branch {full_branch_name} does not exist, skipping", "cleanup_worktrees")
+                        self.events.emit(Warning(f"Branch {full_branch_name} does not exist, skipping", "cleanup_worktrees"))
                         continue
 
                     # Create a copy of the branch with the new name (force overwrite if exists)
@@ -590,9 +523,9 @@ class SandboxRunner:
                     ))
 
                 except Exception as e:
-                    self._warn(f"Failed to copy branch {full_branch_name}: {e}", "cleanup_worktrees")
+                    self.events.emit(Warning(f"Failed to copy branch {full_branch_name}: {e}", "cleanup_worktrees"))
             else:
-                self._warn(f"Branch {branch_name} was not created in this session", "cleanup_worktrees")
+                self.events.emit(Warning(f"Branch {branch_name} was not created in this session", "cleanup_worktrees"))
 
         # Step 2: Now remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -601,10 +534,7 @@ class SandboxRunner:
                 try:
                     self.git_ops.remove_worktree(worktree_path)
                 except Exception as e:
-                    self.events.emit(WorktreeRemoveFailed(
-                        name=worktree_name,
-                        error=str(e)
-                    ))
+                    self.events.emit(Warning(f"Failed to remove worktree {worktree_name}: {e}", "cleanup_worktrees"))
 
         # Delete ALL remaining llm-container/{instance_id}/* branches
         instance_prefix = f"llm-container/{self.instance_id}/"
@@ -617,18 +547,17 @@ class SandboxRunner:
             for branch_name in remaining_branches:
                 try:
                     self.git_ops.delete_branch(branch_name)
-                    self.events.emit(BranchDeleted(branch_name=branch_name))
                 except Exception as e:
-                    self._warn(f"Failed to delete branch {branch_name}: {e}", "cleanup_worktrees")
+                    self.events.emit(Warning(f"Failed to delete branch {branch_name}: {e}", "cleanup_worktrees"))
         except Exception as e:
-            self._warn(f"Failed to list remaining branches: {e}", "cleanup_worktrees")
+            self.events.emit(Warning(f"Failed to list remaining branches: {e}", "cleanup_worktrees"))
 
         # Remove instance directory
         if self.worktrees_base_dir.exists():
             try:
                 shutil.rmtree(self.worktrees_base_dir)
             except Exception as e:
-                self._warn(f"Failed to remove instance directory: {e}", "cleanup_worktrees")
+                self.events.emit(Warning(f"Failed to remove instance directory: {e}", "cleanup_worktrees"))
 
     async def _cleanup_async(self) -> None:
         """
@@ -644,9 +573,7 @@ class SandboxRunner:
 
         # Cancel background agents with proper async handling
         if self._task_manager:
-            canceled_count = await self._task_manager.cancel_all()
-            if canceled_count > 0:
-                self.events.emit(BackgroundAgentsCanceling(agent_count=canceled_count))
+            await self._task_manager.cancel_all()
 
         # Clear review feedback
         self._review_feedback.clear()
@@ -656,7 +583,7 @@ class SandboxRunner:
             try:
                 self.container_manager.cleanup(self.container_id)
             except Exception as e:
-                self._warn(f"Failed to cleanup container: {e}", "cleanup")
+                self.events.emit(Warning(f"Failed to cleanup container: {e}", "cleanup"))
             finally:
                 self.container_id = None
 
@@ -664,4 +591,4 @@ class SandboxRunner:
         try:
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
-            self._warn(f"Failed to cleanup worktrees: {e}", "cleanup")
+            self.events.emit(Warning(f"Failed to cleanup worktrees: {e}", "cleanup"))
