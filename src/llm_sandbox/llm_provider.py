@@ -4,13 +4,64 @@ import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 
-import click
 from anthropic import AsyncAnthropic, Anthropic, AnthropicVertex
 
 from llm_sandbox.config import AnthropicConfig, VertexAIConfig
+from llm_sandbox.events import EventEmitter
 from llm_sandbox.mcp_tools import MCPServer
+
+
+# LLMProvider event types
+@dataclass
+class LLMIterationStarted:
+    """Event: LLM iteration started."""
+
+    iteration: int
+    max_iterations: int
+
+
+@dataclass
+class LLMMessageSent:
+    """Event: Message sent to LLM."""
+
+    role: str
+    content_preview: str
+    tool_uses: List[str]
+
+
+@dataclass
+class LLMResponseReceived:
+    """Event: Response received from LLM."""
+
+    stop_reason: str
+    usage: dict
+
+
+@dataclass
+class LLMToolsExecuting:
+    """Event: Executing multiple tools concurrently."""
+
+    tool_count: int
+    tool_names: List[str]
+
+
+@dataclass
+class LLMToolCompleted:
+    """Event: Tool execution completed."""
+
+    tool_name: str
+    success: bool
+
+
+@dataclass
+class LLMJSONParseError:
+    """Event: Failed to parse JSON from LLM response."""
+
+    error: str
+    json_text: str
 
 
 def extract_json_from_text(text: str) -> str:
@@ -66,6 +117,7 @@ class LLMProvider(ABC):
         self.base_system_prompt = base_system_prompt
         self.conversation_history: List[Dict[str, Any]] = []
         self.verbose: bool = False
+        self.events = EventEmitter()
 
     def _generate_tools_description(self, mcp_server: MCPServer) -> str:
         """Generate a description of available tools from the MCP server."""
@@ -98,67 +150,13 @@ class LLMProvider(ABC):
         self.conversation_history.append({"role": "assistant", "content": content})
 
     def _log_message(self, prefix: str, message: Dict[str, Any]):
-        """Log a message if verbose mode is enabled."""
-        if not self.verbose:
-            return
+        """Log a message if verbose mode is enabled.
 
-        role = message.get("role", "unknown")
-        content = message.get("content")
-
-        click.echo(f"\n{prefix} {role.capitalize()} message:")
-        click.echo(f"{'-'*60}")
-
-        if isinstance(content, str):
-            if len(content) > 500:
-                click.echo(f"{content[:500]}...")
-                click.echo(f"[{len(content)} characters total]")
-            else:
-                click.echo(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    block_type = block.get("type", "unknown")
-                    if block_type == "text":
-                        text = block.get("text", "")
-                        click.echo(f"[Text block]")
-                        if len(text) > 500:
-                            click.echo(f"{text[:500]}...")
-                            click.echo(f"[{len(text)} characters total]")
-                        else:
-                            click.echo(text)
-                    elif block_type == "tool_use":
-                        click.echo(f"[Tool use: {block.get('name')}]")
-                        click.echo(f"ID: {block.get('id')}")
-                        click.echo(f"Input: {json.dumps(block.get('input', {}), indent=2)}")
-                    elif block_type == "tool_result":
-                        click.echo(f"[Tool result for: {block.get('tool_use_id')}]")
-                        result_content = block.get("content", "")
-                        if len(result_content) > 500:
-                            click.echo(f"{result_content[:500]}...")
-                            click.echo(f"[{len(result_content)} characters total]")
-                        else:
-                            click.echo(result_content)
-                    else:
-                        click.echo(f"[{block_type}]")
-                        click.echo(json.dumps(block, indent=2))
-                    click.echo()
-                else:
-                    # Handle anthropic content blocks (objects with .type attribute)
-                    if hasattr(block, 'type'):
-                        if block.type == "text":
-                            click.echo(f"[Text block]")
-                            if len(block.text) > 500:
-                                click.echo(f"{block.text[:500]}...")
-                                click.echo(f"[{len(block.text)} characters total]")
-                            else:
-                                click.echo(block.text)
-                        elif block.type == "tool_use":
-                            click.echo(f"[Tool use: {block.name}]")
-                            click.echo(f"ID: {block.id}")
-                            click.echo(f"Input: {json.dumps(block.input, indent=2)}")
-                        click.echo()
-
-        click.echo(f"{'-'*60}")
+        Note: Verbose message logging now handled by event system.
+        This method kept for compatibility but does nothing.
+        """
+        # Verbose logging now handled by events in CLI layer
+        pass
 
     @abstractmethod
     async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
@@ -342,25 +340,16 @@ When you're done analyzing, provide your final answer in the structured JSON for
         # Add initial user message
         self._add_user_message(prompt)
 
-        if self.verbose:
-            click.echo(f"\n{'='*60}")
-            click.echo(f"Initial user prompt:")
-            click.echo(f"{'='*60}")
-            if len(prompt) > 500:
-                click.echo(f"{prompt[:500]}...")
-                click.echo(f"[{len(prompt)} characters total]")
-            else:
-                click.echo(prompt)
-            click.echo(f"{'='*60}")
+        # Verbose logging handled by event handlers in CLI layer
 
         iteration = 0
         while iteration < max_iterations:
             iteration += 1
 
-            if self.verbose:
-                click.echo(f"\n{'='*60}")
-                click.echo(f"Iteration {iteration}/{max_iterations}")
-                click.echo(f"{'='*60}")
+            self.events.emit(LLMIterationStarted(
+                iteration=iteration,
+                max_iterations=max_iterations
+            ))
 
             # Make API call
             if self.backend == "vertex-ai":
@@ -393,11 +382,10 @@ When you're done analyzing, provide your final answer in the structured JSON for
             # Add assistant response to conversation
             self._add_assistant_message(response.content)
 
-            if self.verbose:
-                click.echo(f"\nResponse stop reason: {response.stop_reason}")
-                text_blocks = sum(1 for b in response.content if b.type == "text")
-                tool_blocks = sum(1 for b in response.content if b.type == "tool_use")
-                click.echo(f"Response content: {text_blocks} text block(s), {tool_blocks} tool use block(s)")
+            self.events.emit(LLMResponseReceived(
+                stop_reason=response.stop_reason,
+                usage=response.usage.__dict__ if hasattr(response, 'usage') else {}
+            ))
 
             # Log assistant message
             self._log_message("→", self.conversation_history[-1])
@@ -417,28 +405,17 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                         try:
                             result = json.loads(json_text)
-                            if self.verbose:
-                                click.echo(f"\n✓ Successfully parsed JSON output")
                             return result
                         except json.JSONDecodeError as e:
-                            click.echo(f"\n{'='*60}")
-                            click.echo(f"ERROR: Failed to parse JSON from LLM response")
-                            click.echo(f"{'='*60}")
-                            click.echo(f"Error: {e}")
-                            click.echo(f"\nAttempted to parse:")
-                            click.echo(f"{'-'*60}")
-                            click.echo(json_text)
-                            click.echo(f"{'-'*60}")
+                            self.events.emit(LLMJSONParseError(
+                                error=str(e),
+                                json_text=json_text
+                            ))
+                            # Error details in exception message for CLI layer to handle
+                            error_msg = f"Failed to parse JSON from LLM response: {e}\n\nAttempted JSON:\n{json_text[:500]}"
                             if self.backend == "vertex-ai" and json_text != text:
-                                click.echo(f"\nOriginal response:")
-                                click.echo(f"{'-'*60}")
-                                click.echo(text)
-                                click.echo(f"{'-'*60}")
-                            click.echo()
-                            raise RuntimeError(
-                                f"Failed to parse JSON from LLM response. "
-                                f"See output above for details."
-                            )
+                                error_msg += f"\n\nOriginal response:\n{text[:500]}"
+                            raise RuntimeError(error_msg)
 
                 raise RuntimeError("Response ended without valid JSON output")
 
@@ -446,8 +423,10 @@ When you're done analyzing, provide your final answer in the structured JSON for
             if response.stop_reason == "tool_use":
                 tool_blocks = [b for b in response.content if b.type == "tool_use"]
 
-                if self.verbose:
-                    click.echo(f"\n→ Executing {len(tool_blocks)} tool(s) concurrently")
+                self.events.emit(LLMToolsExecuting(
+                    tool_count=len(tool_blocks),
+                    tool_names=[b.name for b in tool_blocks]
+                ))
 
                 # Execute tools in parallel
                 tool_results_data = await asyncio.gather(*[
@@ -459,20 +438,17 @@ When you're done analyzing, provide your final answer in the structured JSON for
                 tool_results = []
                 for block, result_data in zip(tool_blocks, tool_results_data):
                     if isinstance(result_data, Exception):
-                        if self.verbose:
-                            click.echo(f"← Tool {block.name} failed: {result_data}")
+                        self.events.emit(LLMToolCompleted(
+                            tool_name=block.name,
+                            success=False
+                        ))
                         result = {"success": False, "error": str(result_data)}
                     else:
+                        self.events.emit(LLMToolCompleted(
+                            tool_name=block.name,
+                            success=True
+                        ))
                         result = result_data
-
-                    if self.verbose:
-                        click.echo(f"← Tool result for {block.name}:")
-                        result_str = json.dumps(result, indent=2)
-                        if len(result_str) > 500:
-                            click.echo(f"  {result_str[:500]}...")
-                            click.echo(f"  [{len(result_str)} characters total]")
-                        else:
-                            click.echo(f"  {result_str}")
 
                     tool_results.append({
                         "type": "tool_result",
@@ -482,9 +458,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
                 # Add tool results to conversation
                 self._add_user_message(tool_results)
-
-                if self.verbose:
-                    click.echo(f"\nTotal messages in conversation: {len(self.conversation_history)}")
                 self._log_message("←", self.conversation_history[-1])
 
                 continue
@@ -497,10 +470,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
 
     async def _execute_single_tool(self, mcp_server, block) -> Dict[str, Any]:
         """Execute a single tool."""
-        if self.verbose:
-            click.echo(f"\n→ Tool call: {block.name}")
-            click.echo(f"  Input: {json.dumps(block.input, indent=2)}")
-
         result = await mcp_server.execute_tool(block.name, block.input)
         return result
 

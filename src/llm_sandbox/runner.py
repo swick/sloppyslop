@@ -9,14 +9,164 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import click
-
 from llm_sandbox.config import Config, get_provider_config
 from llm_sandbox.container import ContainerManager
+from llm_sandbox.events import EventEmitter
 from llm_sandbox.git_ops import GitOperations
-from llm_sandbox.image import Image
+from llm_sandbox.image import Image, ImageBuildStarted, ImageSelected
 from llm_sandbox.llm_provider import LLMProvider, create_llm_provider
 from llm_sandbox.mcp_tools import MCPServer
+
+
+# SandboxRunner event types
+@dataclass
+class InstanceCreated:
+    """Event: Instance ID generated."""
+
+    instance_id: str
+    timestamp: datetime
+
+
+@dataclass
+class ContainerStarted:
+    """Event: Container started."""
+
+    container_id: str
+    image: str
+    timestamp: datetime
+
+
+@dataclass
+class WorktreeCreated:
+    """Event: Worktree created."""
+
+    name: str
+    path: str
+    branch: str
+
+
+@dataclass
+class WorktreeRemoveFailed:
+    """Event: Worktree removal failed."""
+
+    name: str
+    error: str
+
+
+@dataclass
+class BranchDeleted:
+    """Event: Branch deleted."""
+
+    branch_name: str
+
+
+@dataclass
+class BranchKept:
+    """Event: Branch kept (renamed) during cleanup."""
+
+    original_name: str
+    new_name: str
+
+
+@dataclass
+class WarningIssued:
+    """Event: Generic warning message."""
+
+    message: str
+    context: str = ""
+
+
+@dataclass
+class AgentStarted:
+    """Event: Agent started execution."""
+
+    agent_id: str
+
+
+@dataclass
+class AgentCompleted:
+    """Event: Agent completed successfully."""
+
+    agent_id: str
+
+
+@dataclass
+class AgentFailed:
+    """Event: Agent failed with error."""
+
+    agent_id: str
+    error: str
+
+
+@dataclass
+class ParallelAgentsStarted:
+    """Event: Multiple agents started in parallel."""
+
+    agent_count: int
+    container_id: str
+    instance_id: str
+
+
+@dataclass
+class CleanupStarted:
+    """Event: Cleanup phase started."""
+
+    component: str  # 'container', 'worktrees', or 'background_agents'
+
+
+@dataclass
+class BackgroundAgentsCanceling:
+    """Event: Background agents being canceled."""
+
+    agent_count: int
+
+
+@dataclass
+class BackgroundAgentSpawned:
+    """Event: Background agent spawned."""
+
+    agent_id: str
+    spawn_depth: int
+    tool_count: int
+
+
+@dataclass
+class BackgroundAgentStarting:
+    """Event: Background agent starting execution."""
+
+    agent_id: str
+    spawn_depth: int
+
+
+@dataclass
+class BackgroundAgentCompleted:
+    """Event: Background agent completed successfully."""
+
+    agent_id: str
+
+
+@dataclass
+class BackgroundAgentFailed:
+    """Event: Background agent failed."""
+
+    agent_id: str
+    error: str
+
+
+@dataclass
+class BackgroundAgentsWaiting:
+    """Event: Waiting for background agents to complete."""
+
+    agent_ids: List[str]
+    agent_count: int
+
+
+@dataclass
+class BackgroundAgentsAllCompleted:
+    """Event: All background agents completed."""
+
+    agent_count: int
+
 
 # Re-export for convenience
 __all__ = ["SandboxRunner", "AgentConfig"]
@@ -143,6 +293,9 @@ class SandboxRunner:
         # Get provider config
         self.provider_name, self.provider_config = get_provider_config(config)
 
+        # Event emitter for progress and status updates
+        self.events = EventEmitter()
+
         # Public API - Components for tool access
         self.container_manager = ContainerManager()
         self.git_ops = GitOperations(project_path)
@@ -225,7 +378,10 @@ class SandboxRunner:
             )
 
             if exit_code != 0:
-                click.echo(f"Warning: Failed to create directory structure for git symlink: {stderr}")
+                self.events.emit(WarningIssued(
+                    message=f"Failed to create directory structure for git symlink: {stderr}",
+                    context="setup_git_symlink"
+                ))
                 return
 
             # Create symlink from host path to /project/.git
@@ -236,10 +392,16 @@ class SandboxRunner:
             )
 
             if exit_code != 0:
-                click.echo(f"Warning: Failed to create git symlink: {stderr}")
+                self.events.emit(WarningIssued(
+                    message=f"Failed to create git symlink: {stderr}",
+                    context="setup_git_symlink"
+                ))
 
         except Exception as e:
-            click.echo(f"Warning: Failed to setup git symlink: {e}")
+            self.events.emit(WarningIssued(
+                message=f"Failed to setup git symlink: {e}",
+                context="setup_git_symlink"
+            ))
 
     def _cleanup_worktrees(self, keep_branches: List[str]) -> None:
         """
@@ -270,17 +432,29 @@ class SandboxRunner:
                         pass
 
                     if not branch_exists:
-                        click.echo(f"Warning: Branch {full_branch_name} does not exist, skipping")
+                        self.events.emit(WarningIssued(
+                            message=f"Branch {full_branch_name} does not exist, skipping",
+                            context="cleanup_worktrees"
+                        ))
                         continue
 
-                    click.echo(f"Keeping branch: {full_branch_name} → {branch_name}")
                     # Create a copy of the branch with the new name (force overwrite if exists)
                     self.git_ops.repo.git.branch("-f", branch_name, full_branch_name)
+                    self.events.emit(BranchKept(
+                        original_name=full_branch_name,
+                        new_name=branch_name
+                    ))
 
                 except Exception as e:
-                    click.echo(f"Warning: Failed to copy branch {full_branch_name}: {e}")
+                    self.events.emit(WarningIssued(
+                        message=f"Failed to copy branch {full_branch_name}: {e}",
+                        context="cleanup_worktrees"
+                    ))
             else:
-                click.echo(f"Warning: Branch {branch_name} was not created in this session")
+                self.events.emit(WarningIssued(
+                    message=f"Branch {branch_name} was not created in this session",
+                    context="cleanup_worktrees"
+                ))
 
         # Step 2: Now remove all worktrees
         for worktree_name in self.created_worktrees:
@@ -289,7 +463,10 @@ class SandboxRunner:
                 try:
                     self.git_ops.remove_worktree(worktree_path)
                 except Exception as e:
-                    click.echo(f"Warning: Failed to remove worktree {worktree_name}: {e}")
+                    self.events.emit(WorktreeRemoveFailed(
+                        name=worktree_name,
+                        error=str(e)
+                    ))
 
         # Delete ALL remaining llm-container/{instance_id}/* branches
         instance_prefix = f"llm-container/{self.instance_id}/"
@@ -301,19 +478,28 @@ class SandboxRunner:
             ]
             for branch_name in remaining_branches:
                 try:
-                    click.echo(f"Deleting temporary branch: {branch_name}")
                     self.git_ops.delete_branch(branch_name)
+                    self.events.emit(BranchDeleted(branch_name=branch_name))
                 except Exception as e:
-                    click.echo(f"Warning: Failed to delete branch {branch_name}: {e}")
+                    self.events.emit(WarningIssued(
+                        message=f"Failed to delete branch {branch_name}: {e}",
+                        context="cleanup_worktrees"
+                    ))
         except Exception as e:
-            click.echo(f"Warning: Failed to list remaining branches: {e}")
+            self.events.emit(WarningIssued(
+                message=f"Failed to list remaining branches: {e}",
+                context="cleanup_worktrees"
+            ))
 
         # Remove instance directory
         if self.worktrees_base_dir.exists():
             try:
                 shutil.rmtree(self.worktrees_base_dir)
             except Exception as e:
-                click.echo(f"Warning: Failed to remove instance directory: {e}")
+                self.events.emit(WarningIssued(
+                    message=f"Failed to remove instance directory: {e}",
+                    context="cleanup_worktrees"
+                ))
 
     async def setup(
         self,
@@ -348,7 +534,10 @@ class SandboxRunner:
             self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
         )
         self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
-        click.echo(f"Instance ID: {self.instance_id}")
+        self.events.emit(InstanceCreated(
+            instance_id=self.instance_id,
+            timestamp=datetime.now()
+        ))
 
         # Step 2: Get container image (build if necessary)
         if image:
@@ -361,18 +550,26 @@ class SandboxRunner:
                 self.project_path,
                 self.container_manager,
             )
+            # Forward image events to runner's event emitter
+            image_manager.events.on(ImageSelected, lambda e: self.events.emit(e))
+            image_manager.events.on(ImageBuildStarted, lambda e: self.events.emit(e))
             image_tag = image_manager.get_image()
 
         # Step 3: Create and start container
-        self.container_id = self.container_manager.create_container(
+        container_info = self.container_manager.create_container(
             image_tag,
             self.project_path,
             self.worktrees_base_dir,
             self._network_mode,
         )
+        self.container_id = container_info.container_id
 
         self.container_manager.start_container(self.container_id)
-        click.echo(f"Container started: {self.container_id[:12]}")
+        self.events.emit(ContainerStarted(
+            container_id=self.container_id,
+            image=container_info.image,
+            timestamp=datetime.now()
+        ))
 
         # Create symlink in container so worktree .git files work
         # The .git file in a worktree contains: gitdir: /host/path/.git/worktrees/name
@@ -432,8 +629,7 @@ class SandboxRunner:
         """
         agent_id = agent.agent_id or str(uuid.uuid4())[:8]
 
-        if verbose:
-            click.echo(f"\n[Agent {agent_id}] Starting execution...")
+        self.events.emit(AgentStarted(agent_id=agent_id))
 
         # Create agent-specific LLM provider
         llm_provider = self._create_agent_llm_provider(agent_id)
@@ -446,8 +642,7 @@ class SandboxRunner:
             verbose=verbose,
         )
 
-        if verbose:
-            click.echo(f"\n[Agent {agent_id}] Completed successfully")
+        self.events.emit(AgentCompleted(agent_id=agent_id))
 
         return result
 
@@ -485,14 +680,11 @@ class SandboxRunner:
         self._verbose = verbose
 
         try:
-            if verbose:
-                click.echo(f"\n{'='*60}")
-                click.echo(f"Running {len(agents)} agent(s) in parallel")
-                click.echo(f"Shared environment:")
-                click.echo(f"  - Container ID: {self.container_id[:12]}")
-                click.echo(f"  - Instance ID: {self.instance_id}")
-                click.echo(f"  - Worktrees dir: {self.worktrees_base_dir}")
-                click.echo(f"{'='*60}")
+            self.events.emit(ParallelAgentsStarted(
+                agent_count=len(agents),
+                container_id=self.container_id,
+                instance_id=self.instance_id
+            ))
 
             # Run all agents in parallel
             results = await asyncio.gather(*[
@@ -505,8 +697,10 @@ class SandboxRunner:
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     agent_id = agents[i].agent_id or f"agent-{i}"
-                    if verbose:
-                        click.echo(f"\n[Agent {agent_id}] Failed with error: {result}")
+                    self.events.emit(AgentFailed(
+                        agent_id=agent_id,
+                        error=str(result)
+                    ))
                     final_results.append({
                         "success": False,
                         "error": str(result),
@@ -541,7 +735,7 @@ class SandboxRunner:
         if self._background_task_manager:
             running_agents = self._background_task_manager.get_running_agents()
             if running_agents:
-                click.echo(f"Canceling {len(running_agents)} background agent(s)...")
+                self.events.emit(BackgroundAgentsCanceling(agent_count=len(running_agents)))
             await self._background_task_manager.cancel_all()
 
         # Clear review feedback
@@ -550,19 +744,25 @@ class SandboxRunner:
         # Cleanup container (sync is fine)
         if self.container_id:
             try:
-                click.echo("Cleaning up container...")
+                self.events.emit(CleanupStarted(component='container'))
                 self.container_manager.cleanup(self.container_id)
             except Exception as e:
-                click.echo(f"Warning: Failed to cleanup container: {e}")
+                self.events.emit(WarningIssued(
+                    message=f"Failed to cleanup container: {e}",
+                    context="cleanup"
+                ))
             finally:
                 self.container_id = None
 
         # Cleanup worktrees (sync)
         try:
-            click.echo("Cleaning up worktrees...")
+            self.events.emit(CleanupStarted(component='worktrees'))
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
-            click.echo(f"Warning: Failed to cleanup worktrees: {e}")
+            self.events.emit(WarningIssued(
+                message=f"Failed to cleanup worktrees: {e}",
+                context="cleanup"
+            ))
 
     def cleanup(self) -> None:
         """
@@ -582,7 +782,10 @@ class SandboxRunner:
         if self._background_task_manager:
             running_agents = self._background_task_manager.get_running_agents()
             if running_agents:
-                click.echo(f"Warning: {len(running_agents)} background agent(s) still running - use async context manager for proper cleanup")
+                self.events.emit(WarningIssued(
+                    message=f"{len(running_agents)} background agent(s) still running - use async context manager for proper cleanup",
+                    context="cleanup"
+                ))
 
         # Clear review feedback
         self._review_feedback.clear()
@@ -590,16 +793,22 @@ class SandboxRunner:
         # Cleanup container
         if self.container_id:
             try:
-                click.echo("Cleaning up container...")
+                self.events.emit(CleanupStarted(component='container'))
                 self.container_manager.cleanup(self.container_id)
             except Exception as e:
-                click.echo(f"Warning: Failed to cleanup container: {e}")
+                self.events.emit(WarningIssued(
+                    message=f"Failed to cleanup container: {e}",
+                    context="cleanup"
+                ))
             finally:
                 self.container_id = None
 
         # Cleanup worktrees
         try:
-            click.echo("Cleaning up worktrees...")
+            self.events.emit(CleanupStarted(component='worktrees'))
             self._cleanup_worktrees(self._keep_branches)
         except Exception as e:
-            click.echo(f"Warning: Failed to cleanup worktrees: {e}")
+            self.events.emit(WarningIssued(
+                message=f"Failed to cleanup worktrees: {e}",
+                context="cleanup"
+            ))

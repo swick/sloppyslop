@@ -1,12 +1,11 @@
 """MCP tools and workflow orchestration for code review functionality."""
 
 import asyncio
-import sys
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import click
-
 from llm_sandbox import AgentConfig
+from llm_sandbox.events import EventEmitter
 from llm_sandbox.mcp_tools import (
     MCPTool,
     MCPServer,
@@ -19,6 +18,31 @@ from llm_sandbox.mcp_tools import (
     WaitForAgentsTool,
 )
 from .models import FeedbackItem, Review, ReviewMetadata
+
+
+@dataclass
+class ReviewAgentStarted:
+    """Event: Review agent started."""
+    pass
+
+
+@dataclass
+class ReviewWorktreeCheckoutStarted:
+    """Event: Worktree checkout started."""
+    pass
+
+
+@dataclass
+class ReviewWorktreeCreating:
+    """Event: Creating review worktree."""
+    worktree_name: str
+    ref: str
+
+
+@dataclass
+class ReviewWorktreesReady:
+    """Event: All review worktrees created successfully."""
+    pass
 
 
 class GetReviewDiffTool(MCPTool):
@@ -413,6 +437,10 @@ class PRReviewMCPServer(MCPServer):
 class ReviewWorkflow:
     """Orchestrates the code review workflow using LLM agents."""
 
+    def __init__(self):
+        """Initialize review workflow."""
+        self.events = EventEmitter()
+
     def run(self, runner, review_target: "ReviewTarget", network: str, verbose: bool) -> Review:
         """Run the full review workflow with LLM agent.
 
@@ -425,7 +453,7 @@ class ReviewWorkflow:
         Returns:
             Review object with feedback and metadata
         """
-        click.echo("\nStarting review agent...")
+        self.events.emit(ReviewAgentStarted())
 
         base_ref = review_target.get_base_ref()
         head_ref = review_target.get_head_ref()
@@ -689,26 +717,25 @@ The structured output should just be a high-level summary - the detailed finding
             checkout_tool = CheckoutCommitTool(runner)
 
             # Pre-checkout worktrees for head and base
-            click.echo("\nChecking out worktrees...")
-            click.echo(f"  Creating worktree 'review-head' from {head_ref}...")
+            self.events.emit(ReviewWorktreeCheckoutStarted())
+
+            self.events.emit(ReviewWorktreeCreating(worktree_name="review-head", ref=head_ref))
             head_result = await checkout_tool.execute({
                 "commit": head_ref,
                 "worktree_name": "review-head",
             })
             if not head_result["success"]:
-                click.echo(f"Error: {head_result['error']}", err=True)
-                sys.exit(1)
+                raise RuntimeError(f"Failed to create worktree 'review-head': {head_result['error']}")
 
-            click.echo(f"  Creating worktree 'review-base' from {base_ref}...")
+            self.events.emit(ReviewWorktreeCreating(worktree_name="review-base", ref=base_ref))
             base_result = await checkout_tool.execute({
                 "commit": base_ref,
                 "worktree_name": "review-base",
             })
             if not base_result["success"]:
-                click.echo(f"Error: {base_result['error']}", err=True)
-                sys.exit(1)
+                raise RuntimeError(f"Failed to create worktree 'review-base': {base_result['error']}")
 
-            click.echo("  Worktrees created successfully!")
+            self.events.emit(ReviewWorktreesReady())
 
             # Get valid commits for validation
             commits = review_target.get_commits()

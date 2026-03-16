@@ -7,7 +7,9 @@ import click
 
 from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
+from llm_sandbox.event_handlers import wire_up_all_events
 from llm_sandbox.image import Image
+from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.mcp_tools import (
     MCPServer,
@@ -68,13 +70,19 @@ class GenContainerfileSubcommand(Subcommand):
         extra_prompt = kwargs.get("prompt")
         verbose = kwargs["verbose"]
 
+        # Create output service
+        output = create_output_service(format="text", verbose=verbose)
+
         # Load config and create runner
         config = load_config(project_dir)
         runner = SandboxRunner(project_dir, config)
 
-        click.echo(f"Generating Containerfile")
-        click.echo(f"Project directory: {project_dir}")
-        click.echo(f"Output: {output_path}")
+        # Wire up all event handlers
+        wire_up_all_events(runner, output)
+
+        output.info(f"Generating Containerfile")
+        output.info(f"Project directory: {project_dir}")
+        output.info(f"Output: {output_path}")
 
         # Define output schema for Containerfile generation
         output_schema = {
@@ -128,28 +136,29 @@ Explore the project thoroughly before generating the Containerfile."""
             runner,
             prompt,
             output_schema,
-            verbose
+            verbose,
+            output
         ))
 
         containerfile_content = result["containerfile"]
         explanation = result.get("explanation", "")
 
         # Show generated content
-        click.echo("\n" + "=" * 60)
-        click.echo("Generated Containerfile:")
-        click.echo("=" * 60)
-        click.echo(containerfile_content)
-        click.echo("=" * 60)
+        output.info("\n" + "=" * 60)
+        output.info("Generated Containerfile:")
+        output.info("=" * 60)
+        output.info(containerfile_content)
+        output.info("=" * 60)
 
         if explanation:
-            click.echo("\nExplanation:")
-            click.echo(explanation)
+            output.info("\nExplanation:")
+            output.info(explanation)
 
         # Save to output path
         output_path.write_text(containerfile_content)
-        click.echo(f"\n✓ Saved to: {output_path}")
+        output.success(f"Saved to: {output_path}")
 
-    async def _execute_async(self, runner, prompt, output_schema, verbose):
+    async def _execute_async(self, runner, prompt, output_schema, verbose, output):
         """Async execution of Containerfile generation."""
         async with runner:
             await runner.setup(network="enabled", image=Image.DEFAULT_IMAGE)
@@ -157,7 +166,7 @@ Explore the project thoroughly before generating the Containerfile."""
             # Create MCP server with project exploration tools
             mcp_server = GenContainerfileMCPServer(runner)
 
-            click.echo("\nGenerating Containerfile with LLM...")
+            output.info("\nGenerating Containerfile with LLM...")
 
             # Create agent config and run
             agent = AgentConfig(

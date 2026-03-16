@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -11,7 +12,9 @@ import click
 
 from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
+from llm_sandbox.event_handlers import wire_up_all_events
 from llm_sandbox.mcp_tools import CheckoutCommitTool
+from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import Subcommand
 from .models import (
@@ -132,6 +135,11 @@ Examples:
         action = kwargs.get("action", "list")
         store = ReviewStore(project_dir)
 
+        # Create output service (quiet by default for review subcommands unless verbose)
+        verbose = kwargs.get("verbose", False)
+        output = create_output_service(format="text", verbose=verbose)
+        kwargs["output"] = output  # Pass to sub-methods
+
         # For actions that need review_id, use positional if provided, otherwise fall back to --id
         if action in ("show", "post", "edit", "check", "dismiss", "undismiss", "rebase", "remove"):
             positional_id = kwargs.get("review_id")
@@ -139,7 +147,7 @@ Examples:
             if positional_id:
                 kwargs["id"] = positional_id
             elif not option_id and action != "remove":
-                click.echo(f"Error: review ID is required for {action}", err=True)
+                output.error(f"review ID is required for {action}")
                 sys.exit(1)
 
         if action == "list":
@@ -163,15 +171,16 @@ Examples:
         elif action == "rebase":
             self._rebase_suggestions(store, **kwargs)
         else:
-            click.echo(f"Error: Unknown action '{action}'", err=True)
+            output.error(f"Unknown action '{action}'")
             sys.exit(1)
 
     def _list_reviews(self, store: ReviewStore, **kwargs):
         """List all available reviews."""
+        output = kwargs.get("output")
         review_ids = store.list_ids()
 
         if not review_ids:
-            click.echo("No reviews found.")
+            output.info("No reviews found.")
             return
 
         for review_id in review_ids:
@@ -190,30 +199,32 @@ Examples:
                     elif '..' in first_line:
                         target_info = first_line.split('for ')[1].rstrip('.') if 'for ' in first_line else first_line
 
-                click.echo(f"  {review_id}")
-                click.echo(f"    Target: {target_info}")
-                click.echo(f"    Findings: {feedback_count}")
-                click.echo()
+                output.info(f"  {review_id}")
+                output.info(f"    Target: {target_info}")
+                output.info(f"    Findings: {feedback_count}")
+                output.info("")
             except Exception as e:
-                click.echo(f"  {review_id} (error loading: {e})")
-                click.echo()
+                output.warning(f"  {review_id} (error loading: {e})")
+                output.info("")
 
     def _remove_review(self, store: ReviewStore, **kwargs):
         """Remove a review by ID."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         if not review_id:
-            click.echo("Error: --id is required for remove", err=True)
+            output.error("--id is required for remove")
             sys.exit(1)
 
         try:
             store.remove(review_id)
-            click.echo(f"✓ Removed review: {review_id}")
+            output.success(f"Removed review: {review_id}")
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
     def _create_review(self, store: ReviewStore, **kwargs):
         """Create a new review."""
+        output = kwargs.get("output")
         pr_number = kwargs.get("pr")
         base_commit = kwargs.get("base")
         head_commit = kwargs.get("head")
@@ -227,50 +238,69 @@ Examples:
         config = load_config(project_dir)
         runner = SandboxRunner(project_dir, config)
 
+        # Wire up event handlers
+        wire_up_all_events(runner, output)
+
         # Validate arguments
         if pr_number and (base_commit or head_commit):
-            click.echo("Error: Cannot use --pr with --base/--head. Choose one mode.", err=True)
+            output.error("Cannot use --pr with --base/--head. Choose one mode.")
             sys.exit(1)
 
         if not pr_number and not (base_commit and head_commit):
-            click.echo("Error: Either --pr OR both --base and --head must be provided.", err=True)
+            output.error("Either --pr OR both --base and --head must be provided.")
             sys.exit(1)
 
         if (base_commit and not head_commit) or (head_commit and not base_commit):
-            click.echo("Error: Both --base and --head must be provided together.", err=True)
+            output.error("Both --base and --head must be provided together.")
             sys.exit(1)
 
         # Create appropriate ReviewTarget
         if pr_number is not None:
             if not token:
-                click.echo(
-                    "Error: GitHub token not found.\n"
+                output.error(
+                    "GitHub token not found.\n"
                     "\n"
                     "Set GH_TOKEN environment variable or use --with-token option:\n"
                     "  export GH_TOKEN=ghp_xxxxxxxxxxxx\n"
                     "  or\n"
-                    "  llm-sandbox review create --pr 123 --with-token ghp_xxxxxxxxxxxx",
-                    err=True
+                    "  llm-sandbox review create --pr 123 --with-token ghp_xxxxxxxxxxxx"
                 )
                 sys.exit(1)
             review_target = GitHubPRTarget(pr_number, token, project_dir)
         else:
             review_target = LocalReviewTarget(base_commit, head_commit, project_dir)
 
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Multi-Agent Code Review: {review_target.get_description()}")
-        click.echo(f"{'='*60}\n")
+        output.info(f"\n{'='*60}")
+        output.info(f"Multi-Agent Code Review: {review_target.get_description()}")
+        output.info(f"{'='*60}\n")
 
         # Fetch remote data if needed (PR mode)
-        review_target.fetch_if_needed()
+        try:
+            review_target.fetch_if_needed()
+        except RuntimeError as e:
+            output.error(str(e))
+            sys.exit(1)
 
         # Run review workflow
         workflow = ReviewWorkflow()
+
+        # Wire up workflow events
+        from llm_sandbox.subcommands.review.engine import (
+            ReviewAgentStarted,
+            ReviewWorktreeCheckoutStarted,
+            ReviewWorktreeCreating,
+            ReviewWorktreesReady
+        )
+        workflow.events.on(ReviewAgentStarted, lambda e: output.info("\nStarting review agent..."))
+        workflow.events.on(ReviewWorktreeCheckoutStarted, lambda e: output.info("\nChecking out worktrees..."))
+        workflow.events.on(ReviewWorktreeCreating, lambda e: output.info(f"  Creating worktree '{e.worktree_name}' from {e.ref}..."))
+        workflow.events.on(ReviewWorktreesReady, lambda e: output.info("  Worktrees created successfully!"))
+
         review = workflow.run(runner, review_target, network, verbose)
 
         # Display agent results
         if review.metadata:
-            self._display_agent_results(review.metadata.to_dict())
+            self._display_agent_results(review.metadata.to_dict(), output)
 
         # Mark low-confidence suggestions as ignored
         probability_threshold = kwargs.get("probability_threshold", 0.5)
@@ -281,11 +311,11 @@ Examples:
                 ignored_count += 1
 
         if ignored_count > 0:
-            click.echo(f"\nAutomatically ignored {ignored_count} low-confidence suggestions (probability < {probability_threshold})")
+            output.info(f"\nAutomatically ignored {ignored_count} low-confidence suggestions (probability < {probability_threshold})")
 
         # Filter and display feedback
         sorted_feedback = review.filter_feedback(probability_threshold=probability_threshold)
-        self._display_feedback_statistics(review, sorted_feedback)
+        self._display_feedback_statistics(review, sorted_feedback, output)
 
         # Generate summary (even if no high-confidence suggestions)
         if sorted_feedback:
@@ -309,97 +339,98 @@ Examples:
         # Save review (always save, even if no high-confidence suggestions)
         output_file = store.save(review_id, review)
 
-        click.echo(f"\n{'='*60}")
-        click.echo("Review Complete")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nReview ID: {review_id}")
-        click.echo(f"Review completed for {review_target.get_description()}")
+        output.info(f"\n{'='*60}")
+        output.info("Review Complete")
+        output.info(f"{'='*60}")
+        output.info(f"\nReview ID: {review_id}")
+        output.info(f"Review completed for {review_target.get_description()}")
 
         stats = review.get_statistics()
-        click.echo(f"Total findings: {stats['total']}")
-        click.echo(f"High-confidence suggestions: {len(sorted_feedback)}")
+        output.info(f"Total findings: {stats['total']}")
+        output.info(f"High-confidence suggestions: {len(sorted_feedback)}")
 
         if not sorted_feedback:
-            click.echo("\nNo high-confidence suggestions. All files look good!")
+            output.info("\nNo high-confidence suggestions. All files look good!")
 
-        click.echo(f"\n✓ Review saved to: {output_file}")
+        output.success(f"\n✓ Review saved to: {output_file}")
 
 
-    def _display_agent_results(self, result: dict):
+    def _display_agent_results(self, result: dict, output: OutputService):
         """Display the agent's review results."""
-        click.echo(f"\n{'='*60}")
-        click.echo("Review Agent Results")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nReview Summary:")
-        click.echo(result["review_summary"])
+        output.info(f"\n{'='*60}")
+        output.info("Review Agent Results")
+        output.info(f"{'='*60}")
+        output.info(f"\nReview Summary:")
+        output.info(result["review_summary"])
 
-        click.echo(f"\nDocumentation Found: {len(result['documentation_found'])}")
+        output.info(f"\nDocumentation Found: {len(result['documentation_found'])}")
         if result["documentation_found"]:
             for file in result["documentation_found"]:
-                click.echo(f"  - {file}")
+                output.info(f"  - {file}")
 
-        click.echo(f"\nReview Criteria:")
-        click.echo(result["review_criteria_summary"])
+        output.info(f"\nReview Criteria:")
+        output.info(result["review_criteria_summary"])
 
-        click.echo(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
+        output.info(f"\nSub-Agents Spawned: {len(result['sub_agents_spawned'])}")
         for agent in result["sub_agents_spawned"]:
-            click.echo(f"  - {agent['agent_id']}: {agent['task_description']}")
+            output.info(f"  - {agent['agent_id']}: {agent['task_description']}")
 
-        click.echo(f"\nFindings Statistics:")
+        output.info(f"\nFindings Statistics:")
         stats = result["findings_statistics"]
-        click.echo(f"  Total findings: {stats['total_findings']}")
+        output.info(f"  Total findings: {stats['total_findings']}")
         if "duplicates_count" in stats:
-            click.echo(f"  Duplicates marked: {stats['duplicates_count']}")
+            output.info(f"  Duplicates marked: {stats['duplicates_count']}")
         if "unique_findings" in stats:
-            click.echo(f"  Unique findings: {stats['unique_findings']}")
+            output.info(f"  Unique findings: {stats['unique_findings']}")
         if "by_category" in stats:
-            click.echo(f"  By category: {stats['by_category']}")
+            output.info(f"  By category: {stats['by_category']}")
         if "by_severity" in stats:
-            click.echo(f"  By severity: {stats['by_severity']}")
+            output.info(f"  By severity: {stats['by_severity']}")
         if "high_confidence_count" in stats:
-            click.echo(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
+            output.info(f"  High confidence (≥0.8): {stats['high_confidence_count']}")
 
-        click.echo(f"\nOverall Assessment:")
-        click.echo(result["overall_assessment"])
+        output.info(f"\nOverall Assessment:")
+        output.info(result["overall_assessment"])
 
-    def _display_feedback_statistics(self, review: Review, filtered_feedback: List[FeedbackItem]):
+    def _display_feedback_statistics(self, review: Review, filtered_feedback: List[FeedbackItem], output: OutputService):
         """Display feedback filtering statistics."""
         stats = review.get_statistics()
         probability_threshold = 0.5
 
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Filtering Feedback")
-        click.echo(f"{'='*60}")
-        click.echo(f"Total findings recorded: {stats['total']}")
-        click.echo(f"Duplicates marked: {stats['duplicates']}")
-        click.echo(f"Unique findings: {stats['unique']}")
-        click.echo(f"After filtering (probability ≥ {probability_threshold}, excluding duplicates): {len(filtered_feedback)}")
+        output.info(f"\n{'='*60}")
+        output.info(f"Filtering Feedback")
+        output.info(f"{'='*60}")
+        output.info(f"Total findings recorded: {stats['total']}")
+        output.info(f"Duplicates marked: {stats['duplicates']}")
+        output.info(f"Unique findings: {stats['unique']}")
+        output.info(f"After filtering (probability ≥ {probability_threshold}, excluding duplicates): {len(filtered_feedback)}")
 
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
-        click.echo(f"{'='*60}")
+        output.info(f"\n{'='*60}")
+        output.info(f"Review Complete - {len(filtered_feedback)} High-Confidence Suggestions")
+        output.info(f"{'='*60}")
 
     def _post_review(self, store: ReviewStore, **kwargs):
         """Post a review to its target."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         token = kwargs.get("with_token") or os.getenv("GH_TOKEN")
         project_dir = store.project_dir
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for post", err=True)
+            output.error("review ID is required for post")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Check if review has target info
         if not review.target_info or not review.target_info.get("type"):
-            click.echo("Error: Review does not have target information (cannot determine where to post)", err=True)
+            output.error("Review does not have target information (cannot determine where to post)")
             sys.exit(1)
 
         # Reconstruct the target
@@ -408,44 +439,102 @@ Examples:
         try:
             target = ReviewTarget.from_info(review.target_info, token=token, project_dir=project_dir)
             # Fetch PR info if needed (for GitHub PRs)
-            target.fetch_if_needed()
+            try:
+                target.fetch_if_needed()
+            except RuntimeError as e:
+                output.error(f"Failed to fetch target data: {e}")
+                sys.exit(1)
         except Exception as e:
-            click.echo(f"Error: Failed to reconstruct review target: {e}", err=True)
+            output.error(f"Failed to reconstruct review target: {e}")
             sys.exit(1)
 
         # Check if target can publish
         if not target.can_publish():
-            click.echo(f"Error: Target type '{review.target_info['type']}' does not support publishing", err=True)
+            output.error(f"Target type '{review.target_info['type']}' does not support publishing")
             sys.exit(1)
 
         # Display preview
-        click.echo(f"\nReview ID: {review_id}")
+        output.info(f"\nReview ID: {review_id}")
         try:
-            target.print_publish_preview(review)
+            preview = target.get_publish_preview(review)
+
+            # Display preview using OutputService
+            output.info(f"\n{'='*60}")
+            output.info("Review Post Preview")
+            output.info(f"{'='*60}")
+            output.info(f"\nTarget: {preview.target_description}")
+            if preview.repository:
+                output.info(f"Repository: {preview.repository}")
+            if preview.pr_url:
+                output.info(f"PR URL: {preview.pr_url}")
+
+            output.info(f"\nWill post:")
+            if preview.will_post_summary:
+                output.info(f"  • 1 summary comment")
+            output.info(f"  • {preview.will_post_inline_count} inline comments")
+
+            if preview.summary_body:
+                output.info(f"\n{'='*60}")
+                output.info("Summary Comment")
+                output.info(f"{'='*60}\n")
+                output.info(preview.summary_body)
+                output.info(f"\n{'='*60}")
+
+            # Show sample inline comments
+            if preview.sample_inline_comments:
+                output.info(f"\nSample inline comments ({len(preview.sample_inline_comments)} of {preview.will_post_inline_count}):")
+                for i, sample in enumerate(preview.sample_inline_comments, 1):
+                    output.info(f"\n  {i}. {sample.file}:{sample.line_start}-{sample.line_end} [{sample.category}]")
+                    for line in sample.body_preview:
+                        output.info(f"     {line}")
+                    if sample.total_lines > len(sample.body_preview):
+                        output.info(f"     ... ({sample.total_lines - len(sample.body_preview)} more lines)")
         except Exception as e:
-            click.echo(f"Error: Failed to generate preview: {e}", err=True)
+            output.error(f"Failed to generate preview: {e}")
             sys.exit(1)
 
         # Confirm
-        click.echo(f"\n{'='*60}")
+        output.info(f"\n{'='*60}")
         if not click.confirm("Post review?", default=True):
-            click.echo("\nCancelled. Review not posted.")
+            output.info("\nCancelled. Review not posted.")
             return
 
         # Post the review
-        click.echo(f"\n{'='*60}")
-        click.echo("Posting Review")
-        click.echo(f"{'='*60}\n")
+        output.info(f"\n{'='*60}")
+        output.info("Posting Review")
+        output.info(f"{'='*60}\n")
 
         try:
-            target.publish_review(review)
-            target.print_published_success()
+            result = target.publish_review(review)
+
+            # Display results
+            if result.summary_posted:
+                output.success("✓ Posted review summary")
+
+            output.info(f"\n{'='*60}")
+            output.info(f"Posted {result.inline_comments_posted}/{result.inline_comments_posted + result.inline_comments_failed} inline comments")
+            output.info(f"{'='*60}")
+
+            if result.failed_suggestions:
+                output.warning(f"\n⚠ Failed to post {len(result.failed_suggestions)} suggestions as inline comments")
+                output.warning("These suggestions could not be posted (file may not exist in PR diff):")
+                for s in result.failed_suggestions:
+                    output.warning(f"  - {s.file}:{s.line_start}-{s.line_end}")
+
+            # Display success message
+            success = target.get_publish_success()
+            output.info(f"\n{'='*60}")
+            output.success("✓ Review posted successfully!")
+            output.info(f"{'='*60}")
+            if success.pr_url:
+                output.info(f"\nView at: {success.pr_url}")
         except Exception as e:
-            click.echo(f"\n✗ Error posting review: {e}", err=True)
+            output.error(f"\n✗ Error posting review: {e}")
             sys.exit(1)
 
     def _show_review(self, store: ReviewStore, **kwargs):
         """Show a review with summary and suggestions by commit."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())  # Tuple of suggestion IDs
         commit_filter = kwargs.get("commit")  # Single commit or range string
@@ -458,14 +547,14 @@ Examples:
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for show", err=True)
+            output.error("review ID is required for show")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Capture output to decide whether to use pager
@@ -528,46 +617,46 @@ Examples:
         # Only show review header if not filtering by specific suggestion IDs
         if not matching_suggestion_ids:
             # Display header
-            click.echo(f"\n{'='*60}")
-            click.echo(f"Review: {review_id}")
-            click.echo(f"{'='*60}")
+            print(f"\n{'='*60}")
+            print(f"Review: {review_id}")
+            print(f"{'='*60}")
 
             # Target info
             if review.target_info and review.target_info.get("type"):
                 target_type = review.target_info["type"]
-                click.echo(f"\nTarget: {target_type}")
+                print(f"\nTarget: {target_type}")
                 if target_type == "github_pr":
                     pr_number = review.target_info.get("pr_number")
                     repo_name = review.target_info.get("repo_name")
                     if pr_number and repo_name:
-                        click.echo(f"  PR: #{pr_number} ({repo_name})")
+                        print(f"  PR: #{pr_number} ({repo_name})")
                 elif target_type == "local":
                     if review.base_ref and review.head_ref:
-                        click.echo(f"  Range: {review.base_ref}..{review.head_ref}")
+                        print(f"  Range: {review.base_ref}..{review.head_ref}")
 
             # Summary
             if review.summary:
-                click.echo(f"\n{'='*60}")
-                click.echo("Summary")
-                click.echo(f"{'='*60}")
+                print(f"\n{'='*60}")
+                print("Summary")
+                print(f"{'='*60}")
                 # Show first 300 chars
                 summary_text = review.summary
                 if len(summary_text) > 300:
-                    click.echo(summary_text[:300] + "...")
+                    print(summary_text[:300] + "...")
                 else:
-                    click.echo(summary_text)
+                    print(summary_text)
 
             # Statistics
             stats = review.get_statistics()
-            click.echo(f"\n{'='*60}")
-            click.echo("Statistics")
-            click.echo(f"{'='*60}")
-            click.echo(f"Total findings: {stats['total']}")
-            click.echo(f"Unique findings: {stats['unique']}")
-            click.echo(f"Duplicates marked: {stats['duplicates']}")
-            click.echo(f"Ignored: {stats['ignored']}")
+            print(f"\n{'='*60}")
+            print("Statistics")
+            print(f"{'='*60}")
+            print(f"Total findings: {stats['total']}")
+            print(f"Unique findings: {stats['unique']}")
+            print(f"Duplicates marked: {stats['duplicates']}")
+            print(f"Ignored: {stats['ignored']}")
             if not show_all and stats['duplicates'] > 0:
-                click.echo(f"\nShowing unique findings only (use --all to show {stats['duplicates']} duplicates)")
+                print(f"\nShowing unique findings only (use --all to show {stats['duplicates']} duplicates)")
 
         # Group feedback by commit
         from collections import defaultdict
@@ -607,9 +696,9 @@ Examples:
         if by_commit or no_commit:
             # Only show header if not filtering by specific suggestion IDs
             if not matching_suggestion_ids:
-                click.echo(f"\n{'='*60}")
-                click.echo(f"Suggestions by Commit")
-                click.echo(f"{'='*60}")
+                print(f"\n{'='*60}")
+                print(f"Suggestions by Commit")
+                print(f"{'='*60}")
 
             # Track whether we've shown the first item (for separator placement)
             first_item = True
@@ -617,27 +706,27 @@ Examples:
             # Show commits with suggestions
             for commit_sha, items in sorted(by_commit.items()):
                 short_sha = commit_sha[:7] if len(commit_sha) >= 7 else commit_sha
-                click.echo(f"\n[{short_sha}] ({len(items)} suggestions):")
+                print(f"\n[{short_sha}] ({len(items)} suggestions):")
                 for item in items:
                     self._display_feedback_item(item, diff_generator, is_first=first_item)
                     first_item = False
 
             # Show items without commit info
             if no_commit:
-                click.echo(f"\n[no commit] ({len(no_commit)} suggestions):")
+                print(f"\n[no commit] ({len(no_commit)} suggestions):")
                 for item in no_commit:
                     self._display_feedback_item(item, diff_generator, is_first=first_item)
                     first_item = False
         else:
             if matching_suggestion_ids:
-                click.echo("No matching suggestions found")
+                print("No matching suggestions found")
             else:
-                click.echo(f"\n{'='*60}")
-                click.echo("No suggestions (all filtered)")
-                click.echo(f"{'='*60}")
+                print(f"\n{'='*60}")
+                print("No suggestions (all filtered)")
+                print(f"{'='*60}")
 
         if not matching_suggestion_ids:
-            click.echo()  # Empty line at end
+            print()  # Empty line at end
 
     def _parse_commit_filters(self, commit_filters: tuple, review: Review, project_dir: Path) -> set:
         """Parse commit filters into set of matching commit SHAs.
@@ -668,7 +757,7 @@ Examples:
                     # Parse the range
                     parts = filter_str.split('..')
                     if len(parts) != 2:
-                        click.echo(f"Warning: Invalid range format '{filter_str}', skipping", err=True)
+                        print(f"Warning: Invalid range format '{filter_str}', skipping", file=sys.stderr)
                         continue
 
                     base, head = parts[0].strip(), parts[1].strip()
@@ -682,7 +771,7 @@ Examples:
                         if commit in range_shas:
                             matching.add(commit)
                 except Exception as e:
-                    click.echo(f"Warning: Failed to expand range '{filter_str}': {e}", err=True)
+                    print(f"Warning: Failed to expand range '{filter_str}': {e}", file=sys.stderr)
                     continue
             else:
                 # Single commit: match by prefix
@@ -706,31 +795,32 @@ Examples:
             # Compact format: one line summary with ID
             reason_short = item.reason[:60] + "..." if len(item.reason) > 60 else item.reason
             reason_short = reason_short.replace('\n', ' ').strip()
-            click.echo(f"  [{short_id}] {item.file}:{item.line_start} [{item.category}] {reason_short}")
+            print(f"  [{short_id}] {item.file}:{item.line_start} [{item.category}] {reason_short}")
         else:
             # Detailed format: use the shared display method
             self._display_suggestion_full(item, diff_generator, show_separator=not is_first)
 
     def _dismiss_suggestions(self, store: ReviewStore, **kwargs):
         """Dismiss (ignore) one or more suggestions."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for dismiss", err=True)
+            output.error("review ID is required for dismiss")
             sys.exit(1)
 
         if not suggestion_ids:
-            click.echo("Error: at least one suggestion ID is required for dismiss", err=True)
-            click.echo("Usage: llm-sandbox review dismiss <review-id> <suggestion-id> [<suggestion-id> ...]", err=True)
+            output.error("at least one suggestion ID is required for dismiss")
+            output.error("Usage: llm-sandbox review dismiss <review-id> <suggestion-id> [<suggestion-id> ...]")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Find and mark suggestions as ignored
@@ -751,42 +841,43 @@ Examples:
 
         # Report results
         if dismissed_count > 0:
-            click.echo(f"Dismissed {dismissed_count} suggestion(s)")
+            output.info(f"Dismissed {dismissed_count} suggestion(s)")
 
         if not_found:
-            click.echo(f"Warning: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+            output.warning(f"{len(not_found)} suggestion(s) not found: {', '.join(not_found)}")
 
         # Save the updated review
         if dismissed_count > 0:
             store.save(review_id, review)
-            click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.success(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
     def _rebase_suggestions(self, store: ReviewStore, **kwargs):
         """Rebase commits with review suggestions applied."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())
         branch_name = kwargs.get("branch")
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for rebase", err=True)
+            output.error("review ID is required for rebase")
             sys.exit(1)
 
         if not branch_name:
-            click.echo("Error: --branch is required for rebase", err=True)
-            click.echo("Usage: llm-sandbox review rebase <review-id> [<suggestion-id> ...] --branch <branch-name>", err=True)
+            output.error("--branch is required for rebase")
+            output.error("Usage: llm-sandbox review rebase <review-id> [<suggestion-id> ...] --branch <branch-name>")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Verify review has base_ref and head_ref
         if not review.base_ref or not review.head_ref:
-            click.echo("Error: Review does not have base_ref and head_ref (cannot rebase)", err=True)
+            output.error("Review does not have base_ref and head_ref (cannot rebase)")
             sys.exit(1)
 
         # Find suggestions by ID, or use all non-ignored suggestions if none specified
@@ -800,7 +891,7 @@ Examples:
                 for item in review.feedback:
                     if item.get_short_id() == suggestion_id:
                         if not item.suggested_code:
-                            click.echo(f"Warning: Suggestion {suggestion_id} has no suggested code, skipping", err=True)
+                            output.warning(f"Suggestion {suggestion_id} has no suggested code, skipping")
                         else:
                             suggestions.append(item)
                         found = True
@@ -809,7 +900,7 @@ Examples:
                     not_found.append(suggestion_id)
 
             if not_found:
-                click.echo(f"Error: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+                output.error(f"{len(not_found)} suggestion(s) not found: {', '.join(not_found)}")
                 sys.exit(1)
         else:
             # Use all active (non-duplicate, non-ignored) suggestions with suggested code
@@ -819,61 +910,134 @@ Examples:
                     suggestions.append(item)
 
             if not suggestions:
-                click.echo("No active suggestions with code found in review", err=True)
+                output.error("No active suggestions with code found in review")
                 sys.exit(1)
 
-            click.echo(f"No suggestion IDs specified, using all {len(suggestions)} active suggestions")
+            output.info(f"No suggestion IDs specified, using all {len(suggestions)} active suggestions")
 
         if not suggestions:
-            click.echo("Error: No valid suggestions to apply", err=True)
+            output.error("No valid suggestions to apply")
             sys.exit(1)
 
         # Display what we're about to do
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Rebase Plan")
-        click.echo(f"{'='*60}")
-        click.echo(f"Review: {review_id}")
-        click.echo(f"Base: {review.base_ref}")
-        click.echo(f"Head: {review.head_ref}")
-        click.echo(f"New branch: {branch_name}")
-        click.echo(f"Suggestions to apply: {len(suggestions)}")
+        output.info(f"\n{'='*60}")
+        output.info(f"Rebase Plan")
+        output.info(f"{'='*60}")
+        output.info(f"Review: {review_id}")
+        output.info(f"Base: {review.base_ref}")
+        output.info(f"Head: {review.head_ref}")
+        output.info(f"New branch: {branch_name}")
+        output.info(f"Suggestions to apply: {len(suggestions)}")
         for item in suggestions:
-            click.echo(f"  [{item.get_short_id()}] {item.file}:{item.line_start}-{item.line_end} at {item.commit[:7]}")
+            output.info(f"  [{item.get_short_id()}] {item.file}:{item.line_start}-{item.line_end} at {item.commit[:7]}")
 
         # Confirm
         if not click.confirm("\nProceed with rebase?", default=True):
-            click.echo("Cancelled.")
+            output.info("Cancelled.")
             return
 
+        # Define conflict resolver callback
+        def resolve_conflicts(request) -> bool:
+            """Interactive conflict resolution callback."""
+            commit_type = "fixup" if request.is_fixup else "commit"
+            output.warning(f"\n{'='*60}")
+            output.warning(f"⚠ Cherry-pick conflict on {commit_type} {request.commit_sha[:7]}")
+            output.warning(f"{'='*60}")
+
+            editor = os.environ.get('EDITOR', 'vi')
+
+            while True:
+                # Show conflicted files
+                output.info(f"\nConflicted files ({len(request.conflicted_files)}):")
+                for f in request.conflicted_files:
+                    output.info(f"  {f}")
+
+                output.info(f"\nOpening conflicted files in {editor}...")
+                output.info("Resolve conflicts and save. The files will be staged automatically.")
+                output.info("Press Enter to continue, or Ctrl+C to abort.")
+
+                try:
+                    input()
+                except KeyboardInterrupt:
+                    output.error("\n\nAborting cherry-pick.")
+                    request.repo.git.cherry_pick('--abort')
+                    return False
+
+                # Open each conflicted file in the editor
+                for conflicted_file in request.conflicted_files:
+                    file_path = request.worktree_dir / conflicted_file
+                    if not file_path.exists():
+                        output.warning(f"{conflicted_file} not found, skipping")
+                        continue
+
+                    try:
+                        subprocess.run([editor, str(file_path)])
+                    except Exception as e:
+                        output.error(f"Error opening {conflicted_file}: {e}")
+                        continue
+
+                    # Stage the file after editing
+                    try:
+                        request.repo.git.add(conflicted_file)
+                        output.success(f"✓ Staged {conflicted_file}")
+                    except Exception as e:
+                        output.warning(f"Failed to stage {conflicted_file}: {e}")
+
+                # Check if conflicts remain
+                try:
+                    remaining_conflicts = request.repo.git.diff('--name-only', '--diff-filter=U').strip()
+                    if remaining_conflicts:
+                        output.info(f"\nUnresolved conflicts remain:")
+                        output.info(remaining_conflicts)
+                        output.info("Continuing to resolve...")
+                        continue
+                except Exception:
+                    pass
+
+                # No more conflicts
+                break
+
+            return True
+
         # Perform the rebase
-        rebase = ReviewRebase(store.project_dir, review)
+        rebase = ReviewRebase(store.project_dir, review, conflict_resolver=resolve_conflicts)
         try:
+            output.info(f"\nApplying {len(suggestions)} suggestion(s)...")
             rebase.apply_suggestions(suggestions, branch_name)
+            output.info("\nCleaning up worktrees...")
+            output.success(f"\n✓ Successfully created branch '{branch_name}'")
+            output.info(f"\n{'='*60}")
+            output.info(f"To squash fixup commits:")
+            output.info(f"  git checkout {branch_name}")
+            output.info(f"  git rebase -i --autosquash {review.base_ref}")
+            output.info(f"\nTo push the branch:")
+            output.info(f"  git push origin {branch_name}")
         except Exception as e:
-            click.echo(f"\n✗ Rebase failed: {e}", err=True)
-            click.echo("\nYou may need to manually complete the rebase or clean up worktrees.", err=True)
+            output.error(f"\n✗ Rebase failed: {e}")
+            output.error("\nYou may need to manually complete the rebase or clean up worktrees.")
             sys.exit(1)
 
     def _undismiss_suggestions(self, store: ReviewStore, **kwargs):
         """Un-dismiss (un-ignore) one or more suggestions."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for undismiss", err=True)
+            output.error("review ID is required for undismiss")
             sys.exit(1)
 
         if not suggestion_ids:
-            click.echo("Error: at least one suggestion ID is required for undismiss", err=True)
-            click.echo("Usage: llm-sandbox review undismiss <review-id> <suggestion-id> [<suggestion-id> ...]", err=True)
+            output.error("at least one suggestion ID is required for undismiss")
+            output.error("Usage: llm-sandbox review undismiss <review-id> <suggestion-id> [<suggestion-id> ...]")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Find and un-mark suggestions as ignored
@@ -894,36 +1058,37 @@ Examples:
 
         # Report results
         if undismissed_count > 0:
-            click.echo(f"Un-dismissed {undismissed_count} suggestion(s)")
+            output.info(f"Un-dismissed {undismissed_count} suggestion(s)")
 
         if not_found:
-            click.echo(f"Warning: {len(not_found)} suggestion(s) not found: {', '.join(not_found)}", err=True)
+            output.warning(f"{len(not_found)} suggestion(s) not found: {', '.join(not_found)}")
 
         # Save the updated review
         if undismissed_count > 0:
             store.save(review_id, review)
-            click.echo(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.success(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
     def _check_suggestions(self, store: ReviewStore, **kwargs):
         """Interactively review suggestions one by one."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for check", err=True)
+            output.error("review ID is required for check")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Get active suggestions
         active_feedback = review.get_active_feedback()
         if not active_feedback:
-            click.echo("No active suggestions to review")
+            output.info("No active suggestions to review")
             return
 
         # Create diff generator
@@ -932,28 +1097,29 @@ Examples:
         # Create editor for editing suggestions
         editor = ReviewEditor(store.project_dir, review)
 
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Interactive Review: {review_id}")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nReviewing {len(active_feedback)} active suggestions\n")
+        output.info(f"\n{'='*60}")
+        output.info(f"Interactive Review: {review_id}")
+        output.info(f"{'='*60}")
+        output.info(f"\nReviewing {len(active_feedback)} active suggestions\n")
 
         # Offer to edit summary first
         modified = False
         if click.confirm("Edit review summary first?", default=False):
             if editor.edit_review_summary():
                 modified = True
+                output.success("✓ Summary updated")
 
         for i, item in enumerate(active_feedback, 1):
-            click.echo(f"\n{'='*60}")
-            click.echo(f"Suggestion {i}/{len(active_feedback)}")
-            click.echo(f"{'='*60}")
+            output.info(f"\n{'='*60}")
+            output.info(f"Suggestion {i}/{len(active_feedback)}")
+            output.info(f"{'='*60}")
 
             # Display the suggestion with diff
-            self._display_suggestion_full(item, diff_generator, show_separator=False)
+            self._display_suggestion_full(item, diff_generator, show_separator=False, output=output)
 
             # Prompt for action
             while True:
-                click.echo()
+                output.info("")
                 action = click.prompt(
                     "Action (edit [d]iff, edit [r]eason, [i]gnore, [a]ccept, [q]uit)",
                     type=click.Choice(['d', 'r', 'i', 'a', 'q'], case_sensitive=False),
@@ -962,10 +1128,10 @@ Examples:
                 )
 
                 if action == 'q':
-                    click.echo("\nQuitting review...")
+                    output.info("\nQuitting review...")
                     if modified:
                         store.save(review_id, review)
-                        click.echo(f"✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                        output.success(f"✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
                     return
 
                 elif action == 'a':
@@ -976,7 +1142,7 @@ Examples:
                     # Ignore (dismiss)
                     item.ignore = True
                     modified = True
-                    click.echo(f"✓ Dismissed suggestion {item.get_short_id()}")
+                    output.success(f"✓ Dismissed suggestion {item.get_short_id()}")
                     break
 
                 elif action == 'd':
@@ -985,12 +1151,12 @@ Examples:
                         if editor.edit_suggestion(item.get_short_id()):
                             modified = True
                             # Redisplay after edit
-                            click.echo(f"\n{'='*60}")
-                            click.echo(f"Suggestion {i}/{len(active_feedback)} (after edit)")
-                            click.echo(f"{'='*60}")
-                            self._display_suggestion_full(item, diff_generator, show_separator=False)
+                            output.info(f"\n{'='*60}")
+                            output.info(f"Suggestion {i}/{len(active_feedback)} (after edit)")
+                            output.info(f"{'='*60}")
+                            self._display_suggestion_full(item, diff_generator, show_separator=False, output=output)
                     except RuntimeError as e:
-                        click.echo(f"Error editing diff: {e}", err=True)
+                        output.error(f"Error editing diff: {e}")
                     # Continue loop to show prompt again
                     continue
 
@@ -1000,24 +1166,25 @@ Examples:
                         if editor.edit_item_reason(item.get_short_id()):
                             modified = True
                             # Redisplay after edit
-                            click.echo(f"\n{'='*60}")
-                            click.echo(f"Suggestion {i}/{len(active_feedback)} (after edit)")
-                            click.echo(f"{'='*60}")
-                            self._display_suggestion_full(item, diff_generator, show_separator=False)
+                            output.info(f"\n{'='*60}")
+                            output.info(f"Suggestion {i}/{len(active_feedback)} (after edit)")
+                            output.info(f"{'='*60}")
+                            self._display_suggestion_full(item, diff_generator, show_separator=False, output=output)
                     except RuntimeError as e:
-                        click.echo(f"Error editing reason: {e}", err=True)
+                        output.error(f"Error editing reason: {e}")
                     # Continue loop to show prompt again
                     continue
 
         # Save if modified
         if modified:
             store.save(review_id, review)
-            click.echo(f"\n✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.success(f"\n✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
         else:
-            click.echo("\nNo changes made")
+            output.info("\nNo changes made")
 
     def _edit_suggestion(self, store: ReviewStore, **kwargs):
         """Edit a suggestion or summary interactively."""
+        output = kwargs.get("output")
         review_id = kwargs.get("id")
         suggestion_ids = kwargs.get("suggestion_ids", ())
         edit_summary = kwargs.get("summary", False)
@@ -1025,14 +1192,14 @@ Examples:
 
         # Note: review_id validation is done in execute() method
         if not review_id:
-            click.echo("Error: review ID is required for edit", err=True)
+            output.error("review ID is required for edit")
             sys.exit(1)
 
         # Load the review
         try:
             review = store.load(review_id)
         except FileNotFoundError:
-            click.echo(f"Error: Review '{review_id}' not found.", err=True)
+            output.error(f"Review '{review_id}' not found.")
             sys.exit(1)
 
         # Edit summary, reason, or suggestion
@@ -1042,15 +1209,18 @@ Examples:
             # Edit the review summary
             modified = editor.edit_review_summary()
             if modified:
+                output.success("✓ Summary updated")
                 store.save(review_id, review)
-                click.echo(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                output.success(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            else:
+                output.info("No changes made to summary")
         else:
             # Edit a suggestion
             if not suggestion_ids or len(suggestion_ids) != 1:
-                click.echo("Error: exactly one suggestion ID is required for edit", err=True)
-                click.echo("Usage: llm-sandbox review edit <review-id> <suggestion-id>", err=True)
-                click.echo("   or: llm-sandbox review edit <review-id> <suggestion-id> --reason", err=True)
-                click.echo("   or: llm-sandbox review edit <review-id> --summary", err=True)
+                output.error("exactly one suggestion ID is required for edit")
+                output.error("Usage: llm-sandbox review edit <review-id> <suggestion-id>")
+                output.error("   or: llm-sandbox review edit <review-id> <suggestion-id> --reason")
+                output.error("   or: llm-sandbox review edit <review-id> --summary")
                 sys.exit(1)
 
             suggestion_id = suggestion_ids[0]
@@ -1059,78 +1229,101 @@ Examples:
                 if edit_reason:
                     # Edit the suggestion reason
                     modified = editor.edit_item_reason(suggestion_id)
+                    if modified:
+                        output.success(f"✓ Updated reason for {suggestion_id}")
+                    else:
+                        output.info("No changes to reason")
                 else:
                     # Edit the suggestion diff
                     modified = editor.edit_suggestion(suggestion_id)
+                    if modified:
+                        output.success(f"✓ Updated suggestion {suggestion_id}")
+                    else:
+                        output.info("No changes made to editor file")
 
                 if modified:
                     # Save the updated review
                     store.save(review_id, review)
-                    click.echo(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                    output.success(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
             except RuntimeError as e:
-                click.echo(f"Error: {e}", err=True)
+                output.error(str(e))
                 sys.exit(1)
 
-    def _display_suggestion_full(self, item: FeedbackItem, diff_generator: FeedbackDiffGenerator, show_separator: bool = True) -> None:
+    def _display_suggestion_full(self, item: FeedbackItem, diff_generator: FeedbackDiffGenerator, show_separator: bool = True, output: Optional['OutputService'] = None) -> None:
         """Display a single suggestion with full details and diff.
 
         Args:
             item: FeedbackItem to display
             diff_generator: Diff generator for showing changes
             show_separator: Whether to show separator before item
+            output: Optional OutputService (uses print() if None for pager compatibility)
         """
         short_id = item.get_short_id()
 
+        # Choose output method
+        out = output.info if output else print
+
         # Separator before item
         if show_separator:
-            click.echo("═" * 80)
+            out("═" * 80)
 
         # Detailed format: show full reason and diff
-        click.echo(f"\n[{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
+        out(f"\n[{short_id}] {item.file}:{item.line_start}-{item.line_end} [{item.category}]")
         if item.commit:
             short_commit = item.commit[:7] if len(item.commit) >= 7 else item.commit
-            click.echo(f"Commit: {short_commit}")
-        click.echo(f"Severity: {item.severity}")
+            out(f"Commit: {short_commit}")
+        out(f"Severity: {item.severity}")
         if item.probability is not None:
-            click.echo(f"Confidence: {item.probability:.2f}")
+            out(f"Confidence: {item.probability:.2f}")
 
         # Newline before reason
-        click.echo()
+        out("")
 
         # Reason text (indented by 4 spaces)
         for line in item.reason.split('\n'):
-            click.echo(f"    {line}")
+            out(f"    {line}")
 
         # Generate and show diff
         try:
             diff_text = diff_generator.generate_diff(item)
             if diff_text:
-                click.echo()  # Blank line before diff
+                out("")  # Blank line before diff
                 for line in diff_text.split('\n'):
-                    self._display_diff_line(line)
+                    self._display_diff_line(line, output=output)
             else:
-                click.echo("\n(No diff available)")
+                out("(No diff available)")
         except Exception as e:
-            click.echo(f"\n(Error generating diff: {e})")
+            out(f"(Error generating diff: {e})")
 
-    def _display_diff_line(self, line: str):
+    def _display_diff_line(self, line: str, output: Optional['OutputService'] = None):
         """Display a diff line with appropriate coloring.
 
         Args:
             line: Diff line to display
+            output: Optional OutputService (uses print() if None for pager compatibility)
         """
+        # ANSI color codes
+        BOLD = '\033[1m'
+        CYAN = '\033[36m'
+        GREEN = '\033[32m'
+        RED = '\033[31m'
+        RESET = '\033[0m'
+
+        # Choose output method
+        out = output.info if output else print
+
         if line.startswith('+++') or line.startswith('---'):
             # File headers (bold)
-            click.secho(line, bold=True)
+            out(f"{BOLD}{line}{RESET}")
         elif line.startswith('@@'):
             # Hunk headers (cyan)
-            click.secho(line, fg='cyan')
+            out(f"{CYAN}{line}{RESET}")
         elif line.startswith('+'):
             # Additions (green)
-            click.secho(line, fg='green')
+            out(f"{GREEN}{line}{RESET}")
         elif line.startswith('-'):
             # Deletions (red)
-            click.secho(line, fg='red')
+            out(f"{RED}{line}{RESET}")
         else:
             # Context lines (no color)
-            click.echo(line)
+            out(line)

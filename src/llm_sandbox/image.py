@@ -1,12 +1,25 @@
 """Container image management."""
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-
-import click
 
 from llm_sandbox.config import ImageConfig
 from llm_sandbox.container import ContainerManager
+from llm_sandbox.events import EventEmitter
+
+
+@dataclass
+class ImageSelected:
+    """Event: Image was selected for use."""
+    image: str
+    reason: str = "Pre-built image"
+
+
+@dataclass
+class ImageBuildStarted:
+    """Event: Image build has started."""
+    image_tag: str
+    reason: str
 
 
 class Image:
@@ -32,6 +45,7 @@ class Image:
         self.config = image_config
         self.project_path = project_path
         self.container_manager = container_manager
+        self.events = EventEmitter()
 
     def get_image(self) -> str:
         """
@@ -49,7 +63,7 @@ class Image:
         else:
             # Pre-built mode: use specified image or default
             image = self.config.image or self.DEFAULT_IMAGE
-            click.echo(f"Using image: {image}")
+            self.events.emit(ImageSelected(image=image))
             return image
 
     def build(self, force: bool = False) -> str:
@@ -128,14 +142,14 @@ class Image:
 
         # Build if needed
         if should_build:
-            click.echo(f"Building image: {image_tag} ({reason})")
+            self.events.emit(ImageBuildStarted(image_tag=image_tag, reason=reason))
             self.container_manager.build_image(
                 containerfile_path,
                 self.project_path,
                 image_tag,
             )
         else:
-            click.echo(f"Using image: {image_tag} ({reason})")
+            self.events.emit(ImageSelected(image=image_tag, reason=reason))
 
         return image_tag
 
@@ -160,7 +174,6 @@ class Image:
             # Compare: if Containerfile modified after image created, rebuild
             return containerfile_mtime > image_created
 
-        except Exception as e:
+        except Exception:
             # If we can't determine, err on the side of rebuilding
-            click.echo(f"Warning: Cannot determine image age: {e}")
             return True

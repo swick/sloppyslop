@@ -2,16 +2,54 @@
 
 import re
 import subprocess
-import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import click
 import requests
 
 from llm_sandbox.git_ops import GitOperations
 from .models import Review, FeedbackItem
+
+
+@dataclass
+class PublishResult:
+    """Result of publishing a review."""
+    summary_posted: bool
+    inline_comments_posted: int
+    inline_comments_failed: int
+    failed_suggestions: List[FeedbackItem]
+
+
+@dataclass
+class SampleInlineComment:
+    """Sample inline comment for preview."""
+    file: str
+    line_start: int
+    line_end: int
+    category: str
+    body_preview: List[str]  # First few lines of the comment
+    total_lines: int  # Total lines in comment
+
+
+@dataclass
+class PublishPreview:
+    """Preview of what will be published."""
+    target_description: str  # e.g., "GitHub PR #123"
+    repository: Optional[str]  # e.g., "owner/repo"
+    pr_url: Optional[str]
+    will_post_summary: bool
+    will_post_inline_count: int
+    summary_body: Optional[str]
+    sample_inline_comments: List[SampleInlineComment]
+
+
+@dataclass
+class PublishSuccess:
+    """Success information after publishing."""
+    pr_url: Optional[str]
+    repository: Optional[str]
 
 
 class ReviewTarget(ABC):
@@ -35,6 +73,9 @@ class ReviewTarget(ABC):
     @abstractmethod
     def fetch_if_needed(self) -> None:
         """Fetch remote refs if needed (e.g., PR from GitHub).
+
+        Raises:
+            RuntimeError: If fetching fails
 
         Uses self.project_dir for repository operations.
         """
@@ -70,26 +111,45 @@ class ReviewTarget(ABC):
         pass
 
     @abstractmethod
-    def print_publish_preview(self, review: Review) -> None:
-        """Print a preview of what will be posted.
+    def get_publish_preview(self, review: Review) -> PublishPreview:
+        """Get preview of what will be published.
 
         Args:
             review: Review object to preview
+
+        Returns:
+            PublishPreview with details of what will be posted
+
+        Raises:
+            NotImplementedError: If publishing not supported
         """
         pass
 
     @abstractmethod
-    def print_published_success(self) -> None:
-        """Print success message after publishing."""
+    def get_publish_success(self) -> PublishSuccess:
+        """Get success information after publishing.
+
+        Returns:
+            PublishSuccess with details about the published review
+
+        Raises:
+            NotImplementedError: If publishing not supported
+        """
         pass
 
     @abstractmethod
-    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> PublishResult:
         """Publish the review to the target (e.g., post to GitHub).
 
         Args:
             review: Review object to publish
             pr_info: Optional PR info (deprecated, not used)
+
+        Returns:
+            PublishResult with details of what was posted
+
+        Raises:
+            RuntimeError: If publishing fails
         """
         pass
 
@@ -181,15 +241,15 @@ class LocalReviewTarget(ReviewTarget):
     def can_publish(self) -> bool:
         return False
 
-    def print_publish_preview(self, review: Review) -> None:
+    def get_publish_preview(self, review: Review) -> PublishPreview:
         """Local reviews cannot be published."""
         raise NotImplementedError("Cannot publish local reviews to remote")
 
-    def print_published_success(self) -> None:
+    def get_publish_success(self) -> PublishSuccess:
         """Local reviews cannot be published."""
         raise NotImplementedError("Cannot publish local reviews to remote")
 
-    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> PublishResult:
         raise NotImplementedError("Cannot publish local reviews to remote")
 
     def _to_info_impl(self) -> Dict[str, Any]:
@@ -241,37 +301,25 @@ class GitHubPRTarget(ReviewTarget):
         self.github_client = GitHubClient(self.token)
 
         # Get repository name
-        click.echo("Fetching repository information...")
         try:
             self.repo_name = self._get_repo_name(self.project_dir)
-            click.echo(f"  Repository: {self.repo_name}")
         except Exception as e:
-            click.echo(f"Error getting repository: {e}", err=True)
-            sys.exit(1)
+            raise RuntimeError(f"Error getting repository: {e}") from e
 
         # Fetch PR info
-        click.echo("Fetching PR information...")
         try:
             self.pr_info = self.github_client.get_pull_request(self.repo_name, self.pr_number)
-            click.echo(f"  PR Title: {self.pr_info['title']}")
-            click.echo(f"  Branch: {self.pr_info['head_ref']} ({self.pr_info['head_sha'][:7]})")
-            click.echo(f"  Base: {self.pr_info['base_ref']} ({self.pr_info['base_sha'][:7]})")
-            click.echo(f"  Author: {self.pr_info['author']}")
         except Exception as e:
-            click.echo(f"Error fetching PR info: {e}", err=True)
-            sys.exit(1)
+            raise RuntimeError(f"Error fetching PR info: {e}") from e
 
         # Fetch PR head
-        click.echo("\nFetching PR commits...")
         self.pr_head_branch = f"fetch/pr-{self.pr_number}/{self.pr_info['head_ref']}"
 
         try:
             refspec = f"pull/{self.pr_number}/head:{self.pr_head_branch}"
             self.git_ops.fetch_ref("origin", refspec)
-            click.echo(f"  Fetched PR head: {self.pr_head_branch}")
         except RuntimeError as e:
-            click.echo(f"Error fetching PR head: {e}", err=True)
-            sys.exit(1)
+            raise RuntimeError(f"Error fetching PR head: {e}") from e
 
     def get_base_ref(self) -> str:
         if not self.pr_info:
@@ -306,8 +354,8 @@ class GitHubPRTarget(ReviewTarget):
     def can_publish(self) -> bool:
         return True
 
-    def print_publish_preview(self, review: Review) -> None:
-        """Print a preview of what will be posted to GitHub."""
+    def get_publish_preview(self, review: Review) -> PublishPreview:
+        """Get preview of what will be posted to GitHub."""
         if not self.github_client or not self.pr_info:
             raise RuntimeError("Must call fetch_if_needed() first")
 
@@ -316,55 +364,47 @@ class GitHubPRTarget(ReviewTarget):
         if review.summary:
             summary_body = self._format_summary_comment(len(review.feedback), review.summary)
 
-        # Display preview
-        click.echo(f"\n{'='*60}")
-        click.echo("Review Post Preview")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nTarget: GitHub PR #{self.pr_number}")
-        click.echo(f"Repository: {self.repo_name}")
-        click.echo(f"PR URL: {pr_url}")
-
-        click.echo(f"\nWill post:")
-        if summary_body:
-            click.echo(f"  • 1 summary comment")
-        click.echo(f"  • {len(review.feedback)} inline comments")
-
-        if summary_body:
-            click.echo(f"\n{'='*60}")
-            click.echo("Summary Comment")
-            click.echo(f"{'='*60}\n")
-            click.echo(summary_body)
-            click.echo(f"\n{'='*60}")
-
-        # Show sample inline comments
+        # Prepare sample inline comments
+        sample_comments = []
         active_feedback = review.get_active_feedback()
-        if active_feedback:
-            click.echo(f"\nSample inline comments ({min(3, len(active_feedback))} of {len(active_feedback)}):")
-            for i, suggestion in enumerate(active_feedback[:3], 1):
-                comment_body = self._format_inline_comment(suggestion)
-                click.echo(f"\n  {i}. {suggestion.file}:{suggestion.line_start}-{suggestion.line_end} [{suggestion.category}]")
-                # Show first 2 lines of the comment body
-                body_lines = comment_body.split('\n')
-                for line in body_lines[:2]:
-                    click.echo(f"     {line}")
-                if len(body_lines) > 2:
-                    click.echo(f"     ... ({len(body_lines) - 2} more lines)")
+        for suggestion in active_feedback[:3]:
+            comment_body = self._format_inline_comment(suggestion)
+            body_lines = comment_body.split('\n')
+            sample_comments.append(SampleInlineComment(
+                file=suggestion.file,
+                line_start=suggestion.line_start,
+                line_end=suggestion.line_end,
+                category=suggestion.category,
+                body_preview=body_lines[:2],
+                total_lines=len(body_lines)
+            ))
 
-    def print_published_success(self) -> None:
-        """Print success message after publishing."""
+        return PublishPreview(
+            target_description=f"GitHub PR #{self.pr_number}",
+            repository=self.repo_name,
+            pr_url=pr_url,
+            will_post_summary=summary_body is not None,
+            will_post_inline_count=len(review.feedback),
+            summary_body=summary_body,
+            sample_inline_comments=sample_comments
+        )
+
+    def get_publish_success(self) -> PublishSuccess:
+        """Get success information after publishing."""
         pr_url = f"https://github.com/{self.repo_name}/pull/{self.pr_number}"
-        click.echo(f"\n{'='*60}")
-        click.echo("✓ Review posted successfully!")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nView at: {pr_url}")
+        return PublishSuccess(
+            pr_url=pr_url,
+            repository=self.repo_name
+        )
 
-    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> None:
+    def publish_review(self, review: Review, pr_info: Optional[Dict] = None) -> PublishResult:
         """Post review summary and inline comments to GitHub."""
         if not self.github_client or not self.pr_info:
             raise RuntimeError("Must call fetch_if_needed() first")
 
         # Format summary for GitHub
         summary_body = None
+        summary_posted = False
         if review.summary:
             summary_body = self._format_summary_comment(len(review.feedback), review.summary)
 
@@ -372,16 +412,16 @@ class GitHubPRTarget(ReviewTarget):
         if summary_body:
             try:
                 self.github_client.post_issue_comment(self.repo_name, self.pr_number, summary_body)
-                click.echo(f"✓ Posted review summary")
-            except Exception as e:
-                click.echo(f"Warning: Failed to post summary: {e}", err=True)
+                summary_posted = True
+            except Exception:
+                pass  # Continue with inline comments even if summary fails
 
         # Post inline comments
         success_count = 0
         failed_suggestions = []
 
         active_feedback = review.get_active_feedback()
-        for i, suggestion in enumerate(active_feedback, 1):
+        for suggestion in active_feedback:
             try:
                 body = self._format_inline_comment(suggestion)
                 self.github_client.post_review_comment(
@@ -393,25 +433,16 @@ class GitHubPRTarget(ReviewTarget):
                     suggestion.line_end,
                     body,
                 )
-                click.echo(f"✓ Posted inline comment {i}/{len(review.feedback)}: {suggestion.file}")
                 success_count += 1
-            except Exception as e:
-                click.echo(f"✗ Failed to post comment {i}: {e}", err=True)
+            except Exception:
                 failed_suggestions.append(suggestion)
 
-        # Show results
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Posted {success_count}/{len(review.feedback)} inline comments")
-        click.echo(f"{'='*60}")
-
-        if failed_suggestions:
-            click.echo(f"\n⚠ Failed to post {len(failed_suggestions)} suggestions as inline comments")
-            click.echo("These suggestions could not be posted (file may not exist in PR diff):")
-            for s in failed_suggestions:
-                click.echo(f"  - {s.file}:{s.line_start}-{s.line_end}")
-
-        click.echo(f"\nView the review at:")
-        click.echo(f"  https://github.com/{self.repo_name}/pull/{self.pr_number}")
+        return PublishResult(
+            summary_posted=summary_posted,
+            inline_comments_posted=success_count,
+            inline_comments_failed=len(failed_suggestions),
+            failed_suggestions=failed_suggestions
+        )
 
     def _get_repo_name(self, project_dir: Path) -> str:
         """Get GitHub repository owner/name from git remote."""

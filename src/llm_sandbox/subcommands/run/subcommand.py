@@ -9,6 +9,8 @@ import click
 
 from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
+from llm_sandbox.event_handlers import wire_up_all_events
+from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.subcommand import Subcommand
 from llm_sandbox.mcp_tools import (
@@ -106,17 +108,23 @@ class RunSubcommand(Subcommand):
         network = kwargs["network"]
         verbose = kwargs["verbose"]
 
+        # Create output service
+        output = create_output_service(format="text", verbose=verbose)
+
         # Load config and create runner
         config = load_config(project_dir)
         runner = SandboxRunner(project_dir, config)
 
+        # Wire up all event handlers
+        wire_up_all_events(runner, output)
+
         # Validate prompt input
         if not prompt and not prompt_file:
-            click.echo("Error: Either --prompt or --prompt-file must be provided", err=True)
+            output.error("Either --prompt or --prompt-file must be provided")
             sys.exit(1)
 
         if prompt and prompt_file:
-            click.echo("Error: Cannot use both --prompt and --prompt-file", err=True)
+            output.error("Cannot use both --prompt and --prompt-file")
             sys.exit(1)
 
         # Load prompt from file if specified
@@ -125,11 +133,11 @@ class RunSubcommand(Subcommand):
 
         # Validate schema input
         if not schema and not schema_file:
-            click.echo("Error: Either --schema or --schema-file must be provided", err=True)
+            output.error("Either --schema or --schema-file must be provided")
             sys.exit(1)
 
         if schema and schema_file:
-            click.echo("Error: Cannot use both --schema and --schema-file", err=True)
+            output.error("Cannot use both --schema and --schema-file")
             sys.exit(1)
 
         # Load output schema
@@ -137,27 +145,32 @@ class RunSubcommand(Subcommand):
             try:
                 output_schema = json.loads(schema)
             except json.JSONDecodeError as e:
-                click.echo(f"Error: Invalid JSON schema: {e}", err=True)
+                output.error(f"Invalid JSON schema: {e}")
                 sys.exit(1)
         else:
             with open(schema_file) as f:
                 output_schema = json.load(f)
 
         # Run the sandbox using async context manager pattern
-        result = asyncio.run(self._execute_async(
-            runner,
-            keep_branch,
-            prompt,
-            output_schema,
-            network,
-            verbose
-        ))
+        try:
+            result = asyncio.run(self._execute_async(
+                runner,
+                keep_branch,
+                prompt,
+                output_schema,
+                network,
+                verbose
+            ))
 
-        # Output result as JSON
-        click.echo("\n" + "=" * 60)
-        click.echo("Result:")
-        click.echo("=" * 60)
-        click.echo(json.dumps(result, indent=2))
+            # Output result as JSON
+            output.info("\n" + "=" * 60)
+            output.info("Result:")
+            output.info("=" * 60)
+            output.info(json.dumps(result, indent=2))
+
+        except Exception as e:
+            output.error(f"Execution failed: {e}")
+            sys.exit(1)
 
     async def _execute_async(
         self,

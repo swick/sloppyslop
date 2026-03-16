@@ -17,8 +17,10 @@ from llm_sandbox.config import (
     load_config,
 )
 from llm_sandbox.container import ContainerManager
+from llm_sandbox.event_handlers import wire_up_container_events, wire_up_image_events
 from llm_sandbox.image import Image
 from llm_sandbox.llm_provider import create_llm_provider
+from llm_sandbox.output import create_output_service
 from llm_sandbox.subcommand import discover_subcommands
 
 
@@ -37,8 +39,11 @@ def cli():
 def check(provider: Optional[str]):
     """Check LLM provider configuration and connectivity."""
     import sys
+    from llm_sandbox.output import create_output_service
 
-    click.echo("Checking LLM provider configuration...\n")
+    output = create_output_service(format="text", verbose=False)
+
+    output.info("Checking LLM provider configuration...\n")
 
     # Load config (merged global + project)
     config = load_config(Path.cwd())
@@ -47,18 +52,18 @@ def check(provider: Optional[str]):
         # Get provider config
         provider_name, provider_config = get_provider_config(config, provider)
 
-        click.echo(f"Provider: {provider_name}")
-        click.echo(f"Model: {provider_config.model}")
+        output.info(f"Provider: {provider_name}")
+        output.info(f"Model: {provider_config.model}")
 
         if isinstance(provider_config, VertexAIConfig):
-            click.echo(f"Region: {provider_config.region}")
-            click.echo(f"Project ID: {provider_config.project_id}")
+            output.info(f"Region: {provider_config.region}")
+            output.info(f"Project ID: {provider_config.project_id}")
         elif isinstance(provider_config, AnthropicConfig):
-            click.echo(f"API Key Env: {provider_config.api_key_env}")
+            output.info(f"API Key Env: {provider_config.api_key_env}")
         else:
             raise ValueError(f"Unknown provider config type: {type(provider_config)}")
 
-        click.echo("\nValidating provider...")
+        output.info("\nValidating provider...")
 
         # Create provider with simple system prompt for validation
         llm_provider = create_llm_provider(
@@ -71,27 +76,27 @@ def check(provider: Optional[str]):
         result = asyncio.run(llm_provider.validate())
 
         if result["success"]:
-            click.echo(f"✓ {result['message']}")
+            output.success(result['message'])
             if "details" in result and "response_id" in result["details"]:
-                click.echo(f"  Response ID: {result['details']['response_id']}")
+                output.info(f"  Response ID: {result['details']['response_id']}")
             sys.exit(0)
         else:
-            click.echo(f"✗ {result['message']}", err=True)
+            output.error(result['message'])
             if "details" in result:
                 details = result["details"]
                 if "error_type" in details:
-                    click.echo(f"  Error Type: {details['error_type']}", err=True)
+                    output.error(f"  Error Type: {details['error_type']}")
                 if "error_message" in details:
-                    click.echo(f"  Error: {details['error_message']}", err=True)
+                    output.error(f"  Error: {details['error_message']}")
                 if "guidance" in details:
-                    click.echo(f"  Suggestion: {details['guidance']}", err=True)
+                    output.info(f"  Suggestion: {details['guidance']}")
             sys.exit(1)
 
     except ValueError as e:
-        click.echo(f"✗ Configuration error: {e}", err=True)
+        output.error(f"Configuration error: {e}")
         sys.exit(1)
     except Exception as e:
-        click.echo(f"✗ Unexpected error: {e}", err=True)
+        output.error(f"Unexpected error: {e}")
         sys.exit(1)
 
 
@@ -101,29 +106,42 @@ def check(provider: Optional[str]):
     is_flag=True,
     help="Force rebuild even if image is up-to-date",
 )
-def build(force: bool):
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Enable verbose output",
+)
+def build(force: bool, verbose: bool):
     """Build the container image from Containerfile."""
     project_dir = Path.cwd()
 
-    click.echo(f"Building container image")
-    click.echo(f"Project directory: {project_dir}")
+    # Create output service
+    output = create_output_service(format="text", verbose=verbose)
+
+    output.info(f"Building container image")
+    output.info(f"Project directory: {project_dir}")
 
     # Load config
     config = load_config(project_dir)
 
     # Create container manager and image manager
     container_manager = ContainerManager()
+
+    # Wire up event handlers for progress display
+    wire_up_container_events(container_manager, output)
+
     image_manager = Image(config.image, project_dir, container_manager)
+    wire_up_image_events(image_manager, output)
 
     try:
         # Build image
         image_tag = image_manager.build(force=force)
 
-        click.echo(f"\n✓ Successfully built image: {image_tag}")
-        click.echo(f"\nThe image will be used on the next run.")
+        output.success(f"Successfully built image: {image_tag}")
+        output.info(f"\nThe image will be used on the next run.")
 
     except RuntimeError as e:
-        click.echo(f"Error: {e}", err=True)
+        output.error(str(e))
         sys.exit(1)
 
 
@@ -132,28 +150,30 @@ def cleanup():
     """Clean up all llm-sandbox worktrees and llm-container branches."""
     import shutil
     from llm_sandbox.git_ops import GitOperations
+    from llm_sandbox.output import create_output_service
 
+    output = create_output_service(format="text", verbose=False)
     project_dir = Path.cwd()
 
-    click.echo("Cleaning up llm-sandbox worktrees and branches")
-    click.echo(f"Project directory: {project_dir}")
+    output.info("Cleaning up llm-sandbox worktrees and branches")
+    output.info(f"Project directory: {project_dir}")
 
     try:
         git_ops = GitOperations(project_dir)
     except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
+        output.error(str(e))
         sys.exit(1)
 
     # Find all worktrees under .llm-sandbox/worktrees/
     worktrees_base = project_dir / ".llm-sandbox" / "worktrees"
 
     if worktrees_base.exists():
-        click.echo(f"\nRemoving worktrees from: {worktrees_base}")
+        output.info(f"\nRemoving worktrees from: {worktrees_base}")
 
         # Iterate through instance directories
         for instance_dir in worktrees_base.iterdir():
             if instance_dir.is_dir():
-                click.echo(f"  Instance: {instance_dir.name}")
+                output.info(f"  Instance: {instance_dir.name}")
 
                 # Find all worktree directories recursively (they might be nested)
                 # A directory is a worktree if it has a .git file
@@ -162,22 +182,22 @@ def cleanup():
                         try:
                             # Get relative path from instance dir for display
                             rel_path = worktree_path.relative_to(instance_dir)
-                            click.echo(f"    Removing worktree: {rel_path}")
+                            output.info(f"    Removing worktree: {rel_path}")
                             git_ops.remove_worktree(worktree_path)
                         except Exception as e:
-                            click.echo(f"    Warning: Failed to remove {rel_path}: {e}", err=True)
+                            output.warning(f"    Failed to remove {rel_path}: {e}")
 
         # Remove the entire worktrees directory
         try:
             shutil.rmtree(worktrees_base)
-            click.echo(f"✓ Removed worktrees directory")
+            output.success("Removed worktrees directory")
         except Exception as e:
-            click.echo(f"Warning: Failed to remove worktrees directory: {e}", err=True)
+            output.warning(f"Failed to remove worktrees directory: {e}")
     else:
-        click.echo("\nNo worktrees directory found")
+        output.info("\nNo worktrees directory found")
 
     # Find and delete all llm-container/* branches
-    click.echo("\nDeleting llm-container branches")
+    output.info("\nDeleting llm-container branches")
 
     try:
         # Get all branches
@@ -186,20 +206,20 @@ def cleanup():
         if branches:
             for branch_name in branches:
                 try:
-                    click.echo(f"  Deleting branch: {branch_name}")
+                    output.info(f"  Deleting branch: {branch_name}")
                     git_ops.delete_branch(branch_name)
                 except Exception as e:
-                    click.echo(f"  Warning: Failed to delete {branch_name}: {e}", err=True)
+                    output.warning(f"  Failed to delete {branch_name}: {e}")
 
-            click.echo(f"✓ Deleted {len(branches)} branch(es)")
+            output.success(f"Deleted {len(branches)} branch(es)")
         else:
-            click.echo("  No llm-container branches found")
+            output.info("  No llm-container branches found")
 
     except Exception as e:
-        click.echo(f"Error listing branches: {e}", err=True)
+        output.error(f"Error listing branches: {e}")
         sys.exit(1)
 
-    click.echo("\n✓ Cleanup complete")
+    output.success("\nCleanup complete")
 
 
 def make_subcommand_callback(subcommand_instance):
@@ -222,7 +242,8 @@ def make_subcommand_callback(subcommand_instance):
                 **kwargs
             )
         except Exception as e:
-            click.echo(f"Error: {e}", err=True)
+            output = create_output_service(format="text", verbose=False)
+            output.error(str(e))
             sys.exit(1)
 
     return callback

@@ -7,13 +7,54 @@ import os
 import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
-import click
 import requests_unixsocket
 from requests_futures.sessions import FuturesSession
+
+from llm_sandbox.events import EventEmitter
+from llm_sandbox.models import ContainerInfo
+
+
+# ContainerManager event types
+
+class ImagePullState(Enum):
+    """State of an image pull operation."""
+    STARTED = "started"
+    DOWNLOADING = "downloading"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class ImagePullProgress:
+    """Progress update for image pull operation."""
+    state: ImagePullState
+    reference: str
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ImageBuildState(Enum):
+    """State of an image build operation."""
+    STARTED = "started"
+    BUILDING = "building"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass
+class ImageBuildProgress:
+    """Progress update for image build operation."""
+    state: ImageBuildState
+    tag: str
+    log_line: Optional[str] = None
+    image_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 class ContainerManager:
@@ -31,6 +72,9 @@ class ContainerManager:
             session=requests_unixsocket.Session()
         )
 
+        # Event emitter for progress and status updates
+        self.events = EventEmitter()
+
         self._check_podman()
 
     def _get_podman_socket_path(self) -> str:
@@ -44,8 +88,8 @@ class ContainerManager:
             response = self.session.get(f"{self.base_url}/v4.0.0/libpod/version")
             response.raise_for_status()
         except Exception as e:
-            click.echo(
-                f"Error: Cannot connect to podman API.\n"
+            error_message = (
+                f"Cannot connect to podman API.\n"
                 f"\n"
                 f"Socket location: {self.socket_path}\n"
                 f"Error details: {e}\n"
@@ -59,10 +103,9 @@ class ContainerManager:
                 f"  systemctl --user status podman.socket\n"
                 f"\n"
                 f"To verify socket exists:\n"
-                f"  ls -l {self.socket_path}",
-                err=True
+                f"  ls -l {self.socket_path}"
             )
-            sys.exit(1)
+            raise RuntimeError(error_message)
 
     def build_image(
         self,
@@ -81,6 +124,11 @@ class ContainerManager:
         Returns:
             Image ID
         """
+        self.events.emit(ImageBuildProgress(
+            state=ImageBuildState.STARTED,
+            tag=tag
+        ))
+
         # Create tar archive of build context
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode='w:gz') as tar:
@@ -112,8 +160,12 @@ class ContainerManager:
                     try:
                         data = json.loads(line)
                         if 'stream' in data:
-                            # Print build output
-                            click.echo(data['stream'], nl=False)
+                            # Emit progress event with build log line
+                            self.events.emit(ImageBuildProgress(
+                                state=ImageBuildState.BUILDING,
+                                tag=tag,
+                                log_line=data['stream']
+                            ))
                         if 'aux' in data and 'ID' in data['aux']:
                             image_id = data['aux']['ID']
                     except json.JSONDecodeError:
@@ -123,9 +175,20 @@ class ContainerManager:
                 # Fallback: get image ID from tag
                 image_id = self._get_image_id(tag)
 
+            self.events.emit(ImageBuildProgress(
+                state=ImageBuildState.COMPLETED,
+                tag=tag,
+                image_id=image_id
+            ))
+
             return image_id
 
         except Exception as e:
+            self.events.emit(ImageBuildProgress(
+                state=ImageBuildState.FAILED,
+                tag=tag,
+                error=str(e)
+            ))
             raise RuntimeError(f"Failed to build image: {e}") from e
 
     def _get_image_id(self, tag: str) -> str:
@@ -146,7 +209,7 @@ class ContainerManager:
         project_mount: Path,
         worktrees_mount: Path,
         network: str = "none",
-    ) -> str:
+    ) -> ContainerInfo:
         """
         Create container with mounts.
 
@@ -157,12 +220,17 @@ class ContainerManager:
             network: Network mode ("none" or "bridge")
 
         Returns:
-            Container ID
+            ContainerInfo with container details
+
+        Raises:
+            RuntimeError: If image doesn't exist or container creation fails
         """
-        # Check if image exists, pull if not
+        # Check if image exists, error out if not
         if not self.image_exists(image_id):
-            click.echo(f"Image not found locally: {image_id}")
-            self.pull_image(image_id)
+            raise RuntimeError(
+                f"Image '{image_id}' not found locally. "
+                f"Pull the image first using pull_image() or build it using build_image()."
+            )
 
         config = {
             "image": image_id,
@@ -195,7 +263,16 @@ class ContainerManager:
             )
             response.raise_for_status()
             data = response.json()
-            return data['Id']
+            container_id = data['Id']
+
+            return ContainerInfo(
+                container_id=container_id,
+                image=image_id,
+                created_at=datetime.now(),
+                project_mount=project_mount,
+                worktrees_mount=worktrees_mount,
+                network=network,
+            )
 
         except Exception as e:
             raise RuntimeError(f"Failed to create container: {e}") from e
@@ -258,9 +335,16 @@ class ContainerManager:
 
         Args:
             reference: Image reference (e.g., "docker.io/library/python:3.11")
+
+        Raises:
+            RuntimeError: If image pull fails
         """
+        self.events.emit(ImagePullProgress(
+            state=ImagePullState.STARTED,
+            reference=reference
+        ))
+
         try:
-            click.echo(f"Pulling image: {reference}")
             response = self.session.post(
                 f"{self.base_url}/v4.0.0/libpod/images/pull",
                 params={"reference": reference},
@@ -274,16 +358,34 @@ class ContainerManager:
                     try:
                         data = json.loads(line)
                         if 'stream' in data:
-                            click.echo(data['stream'].rstrip())
+                            progress_text = data['stream'].rstrip()
+                            self.events.emit(ImagePullProgress(
+                                state=ImagePullState.DOWNLOADING,
+                                reference=reference,
+                                message=progress_text
+                            ))
                         elif 'id' in data:
                             # Show progress for layers
-                            click.echo(f"{data.get('id', '')}: {data.get('status', '')}")
+                            progress_text = f"{data.get('id', '')}: {data.get('status', '')}"
+                            self.events.emit(ImagePullProgress(
+                                state=ImagePullState.DOWNLOADING,
+                                reference=reference,
+                                message=progress_text
+                            ))
                     except json.JSONDecodeError:
                         continue
 
-            click.echo(f"✓ Image pulled: {reference}")
+            self.events.emit(ImagePullProgress(
+                state=ImagePullState.COMPLETED,
+                reference=reference
+            ))
 
         except Exception as e:
+            self.events.emit(ImagePullProgress(
+                state=ImagePullState.FAILED,
+                reference=reference,
+                error=str(e)
+            ))
             raise RuntimeError(f"Failed to pull image: {e}") from e
 
     def get_image_created_time(self, tag: str) -> float:

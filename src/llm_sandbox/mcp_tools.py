@@ -10,8 +10,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import click
-
 
 class MCPTool(ABC):
     """Represents an MCP tool."""
@@ -1071,21 +1069,31 @@ class SpawnAgentTool(MCPTool):
 
             # Create task to run the agent in background
             async def run_background_agent():
-                # Inherit verbose setting from parent runner
-                verbose = self.runner._verbose
-                if verbose:
-                    click.echo(f"\n{'='*60}")
-                    click.echo(f"[Background Agent {agent_id}] Starting at depth {child_spawn_depth}")
-                    click.echo(f"{'='*60}")
+                # Import events here to avoid circular imports
+                from llm_sandbox.runner import BackgroundAgentStarting, BackgroundAgentCompleted, BackgroundAgentFailed
+
+                # Emit event that background agent is starting
+                self.runner.events.emit(BackgroundAgentStarting(
+                    agent_id=agent_id,
+                    spawn_depth=child_spawn_depth
+                ))
 
                 try:
+                    # Inherit verbose setting from parent runner
+                    verbose = self.runner._verbose
                     results = await self.runner.run_agents([agent_config], verbose=verbose)
-                    if verbose:
-                        click.echo(f"\n[Background Agent {agent_id}] ✓ Completed successfully")
+
+                    # Emit event that background agent completed
+                    self.runner.events.emit(BackgroundAgentCompleted(
+                        agent_id=agent_id
+                    ))
                     return results[0]
                 except Exception as e:
-                    if verbose:
-                        click.echo(f"\n[Background Agent {agent_id}] ✗ Failed: {e}")
+                    # Emit event that background agent failed
+                    self.runner.events.emit(BackgroundAgentFailed(
+                        agent_id=agent_id,
+                        error=str(e)
+                    ))
                     raise
 
             # Use BackgroundTaskManager to spawn and track the task
@@ -1094,8 +1102,13 @@ class SpawnAgentTool(MCPTool):
             # Get list of tool names provided to child
             child_tool_names = list(child_mcp_server.tools.keys())
 
-            if self.runner._verbose:
-                click.echo(f"→ Spawned background agent '{agent_id}' (depth {child_spawn_depth}, {len(child_tool_names)} tools)")
+            # Emit event that background agent was spawned
+            from llm_sandbox.runner import BackgroundAgentSpawned
+            self.runner.events.emit(BackgroundAgentSpawned(
+                agent_id=agent_id,
+                spawn_depth=child_spawn_depth,
+                tool_count=len(child_tool_names)
+            ))
 
             return {
                 "success": True,
@@ -1168,10 +1181,12 @@ class WaitForAgentsTool(MCPTool):
                     "message": "No background agents to wait for",
                 }
 
-            if self.runner._verbose:
-                click.echo(f"\nWaiting for {len(agent_ids)} background agent(s) to complete...")
-                for aid in agent_ids:
-                    click.echo(f"  - {aid}")
+            # Emit event that we're waiting for background agents
+            from llm_sandbox.runner import BackgroundAgentsWaiting, BackgroundAgentsAllCompleted
+            self.runner.events.emit(BackgroundAgentsWaiting(
+                agent_ids=agent_ids,
+                agent_count=len(agent_ids)
+            ))
 
             # Use BackgroundTaskManager to wait for agents (handles validation internally)
             results = await self.runner._background_task_manager.wait_for(
@@ -1179,8 +1194,10 @@ class WaitForAgentsTool(MCPTool):
                 timeout=timeout
             )
 
-            if self.runner._verbose:
-                click.echo(f"✓ All {len(agent_ids)} agent(s) completed")
+            # Emit event that all background agents completed
+            self.runner.events.emit(BackgroundAgentsAllCompleted(
+                agent_count=len(agent_ids)
+            ))
 
             # Process results to handle exceptions
             processed_results = {}

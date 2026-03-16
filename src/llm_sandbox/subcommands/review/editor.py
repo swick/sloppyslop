@@ -7,8 +7,6 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Callable
 
-import click
-
 from llm_sandbox.git_ops import GitOperations
 from .diff_generator import FeedbackDiffGenerator
 from .models import FeedbackItem, Review
@@ -110,13 +108,11 @@ class ReviewEditor(Editor):
         # Open in editor
         edited_content = self.edit(initial_content, suffix='.diff')
         if edited_content is None:
-            click.echo("No changes made to editor file")
             return False
 
         # Parse the edited diff (remove comment lines)
         edited_diff = self._parse_edited_diff(edited_content)
         if not edited_diff:
-            click.echo("No valid diff found in edited file")
             return False
 
             # Store original state for comparison
@@ -142,16 +138,8 @@ class ReviewEditor(Editor):
             self.review.feedback[item_index] = item
 
             if full_file_changed or code_changed or range_changed:
-                click.echo(f"✓ Updated suggestion {suggestion_id}")
-                if range_changed:
-                    click.echo(f"  Range: {original_range[0]}-{original_range[1]} → {item.line_start}-{item.line_end}")
-                if code_changed:
-                    old_lines = len(original_suggested_code.splitlines()) if original_suggested_code else 0
-                    new_lines = len(item.suggested_code.splitlines())
-                    click.echo(f"  Suggested code: {old_lines} → {new_lines} lines")
                 return True
             else:
-                click.echo(f"No changes to suggestion {suggestion_id}")
                 return False
 
     def edit_review_summary(self) -> bool:
@@ -164,10 +152,8 @@ class ReviewEditor(Editor):
 
         if new_summary is not None:
             self.review.summary = new_summary
-            click.echo("✓ Summary updated")
             return True
         else:
-            click.echo("No changes made to summary")
             return False
 
     def edit_item_reason(self, suggestion_id: str) -> bool:
@@ -198,18 +184,15 @@ class ReviewEditor(Editor):
         # Open in editor
         edited_content = self.edit(initial_content, suffix='.txt')
         if edited_content is None:
-            click.echo("No changes made")
             return False
 
         # Parse edited content (remove comment lines)
         new_reason = self._parse_edited_reason(edited_content)
         if new_reason == item.reason:
-            click.echo("No changes to reason")
             return False
 
         # Update the item
         item.reason = new_reason
-        click.echo(f"✓ Updated reason for {suggestion_id}")
         return True
 
     def _format_reason_for_edit(self, item: FeedbackItem, suggestion_id: str) -> str:

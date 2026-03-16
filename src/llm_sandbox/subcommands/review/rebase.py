@@ -1,29 +1,46 @@
 """Rebase functionality for applying review suggestions."""
 
-import os
-import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
-import click
 from git import Repo
 
 from llm_sandbox.git_ops import GitOperations
 from .models import FeedbackItem, Review
 
 
+@dataclass
+class ConflictResolutionRequest:
+    """Request for interactive conflict resolution."""
+    repo: Repo
+    worktree_dir: Path
+    commit_sha: str
+    is_fixup: bool
+    conflicted_files: List[str]
+
+
 class ReviewRebase:
     """Handles rebasing commits with review suggestions applied."""
 
-    def __init__(self, project_dir: Path, review: Review):
+    def __init__(
+        self,
+        project_dir: Path,
+        review: Review,
+        conflict_resolver: Optional[Callable[[ConflictResolutionRequest], bool]] = None
+    ):
         """Initialize rebase handler.
 
         Args:
             project_dir: Project root directory
             review: Review object with suggestions
+            conflict_resolver: Optional callback for interactive conflict resolution.
+                             Takes ConflictResolutionRequest, returns True if resolved, False if aborted.
+                             If None, conflicts will cause RuntimeError.
         """
         self.project_dir = project_dir
         self.review = review
+        self.conflict_resolver = conflict_resolver
         self.git_ops = GitOperations(project_dir)
         self.worktrees_base = project_dir / ".llm-sandbox" / "worktrees"
         self.created_worktrees = []
@@ -40,7 +57,6 @@ class ReviewRebase:
             RuntimeError: If rebase operations fail
         """
         if not suggestions:
-            click.echo("No suggestions to apply")
             return
 
         # Verify all suggestions have commits
@@ -48,13 +64,10 @@ class ReviewRebase:
             if not item.commit:
                 raise RuntimeError(f"Suggestion {item.get_short_id()} has no commit SHA")
 
-        click.echo(f"\nApplying {len(suggestions)} suggestion(s)...")
-
         try:
             self._apply_suggestions_internal(suggestions, branch_name)
         finally:
             # Always cleanup worktrees
-            click.echo("\nCleaning up worktrees...")
             self.cleanup()
 
     def _apply_suggestions_internal(self, suggestions: List[FeedbackItem], branch_name: str) -> None:
@@ -78,10 +91,8 @@ class ReviewRebase:
         fixup_commits = []
         try:
             for item in suggestions:
-                click.echo(f"\n[{item.get_short_id()}] Creating fixup for {item.file}:{item.line_start}-{item.line_end}")
                 fixup_commit = self._create_fixup_commit(item)
                 fixup_commits.append(fixup_commit)
-                click.echo(f"  Created fixup commit: {fixup_commit[:7]}")
         finally:
             # Clean up fixup worktree
             if self.fixup_worktree:
@@ -91,10 +102,6 @@ class ReviewRebase:
                 self.fixup_worktree = None
 
         # Step 3: Create new branch at base_ref
-        click.echo(f"\n{'='*60}")
-        click.echo(f"Creating branch '{branch_name}' at {self.review.base_ref}")
-        click.echo(f"{'='*60}")
-
         # Create worktree for the new branch
         worktree_dir = self.worktrees_base / f"llm-review-{branch_name}"
         try:
@@ -107,11 +114,10 @@ class ReviewRebase:
         except Exception as e:
             raise RuntimeError(f"Failed to create branch worktree: {e}") from e
 
-        # Step 3: Get all commits from base to head
+        # Step 4: Get all commits from base to head
         try:
             commits = self.git_ops.get_commits(self.review.base_ref, self.review.head_ref)
             commit_shas = [c.hexsha for c in commits]
-            click.echo(f"\nCherry-picking {len(commit_shas)} original commits with {len(fixup_commits)} fixup commits")
         except Exception as e:
             raise RuntimeError(f"Failed to get commit list: {e}") from e
 
@@ -125,7 +131,6 @@ class ReviewRebase:
             fixup_map[target_commit].append(fixup_commits[idx])
 
         # Step 5: Cherry-pick commits with fixups interleaved
-        click.echo(f"\nCherry-picking commits to '{branch_name}'...")
         worktree_repo = Repo(worktree_dir)
 
         # Cherry-pick in order: original commit, then any fixups for it
@@ -133,31 +138,18 @@ class ReviewRebase:
             # Cherry-pick original commit
             try:
                 worktree_repo.git.cherry_pick(commit_sha)
-                click.echo(f"  ✓ {commit_sha[:7]}")
             except Exception as e:
                 if not self._resolve_cherry_pick_conflict(worktree_repo, worktree_dir, commit_sha, is_fixup=False):
                     raise RuntimeError(f"Cherry-pick conflict: {e}") from e
-                click.echo(f"  ✓ {commit_sha[:7]} (resolved)")
 
             # Cherry-pick any fixup commits for this commit
             if commit_sha in fixup_map:
                 for fixup_commit in fixup_map[commit_sha]:
                     try:
                         worktree_repo.git.cherry_pick(fixup_commit)
-                        click.echo(f"  ✓ {fixup_commit[:7]} (fixup)")
                     except Exception as e:
                         if not self._resolve_cherry_pick_conflict(worktree_repo, worktree_dir, fixup_commit, is_fixup=True):
                             raise RuntimeError(f"Fixup cherry-pick conflict: {e}") from e
-                        click.echo(f"  ✓ {fixup_commit[:7]} (fixup, resolved)")
-
-        click.echo(f"\n{'='*60}")
-        click.echo(f"✓ Successfully created branch '{branch_name}'")
-        click.echo(f"{'='*60}")
-        click.echo(f"\nTo squash fixup commits:")
-        click.echo(f"  git checkout {branch_name}")
-        click.echo(f"  git rebase -i --autosquash {self.review.base_ref}")
-        click.echo(f"\nTo push the branch:")
-        click.echo(f"  git push origin {branch_name}")
 
     def _create_fixup_commit(self, item: FeedbackItem) -> str:
         """Create a fixup commit for a single suggestion.
@@ -219,7 +211,7 @@ class ReviewRebase:
             raise RuntimeError(f"Failed to create fixup commit for {item.file}: {e}") from e
 
     def _resolve_cherry_pick_conflict(self, repo: Repo, worktree_dir: Path, commit_sha: str, is_fixup: bool) -> bool:
-        """Interactively resolve a cherry-pick conflict.
+        """Resolve a cherry-pick conflict.
 
         Args:
             repo: Repo object for the worktree
@@ -229,90 +221,54 @@ class ReviewRebase:
 
         Returns:
             True if conflict was resolved, False if user aborted
+
+        Raises:
+            RuntimeError: If no conflict resolver is configured
         """
-        commit_type = "fixup" if is_fixup else "commit"
-        click.echo(f"\n{'='*60}")
-        click.echo(f"⚠ Cherry-pick conflict on {commit_type} {commit_sha[:7]}")
-        click.echo(f"{'='*60}")
+        # Get list of conflicted files
+        try:
+            conflicted_files = repo.git.diff('--name-only', '--diff-filter=U').strip().split('\n')
+            conflicted_files = [f for f in conflicted_files if f]  # Remove empty strings
+        except Exception:
+            conflicted_files = []
 
-        editor = os.environ.get('EDITOR', 'vi')
-
-        while True:
-            # Get list of conflicted files
+        if not conflicted_files:
+            # No conflicts, check if there are staged changes
             try:
-                conflicted_files = repo.git.diff('--name-only', '--diff-filter=U').strip().split('\n')
-                conflicted_files = [f for f in conflicted_files if f]  # Remove empty strings
-            except Exception:
-                conflicted_files = []
-
-            if not conflicted_files:
-                # No conflicts, check if there are staged changes
-                try:
-                    diff_staged = repo.git.diff('--cached', '--name-only')
-                    if not diff_staged.strip():
-                        click.echo("\nNo conflicts and no staged changes. Aborting cherry-pick.", err=True)
-                        repo.git.cherry_pick('--abort')
-                        return False
-                except Exception:
-                    pass
-                break
-
-            click.echo(f"\nConflicted files ({len(conflicted_files)}):")
-            for f in conflicted_files:
-                click.echo(f"  {f}")
-
-            click.echo(f"\nOpening conflicted files in {editor}...")
-            click.echo("Resolve conflicts and save. The files will be staged automatically.")
-            click.echo("Press Enter to continue, or Ctrl+C to abort.")
-
-            try:
-                input()
-            except KeyboardInterrupt:
-                click.echo("\n\nAborting cherry-pick.", err=True)
-                repo.git.cherry_pick('--abort')
-                return False
-
-            # Open each conflicted file in the editor
-            for conflicted_file in conflicted_files:
-                file_path = worktree_dir / conflicted_file
-                if not file_path.exists():
-                    click.echo(f"Warning: {conflicted_file} not found, skipping", err=True)
-                    continue
-
-                try:
-                    subprocess.run([editor, str(file_path)])
-                except Exception as e:
-                    click.echo(f"Error opening {conflicted_file}: {e}", err=True)
-                    continue
-
-                # Stage the file after editing
-                try:
-                    repo.git.add(conflicted_file)
-                    click.echo(f"✓ Staged {conflicted_file}")
-                except Exception as e:
-                    click.echo(f"Warning: Failed to stage {conflicted_file}: {e}", err=True)
-
-            # Check if conflicts remain (loop back if they do)
-            try:
-                remaining_conflicts = repo.git.diff('--name-only', '--diff-filter=U').strip()
-                if remaining_conflicts:
-                    click.echo(f"\nUnresolved conflicts remain:")
-                    click.echo(remaining_conflicts)
-                    click.echo("Continuing to resolve...")
-                    continue
+                diff_staged = repo.git.diff('--cached', '--name-only')
+                if not diff_staged.strip():
+                    repo.git.cherry_pick('--abort')
+                    return False
             except Exception:
                 pass
 
-            # No more conflicts, break the loop
-            break
+        # If we have conflicts, we need a resolver
+        if conflicted_files and not self.conflict_resolver:
+            raise RuntimeError(
+                f"Cherry-pick conflict on commit {commit_sha[:7]} but no conflict resolver configured. "
+                f"Conflicted files: {', '.join(conflicted_files)}"
+            )
+
+        # Use the callback to resolve conflicts
+        if conflicted_files:
+            request = ConflictResolutionRequest(
+                repo=repo,
+                worktree_dir=worktree_dir,
+                commit_sha=commit_sha,
+                is_fixup=is_fixup,
+                conflicted_files=conflicted_files
+            )
+
+            resolved = self.conflict_resolver(request)
+            if not resolved:
+                return False
 
         # Continue the cherry-pick
         try:
             repo.git.cherry_pick('--continue')
             return True
         except Exception as e:
-            click.echo(f"\nError continuing cherry-pick: {e}", err=True)
-            return False
+            raise RuntimeError(f"Error continuing cherry-pick: {e}") from e
 
     def cleanup(self) -> None:
         """Clean up any created worktrees."""
