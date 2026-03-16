@@ -207,7 +207,7 @@ class TaskManager:
 class Agent:
     """Represents an agent that can be executed in the sandbox."""
 
-    MAX_SPAWN_DEPTH = 5  # Maximum agent nesting depth to prevent infinite chains
+    MAX_SPAWN_DEPTH = 3  # Maximum agent nesting depth to prevent infinite chains
 
     def __init__(
         self,
@@ -245,7 +245,7 @@ class Agent:
         self.spawn_depth = 0 if parent is None else parent.spawn_depth + 1
 
         # Check spawn depth limit to prevent infinite chains
-        if self.spawn_depth > self.MAX_SPAWN_DEPTH:
+        if self.spawn_depth >= self.MAX_SPAWN_DEPTH:
             raise RuntimeError(
                 f"Agent spawn depth {self.spawn_depth} exceeds maximum {self.MAX_SPAWN_DEPTH}. "
                 f"This likely indicates an infinite agent spawn loop."

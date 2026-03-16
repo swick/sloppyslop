@@ -959,8 +959,6 @@ class GrepTool(MCPTool):
 class SpawnAgentTool(MCPTool):
     """Tool for spawning a sub-agent in the background to handle a specific task."""
 
-    MAX_SPAWN_DEPTH = 3  # Configurable limit to prevent infinite recursion
-
     def __init__(self, runner: "SandboxRunner", inheritable: bool = True):
         """
         Initialize spawn agent tool.
@@ -1012,15 +1010,6 @@ class SpawnAgentTool(MCPTool):
                 return {
                     "success": False,
                     "error": "Cannot spawn agent: parent agent not available",
-                }
-
-            # Check spawn depth to prevent infinite recursion
-            parent_depth = agent.spawn_depth
-
-            if parent_depth >= self.MAX_SPAWN_DEPTH:
-                return {
-                    "success": False,
-                    "error": f"Maximum spawn depth ({self.MAX_SPAWN_DEPTH}) exceeded. Current depth: {parent_depth}",
                 }
 
             # Get parent's tools from agent's MCP server
