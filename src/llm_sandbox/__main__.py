@@ -1,24 +1,9 @@
 """CLI entry point for LLM Sandbox."""
 
-import asyncio
-import json
-import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
-from llm_sandbox.subcommands import RunSubcommand, GenContainerfileSubcommand, ReviewSubcommand
-from llm_sandbox.config import (
-    AnthropicConfig,
-    Config,
-    VertexAIConfig,
-    get_provider_config,
-    load_config,
-)
-from llm_sandbox.container import ContainerManager, PodmanConnectionError
-from llm_sandbox.llm_provider import create_llm_provider
-from llm_sandbox.output import create_output_service
 from llm_sandbox.subcommand import discover_subcommands
 
 
@@ -26,251 +11,6 @@ from llm_sandbox.subcommand import discover_subcommands
 def cli():
     """LLM Container Sandbox - Safe isolated execution environment for LLM code analysis."""
     pass
-
-
-@cli.command()
-@click.option(
-    "--provider",
-    type=str,
-    help="Provider to test (defaults to default_provider from config)",
-)
-def check(provider: Optional[str]):
-    """Check LLM provider configuration and connectivity."""
-    import sys
-    from llm_sandbox.output import create_output_service
-
-    output = create_output_service(format="text", verbose=False)
-
-    output.info("Checking LLM provider configuration...\n")
-
-    # Load config (merged global + project)
-    config = load_config(Path.cwd())
-
-    try:
-        # Get provider config
-        provider_name, provider_config = get_provider_config(config, provider)
-
-        output.info(f"Provider: {provider_name}")
-        output.info(f"Model: {provider_config.model}")
-
-        if isinstance(provider_config, VertexAIConfig):
-            output.info(f"Region: {provider_config.region}")
-            output.info(f"Project ID: {provider_config.project_id}")
-        elif isinstance(provider_config, AnthropicConfig):
-            output.info(f"API Key Env: {provider_config.api_key_env}")
-        else:
-            raise ValueError(f"Unknown provider config type: {type(provider_config)}")
-
-        output.info("\nValidating provider...")
-
-        # Create provider and set system prompt
-        llm_provider = create_llm_provider(provider_name, provider_config)
-        llm_provider.set_system_prompt("You are a helpful AI assistant.")
-
-        # Validate
-        result = asyncio.run(llm_provider.validate())
-
-        if result["success"]:
-            output.success(result['message'])
-            if "details" in result and "response_id" in result["details"]:
-                output.info(f"  Response ID: {result['details']['response_id']}")
-            sys.exit(0)
-        else:
-            output.error(result['message'])
-            if "details" in result:
-                details = result["details"]
-                if "error_type" in details:
-                    output.error(f"  Error Type: {details['error_type']}")
-                if "error_message" in details:
-                    output.error(f"  Error: {details['error_message']}")
-                if "guidance" in details:
-                    output.info(f"  Suggestion: {details['guidance']}")
-            sys.exit(1)
-
-    except ValueError as e:
-        output.error(f"Configuration error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        output.error(f"Unexpected error: {e}")
-        sys.exit(1)
-
-
-@cli.command()
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force rebuild even if image is up-to-date",
-)
-@click.option(
-    "--verbose",
-    is_flag=True,
-    help="Enable verbose output",
-)
-def build(force: bool, verbose: bool):
-    """Build the container image from Containerfile."""
-    project_dir = Path.cwd()
-
-    # Create output service
-    output = create_output_service(format="text", verbose=verbose)
-
-    output.info(f"Building container image")
-    output.info(f"Project directory: {project_dir}")
-
-    # Load config
-    config = load_config(project_dir)
-
-    # Check that we have a build config
-    if not config.image or not config.image.build:
-        output.error("No build configuration found. Project is configured to use a pre-built image.")
-        output.info("Run 'llm-sandbox gen-containerfile <image-name>' to set up a Containerfile.")
-        sys.exit(1)
-
-    # Create container manager
-    try:
-        container_manager = ContainerManager()
-    except PodmanConnectionError as e:
-        output.error("Cannot connect to podman API.")
-        output.error(f"\nSocket location: {e.socket_path}")
-        output.error(f"Error details: {e.original_error}")
-        output.info("\nPodman rootless service is required for llm-sandbox.")
-        output.info("\nTo enable and start the service:")
-        output.info("  systemctl --user enable --now podman.socket")
-        output.info("\nTo check status:")
-        output.info("  systemctl --user status podman.socket")
-        output.info("\nTo verify socket exists:")
-        output.info(f"  ls -l {e.socket_path}")
-        sys.exit(1)
-
-    # Create progress callback
-    from llm_sandbox.event_handlers import create_image_build_callback
-    build_callback = create_image_build_callback(output)
-
-    try:
-        # Get build config
-        build_config = config.image.build
-        containerfile_path = project_dir / build_config.containerfile
-        tag = config.image.image
-
-        # Validate Containerfile exists
-        if not containerfile_path.exists():
-            raise RuntimeError(
-                f"Containerfile not found: {containerfile_path}\n"
-                f"Run 'llm-sandbox gen-containerfile <image-name>' to set up the project."
-            )
-
-        # Check if we should build
-        should_build = force
-        if not force:
-            image = container_manager.get_image(tag)
-            if not image:
-                should_build = True
-                output.info(f"Image does not exist, building: {tag}")
-            else:
-                output.info(f"Image already exists: {tag}")
-                if not build_config.auto_rebuild:
-                    output.info("Skipping build (auto_rebuild disabled). Use --force to rebuild.")
-                    return
-
-                # Check if Containerfile is newer
-                containerfile_mtime = containerfile_path.stat().st_mtime
-                if containerfile_mtime > image.created_at.timestamp():
-                    should_build = True
-                    output.info("Containerfile is newer than image, rebuilding")
-                else:
-                    output.info("Image is up-to-date")
-                    return
-
-        if should_build:
-            # Build image with progress callback
-            image = container_manager.build_image(
-                containerfile_path,
-                project_dir,
-                tag,
-                progress_callback=build_callback
-            )
-            output.success(f"Successfully built image: {image.tag}")
-            output.info(f"\nThe image will be used on the next run.")
-
-    except RuntimeError as e:
-        output.error(str(e))
-        sys.exit(1)
-
-
-@cli.command()
-def cleanup():
-    """Clean up all llm-sandbox worktrees and llm-container branches."""
-    import shutil
-    from llm_sandbox.git_ops import GitOperations
-    from llm_sandbox.output import create_output_service
-
-    output = create_output_service(format="text", verbose=False)
-    project_dir = Path.cwd()
-
-    output.info("Cleaning up llm-sandbox worktrees and branches")
-    output.info(f"Project directory: {project_dir}")
-
-    try:
-        git_ops = GitOperations(project_dir)
-    except ValueError as e:
-        output.error(str(e))
-        sys.exit(1)
-
-    # Find all worktrees under .llm-sandbox/worktrees/
-    worktrees_base = project_dir / ".llm-sandbox" / "worktrees"
-
-    if worktrees_base.exists():
-        output.info(f"\nRemoving worktrees from: {worktrees_base}")
-
-        # Iterate through instance directories
-        for instance_dir in worktrees_base.iterdir():
-            if instance_dir.is_dir():
-                output.info(f"  Instance: {instance_dir.name}")
-
-                # Find all worktree directories recursively (they might be nested)
-                # A directory is a worktree if it has a .git file
-                for worktree_path in instance_dir.rglob("*"):
-                    if worktree_path.is_dir() and (worktree_path / ".git").exists():
-                        try:
-                            # Get relative path from instance dir for display
-                            rel_path = worktree_path.relative_to(instance_dir)
-                            output.info(f"    Removing worktree: {rel_path}")
-                            git_ops.remove_worktree(worktree_path)
-                        except Exception as e:
-                            output.warning(f"    Failed to remove {rel_path}: {e}")
-
-        # Remove the entire worktrees directory
-        try:
-            shutil.rmtree(worktrees_base)
-            output.success("Removed worktrees directory")
-        except Exception as e:
-            output.warning(f"Failed to remove worktrees directory: {e}")
-    else:
-        output.info("\nNo worktrees directory found")
-
-    # Find and delete all llm-container/* branches
-    output.info("\nDeleting llm-container branches")
-
-    try:
-        # Get all branches
-        branches = [ref.name for ref in git_ops.repo.refs if ref.name.startswith("llm-container/")]
-
-        if branches:
-            for branch_name in branches:
-                try:
-                    output.info(f"  Deleting branch: {branch_name}")
-                    git_ops.delete_branch(branch_name)
-                except Exception as e:
-                    output.warning(f"  Failed to delete {branch_name}: {e}")
-
-            output.success(f"Deleted {len(branches)} branch(es)")
-        else:
-            output.info("  No llm-container branches found")
-
-    except Exception as e:
-        output.error(f"Error listing branches: {e}")
-        sys.exit(1)
-
-    output.success("\nCleanup complete")
 
 
 def make_subcommand_callback(subcommand_instance):
@@ -358,16 +98,9 @@ def register_subcommand_class(subcommand_class):
         cli.add_command(result)
 
 
-def register_builtin_subcommands():
-    """Register built-in subcommands."""
-    register_subcommand_class(RunSubcommand)
-    register_subcommand_class(GenContainerfileSubcommand)
-    register_subcommand_class(ReviewSubcommand)
-
-
-def register_custom_subcommands():
+def register_all_subcommands():
     """
-    Discover and register custom subcommands from config directories.
+    Discover and register all subcommands (built-in and custom).
     """
     subcommands = discover_subcommands(Path.cwd())
 
@@ -375,8 +108,7 @@ def register_custom_subcommands():
         register_subcommand_class(subcommand_class)
 
 
-register_builtin_subcommands()
-register_custom_subcommands()
+register_all_subcommands()
 
 
 if __name__ == "__main__":

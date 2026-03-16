@@ -167,11 +167,12 @@ class Subcommand(ABC):
 
 def discover_subcommands(project_dir: Optional[Path] = None) -> Dict[str, type]:
     """
-    Discover subcommand modules from config directories.
+    Discover subcommand modules from directories.
 
     Searches in order:
-    1. Project-level: {project_dir}/.llm-sandbox/subcommands/*.py
-    2. Global: $XDG_CONFIG_HOME/llm-sandbox/subcommands/*.py
+    1. Built-in: llm_sandbox/subcommands/*/subcommand.py
+    2. Global: $XDG_CONFIG_HOME/llm-sandbox/subcommands/*/subcommand.py
+    3. Project-level: {project_dir}/.llm-sandbox/subcommands/*/subcommand.py
 
     Args:
         project_dir: Project directory (optional)
@@ -185,6 +186,11 @@ def discover_subcommands(project_dir: Optional[Path] = None) -> Dict[str, type]:
 
     subcommands = {}
     search_paths = []
+
+    # Add built-in subcommands directory
+    builtin_dir = Path(__file__).parent / "subcommands"
+    if builtin_dir.exists():
+        search_paths.append(builtin_dir)
 
     # Add global config subcommands directory
     xdg_config = os.getenv("XDG_CONFIG_HOME")
@@ -204,31 +210,36 @@ def discover_subcommands(project_dir: Optional[Path] = None) -> Dict[str, type]:
 
     # Load subcommand modules
     for search_path in search_paths:
-        for file_path in search_path.glob("*.py"):
-            if file_path.name.startswith("_"):
-                continue
-
-            module_name = f"llm_sandbox_subcommand_{file_path.stem}"
+        for file_path in search_path.glob("*/subcommand.py"):
+            subcommand_name = file_path.parent.name
 
             try:
-                # Load module
-                spec = importlib.util.spec_from_file_location(module_name, file_path)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[module_name] = module
-                    spec.loader.exec_module(module)
+                # For built-in subcommands, use regular import
+                if search_path == builtin_dir:
+                    module_name = f"llm_sandbox.subcommands.{subcommand_name}.subcommand"
+                    module = importlib.import_module(module_name)
+                else:
+                    # For custom subcommands, use dynamic loading
+                    module_name = f"llm_sandbox_subcommand_{subcommand_name}"
+                    spec = importlib.util.spec_from_file_location(module_name, file_path)
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        sys.modules[module_name] = module
+                        spec.loader.exec_module(module)
+                    else:
+                        continue
 
-                    # Find Subcommand classes in module
-                    for attr_name in dir(module):
-                        attr = getattr(module, attr_name)
-                        if (
-                            isinstance(attr, type)
-                            and issubclass(attr, Subcommand)
-                            and attr is not Subcommand
-                            and hasattr(attr, "name")
-                            and attr.name
-                        ):
-                            subcommands[attr.name] = attr
+                # Find Subcommand classes in module
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, Subcommand)
+                        and attr is not Subcommand
+                        and hasattr(attr, "name")
+                        and attr.name
+                    ):
+                        subcommands[attr.name] = attr
 
             except Exception as e:
                 # Note: Can't use OutputService here - this runs at import time
