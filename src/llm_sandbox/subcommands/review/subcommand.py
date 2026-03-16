@@ -380,7 +380,7 @@ Examples:
         if not sorted_feedback:
             output.info("\nNo high-confidence suggestions. All files look good!")
 
-        output.success(f"\n✓ Review saved to: {output_file}")
+        output.verbose(f"\n✓ Review saved to: {output_file}")
 
 
     def _display_agent_results(self, result: dict, output: OutputService):
@@ -877,7 +877,7 @@ Examples:
         # Save the updated review
         if dismissed_count > 0:
             store.save(review_id, review)
-            output.success(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.verbose(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
     def _rebase_suggestions(self, store: ReviewStore, **kwargs):
         """Rebase commits with review suggestions applied."""
@@ -1094,7 +1094,7 @@ Examples:
         # Save the updated review
         if undismissed_count > 0:
             store.save(review_id, review)
-            output.success(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.verbose(f"✓ Updated review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
 
     def _check_suggestions(self, store: ReviewStore, **kwargs):
         """Interactively review suggestions one by one."""
@@ -1154,7 +1154,7 @@ Examples:
                     output.info("\nQuitting review...")
                     if modified:
                         store.save(review_id, review)
-                        output.success(f"✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                        output.verbose("✓ Changes saved")
                     return
 
                 elif action == 'a':
@@ -1210,7 +1210,7 @@ Examples:
         # Save if modified
         if modified:
             store.save(review_id, review)
-            output.success(f"\n✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+            output.verbose(f"\n✓ Changes saved to: {store.reviews_dir / f'{review_id}.yaml'}")
         else:
             output.info("\nNo changes made")
 
@@ -1243,7 +1243,7 @@ Examples:
             if modified:
                 output.success("✓ Summary updated")
                 store.save(review_id, review)
-                output.success(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                output.verbose(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
             else:
                 output.info("No changes made to summary")
         else:
@@ -1276,7 +1276,7 @@ Examples:
                 if modified:
                     # Save the updated review
                     store.save(review_id, review)
-                    output.success(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
+                    output.verbose(f"✓ Review saved to: {store.reviews_dir / f'{review_id}.yaml'}")
             except RuntimeError as e:
                 output.error(str(e))
                 sys.exit(1)
