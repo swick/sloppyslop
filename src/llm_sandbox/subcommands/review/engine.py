@@ -444,10 +444,8 @@ class ReviewWorkflow:
     async def run(self, runner, review_target: "ReviewTarget") -> Review:
         """Run the full review workflow with LLM agent.
 
-        Expects runner to already be setup (caller must call runner.setup() first).
-
         Args:
-            runner: SandboxRunner instance (already setup)
+            runner: SandboxRunner instance (setup happens automatically in constructor)
             review_target: ReviewTarget instance (provides diff/commits data)
 
         Returns:

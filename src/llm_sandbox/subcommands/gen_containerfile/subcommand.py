@@ -74,7 +74,13 @@ class GenContainerfileSubcommand(Subcommand):
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config, verbose=verbose)
+        runner = SandboxRunner(
+            project_dir,
+            config,
+            verbose=verbose,
+            network="enabled",
+            image=Image.DEFAULT_IMAGE,
+        )
 
         # Wire up all event handlers
         wire_up_all_events(runner, output)
@@ -160,8 +166,6 @@ Explore the project thoroughly before generating the Containerfile."""
     async def _execute_async(self, runner, prompt, output_schema, verbose, output):
         """Async execution of Containerfile generation."""
         async with runner:
-            await runner.setup(network="enabled", image=Image.DEFAULT_IMAGE)
-
             # Create MCP server with project exploration tools
             mcp_server = GenContainerfileMCPServer(runner)
 

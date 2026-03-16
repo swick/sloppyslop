@@ -10,9 +10,10 @@ tools are requested in a single turn, they are executed concurrently.
 
 import asyncio
 from pathlib import Path
-from llm_sandbox import SandboxRunner, AgentConfig, MCPServer
+from llm_sandbox import SandboxRunner, Agent
 from llm_sandbox.config import Config
 from llm_sandbox.mcp_tools import (
+    MCPServer,
     ExecuteCommandTool,
     CheckoutCommitTool,
     ReadFileTool,
@@ -42,18 +43,18 @@ async def main():
     project_path = Path.cwd()
     config = Config()  # Load from default config file
 
-    runner = SandboxRunner(project_path, config)
+    # Runner setup happens automatically in constructor
+    runner = SandboxRunner(project_path, config, verbose=True)
 
-    # Use async context manager for proper lifecycle management
+    # Use async context manager for proper cleanup
     async with runner:
-        await runner.setup()
-
-        # Create agent configurations
-        # All agents will use the SAME async MCP server in this simple example
+        # Create agents
+        # Each agent gets its own MCP server with tools
         # In practice, you might want different tool sets per agent
 
         agents = [
-            AgentConfig(
+            Agent(
+                runner=runner,
                 prompt="Analyze the main Python files in the src/ directory",
                 output_schema={
                     "type": "object",
@@ -64,9 +65,9 @@ async def main():
                     "required": ["files_analyzed", "summary"],
                 },
                 mcp_server=create_mcp_server_for_agent(runner),
-                agent_id="python-analyzer",
             ),
-            AgentConfig(
+            Agent(
+                runner=runner,
                 prompt="Find all test files and summarize the testing approach",
                 output_schema={
                     "type": "object",
@@ -77,9 +78,9 @@ async def main():
                     "required": ["test_files", "testing_approach"],
                 },
                 mcp_server=create_mcp_server_for_agent(runner),
-                agent_id="test-analyzer",
             ),
-            AgentConfig(
+            Agent(
+                runner=runner,
                 prompt="Analyze the project's configuration files (pyproject.toml, setup.py, etc.)",
                 output_schema={
                     "type": "object",
@@ -91,29 +92,39 @@ async def main():
                     "required": ["config_files", "dependencies", "project_name"],
                 },
                 mcp_server=create_mcp_server_for_agent(runner),
-                agent_id="config-analyzer",
             ),
         ]
 
-        # Run agents in parallel
+        # Start all agents in parallel
         print("\n" + "="*60)
         print("Running 3 agents in parallel...")
         print("="*60)
 
-        results = await runner.run_agents(agents, verbose=True)
+        # Execute all agents (starts them)
+        for agent in agents:
+            await agent.execute()
+
+        # Wait for all agents to complete
+        results = []
+        for agent in agents:
+            try:
+                result = await agent.wait()
+                results.append({"success": True, "result": result})
+            except Exception as e:
+                results.append({"success": False, "error": str(e)})
 
         # Display results
         print("\n" + "="*60)
         print("RESULTS:")
         print("="*60)
 
-        for i, (agent, result) in enumerate(zip(agents, results)):
-            print(f"\n[Agent {agent.agent_id}]")
-            print(f"Success: {result.get('success', 'N/A' if 'error' not in result else False)}")
-            if "error" in result:
-                print(f"Error: {result['error']}")
+        for i, (agent, result) in enumerate(zip(agents, results), 1):
+            print(f"\n[Agent {i}: {agent.agent_id}]")
+            print(f"Success: {result.get('success', False)}")
+            if not result.get('success'):
+                print(f"Error: {result.get('error', 'Unknown error')}")
             else:
-                print(f"Result: {result}")
+                print(f"Result: {result.get('result', {})}")
 
         # Cleanup happens automatically in __aexit__
 

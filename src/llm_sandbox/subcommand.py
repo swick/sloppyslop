@@ -48,14 +48,19 @@ class Subcommand(ABC):
                 network = kwargs["network"]
                 verbose = kwargs["verbose"]
 
-                # Load config and create runner
+                # Load config and create runner (setup happens in constructor)
                 config = load_config(project_dir)
-                runner = SandboxRunner(project_dir, config, verbose=verbose)
+                runner = SandboxRunner(
+                    project_dir,
+                    config,
+                    verbose=verbose,
+                    keep_branches=["my-branch"],
+                    network=network,
+                )
 
-                # Setup sandbox, run agent, and cleanup
+                # Run agent with async context manager for cleanup
                 async def main():
                     async with runner:
-                        await runner.setup(keep_branches=["my-branch"], network=network)
                         mcp_server = AnalyzeMCPServer(runner)
 
                         # Option 1: Using Agent class (recommended)
@@ -121,16 +126,21 @@ class Subcommand(ABC):
             Any value (typically None or a result dict)
 
         Note:
-            Subcommands should create their own SandboxRunner instance using:
+            Subcommands should create their own SandboxRunner instance.
+            Setup happens automatically in the constructor:
                 from llm_sandbox.config import load_config
                 from llm_sandbox.runner import SandboxRunner
 
                 config = load_config(project_dir)
-                runner = SandboxRunner(project_dir, config, verbose=verbose)
+                runner = SandboxRunner(
+                    project_dir,
+                    config,
+                    verbose=verbose,
+                    network=network,
+                )
 
-            Best practice is to use the async context manager pattern:
+            Best practice is to use the async context manager pattern for cleanup:
                 async with runner:
-                    await runner.setup(network=network)
                     # ... create mcp_server ...
                     from llm_sandbox import Agent
                     agent = Agent(

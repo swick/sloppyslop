@@ -235,7 +235,7 @@ Examples:
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config, verbose=verbose)
+        runner = SandboxRunner(project_dir, config, verbose=verbose, network=network)
 
         # Wire up event handlers
         wire_up_all_events(runner, output)
@@ -298,7 +298,6 @@ Examples:
         # Execute workflow with async context manager
         async def run_workflow():
             async with runner:
-                await runner.setup(network=network)
                 return await workflow.run(runner, review_target)
 
         review = asyncio.run(run_workflow())

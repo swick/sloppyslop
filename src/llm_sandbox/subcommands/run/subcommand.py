@@ -112,7 +112,13 @@ class RunSubcommand(Subcommand):
 
         # Load config and create runner
         config = load_config(project_dir)
-        runner = SandboxRunner(project_dir, config, verbose=verbose)
+        runner = SandboxRunner(
+            project_dir,
+            config,
+            verbose=verbose,
+            keep_branches=list(keep_branch) if keep_branch else [],
+            network=network,
+        )
 
         # Wire up all event handlers
         wire_up_all_events(runner, output)
@@ -182,11 +188,6 @@ class RunSubcommand(Subcommand):
     ):
         """Async execution of run command."""
         async with runner:
-            await runner.setup(
-                keep_branches=list(keep_branch) if keep_branch else [],
-                network=network,
-            )
-
             # Create MCP server with all built-in tools
             mcp_server = RunMCPServer(runner)
 

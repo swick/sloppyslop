@@ -310,7 +310,7 @@ class Agent:
 
         # Validate runner is setup
         if not self.runner.container_id or not self.runner.instance_id:
-            raise RuntimeError("Must call runner.setup() before executing agents")
+            raise RuntimeError("Runner not properly initialized")
 
         # Generate agent_id if not provided
         if not self._agent_id:
@@ -420,14 +420,25 @@ class Agent:
 class SandboxRunner:
     """Orchestrates one-shot LLM prompt execution in sandbox."""
 
-    def __init__(self, project_path: Path, config: Config, verbose: bool = False):
+    def __init__(
+        self,
+        project_path: Path,
+        config: Config,
+        verbose: bool = False,
+        keep_branches: Optional[List[str]] = None,
+        network: Optional[str] = None,
+        image: Optional[str] = None,
+    ):
         """
-        Initialize sandbox runner.
+        Initialize sandbox runner and setup environment.
 
         Args:
             project_path: Path to project directory
             config: Merged configuration (global + project overrides)
             verbose: Enable verbose output for all agents
+            keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
+            network: Network mode override (optional, uses config if not specified)
+            image: Image name/tag override (optional, uses config if not specified)
         """
         self.project_path = project_path
         self.config = config
@@ -442,15 +453,12 @@ class SandboxRunner:
         self.container_manager = ContainerManager()
         self.git_ops = GitOperations(project_path)
 
-        # Public API - Instance state (available after setup())
-        self.instance_id: Optional[str] = None
-        self.container_id: Optional[str] = None
-        self.worktrees_base_dir: Optional[Path] = None
+        # Public API - Instance state
         self.created_worktrees: List[str] = []  # Track worktree names
 
         # Parallel execution support
         self._agent_llm_providers: Dict[str, LLMProvider] = {}
-        # Initialize locks immediately (not in async setup) so they're always available
+        # Initialize locks immediately so they're always available
         self._git_lock = asyncio.Lock()
         self._worktrees_lock = asyncio.Lock()
         self._background_task_manager = BackgroundTaskManager()
@@ -460,10 +468,58 @@ class SandboxRunner:
         self._review_feedback: List[Any] = []
 
         # Internal state
-        self._keep_branches: List[str] = []
-        self._network_mode: str = "none"
         self._cleaned_up: bool = False
         self._verbose: bool = verbose  # Verbose setting for all spawned agents
+
+        # Setup sandbox environment
+        if keep_branches is None:
+            keep_branches = []
+        self._keep_branches = keep_branches
+
+        # Use network from config if not specified
+        if network is None:
+            network = self.config.container.network
+
+        # Convert network setting to podman format
+        self._network_mode = "none" if network == "isolated" else "bridge"
+
+        # Step 1: Generate instance ID and create empty worktrees directory
+        self.instance_id = self._generate_instance_id()
+        self.worktrees_base_dir = (
+            self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
+        )
+        self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
+        self.events.emit(InstanceCreated(
+            instance_id=self.instance_id,
+            timestamp=datetime.now()
+        ))
+
+        # Step 2: Get container image tag
+        if image:
+            # Use provided image directly
+            image_tag = image
+        else:
+            # Use image from config or default
+            image_tag = self.config.image.image if self.config.image else "registry.fedoraproject.org/fedora-toolbox:44"
+
+        # Step 3: Create and start container
+        container_info = self.container_manager.create_container(
+            image_tag,
+            self.project_path,
+            self.worktrees_base_dir,
+            self._network_mode,
+        )
+        self.container_id = container_info.container_id
+
+        self.container_manager.start_container(self.container_id)
+        self.events.emit(ContainerStarted(
+            container_id=self.container_id,
+            image=container_info.image,
+            timestamp=datetime.now()
+        ))
+
+        # Create symlink in container so worktree .git files work
+        self._setup_git_symlink()
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -493,7 +549,7 @@ class SandboxRunner:
         short_uuid = str(uuid.uuid4())[:8]
         return f"{timestamp}-{short_uuid}"
 
-    async def _setup_git_symlink(self) -> None:
+    def _setup_git_symlink(self) -> None:
         """
         Create symlink in container so worktree .git files work correctly.
 
@@ -512,11 +568,11 @@ class SandboxRunner:
 
             # Create the project directory structure in the container
             # (everything up to but not including .git)
-            exit_code, _, stderr = await self.container_manager.exec_command(
+            exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
                 self.container_id,
                 f"mkdir -p {host_project_path}",
                 workdir="/",
-            )
+            ))
 
             if exit_code != 0:
                 self.events.emit(WarningIssued(
@@ -526,11 +582,11 @@ class SandboxRunner:
                 return
 
             # Create symlink from host path to /project/.git
-            exit_code, _, stderr = await self.container_manager.exec_command(
+            exit_code, _, stderr = asyncio.run(self.container_manager.exec_command(
                 self.container_id,
                 f"ln -sf /project/.git {host_project_path}/.git",
                 workdir="/",
-            )
+            ))
 
             if exit_code != 0:
                 self.events.emit(WarningIssued(
@@ -641,75 +697,6 @@ class SandboxRunner:
                     message=f"Failed to remove instance directory: {e}",
                     context="cleanup_worktrees"
                 ))
-
-    async def setup(
-        self,
-        keep_branches: Optional[List[str]] = None,
-        network: Optional[str] = None,
-        image: Optional[str] = None,
-    ) -> None:
-        """
-        Setup the sandbox environment: create worktrees dir, get image, start container.
-
-        Args:
-            keep_branches: List of branch names to keep (will be renamed from llm-container/{instance_id}/{name} to {name})
-            network: Network mode override (optional)
-            image: Image name/tag override (optional, uses config if not specified)
-        """
-        if keep_branches is None:
-            keep_branches = []
-
-        # Store for cleanup
-        self._keep_branches = keep_branches
-
-        # Use network from config if not specified
-        if network is None:
-            network = self.config.container.network
-
-        # Convert network setting to podman format
-        self._network_mode = "none" if network == "isolated" else "bridge"
-
-        # Step 1: Generate instance ID and create empty worktrees directory
-        self.instance_id = self._generate_instance_id()
-        self.worktrees_base_dir = (
-            self.project_path / ".llm-sandbox" / "worktrees" / self.instance_id
-        )
-        self.worktrees_base_dir.mkdir(parents=True, exist_ok=True)
-        self.events.emit(InstanceCreated(
-            instance_id=self.instance_id,
-            timestamp=datetime.now()
-        ))
-
-        # Step 2: Get container image tag
-        if image:
-            # Use provided image directly
-            image_tag = image
-        else:
-            # Use image from config or default
-            image_tag = self.config.image.image if self.config.image else "registry.fedoraproject.org/fedora-toolbox:44"
-
-        # Step 3: Create and start container
-        container_info = self.container_manager.create_container(
-            image_tag,
-            self.project_path,
-            self.worktrees_base_dir,
-            self._network_mode,
-        )
-        self.container_id = container_info.container_id
-
-        self.container_manager.start_container(self.container_id)
-        self.events.emit(ContainerStarted(
-            container_id=self.container_id,
-            image=container_info.image,
-            timestamp=datetime.now()
-        ))
-
-        # Create symlink in container so worktree .git files work
-        # The .git file in a worktree contains: gitdir: /host/path/.git/worktrees/name
-        # We create a symlink: /host/path/.git -> /project/.git
-        await self._setup_git_symlink()
-
-        # Locks are already initialized in __init__()
 
     def _create_agent_llm_provider(self, agent_id: str) -> LLMProvider:
         """
