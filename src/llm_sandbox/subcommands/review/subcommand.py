@@ -1130,12 +1130,7 @@ Examples:
         output.info(f"{'='*60}")
         output.info(f"\nReviewing {len(active_feedback)} active suggestions\n")
 
-        # Offer to edit summary first
         modified = False
-        if click.confirm("Edit review summary first?", default=False):
-            if editor.edit_review_summary():
-                modified = True
-                output.success("✓ Summary updated")
 
         for i, item in enumerate(active_feedback, 1):
             output.info(f"\n{'='*60}")
@@ -1149,8 +1144,8 @@ Examples:
             while True:
                 output.info("")
                 action = click.prompt(
-                    "Action (edit [d]iff, edit [r]eason, [i]gnore, [a]ccept, [q]uit)",
-                    type=click.Choice(['d', 'r', 'i', 'a', 'q'], case_sensitive=False),
+                    "Action (edit [d]iff, edit [r]eason, dis[m]iss, [a]ccept, [q]uit)",
+                    type=click.Choice(['d', 'r', 'm', 'a', 'q'], case_sensitive=False),
                     default='a',
                     show_choices=False
                 )
@@ -1166,8 +1161,8 @@ Examples:
                     # Accept - just move to next
                     break
 
-                elif action == 'i':
-                    # Ignore (dismiss)
+                elif action == 'm':
+                    # Dismiss
                     item.ignore = True
                     modified = True
                     output.success(f"✓ Dismissed suggestion {item.get_short_id()}")
@@ -1202,6 +1197,15 @@ Examples:
                         output.error(f"Error editing reason: {e}")
                     # Continue loop to show prompt again
                     continue
+
+        # Offer to edit summary last (after reviewing all suggestions)
+        output.info(f"\n{'='*60}")
+        output.info("All suggestions reviewed")
+        output.info(f"{'='*60}\n")
+        if click.confirm("Edit review summary?", default=False):
+            if editor.edit_review_summary():
+                modified = True
+                output.success("✓ Summary updated")
 
         # Save if modified
         if modified:
