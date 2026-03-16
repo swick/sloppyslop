@@ -48,8 +48,17 @@ class Subcommand(ABC):
                 network = kwargs["network"]
                 verbose = kwargs["verbose"]
 
-                # Load config and create runner (setup happens in constructor)
+                # Load config
                 config = load_config(project_dir)
+
+                # Pull image if needed
+                from llm_sandbox.container import ContainerManager, DEFAULT_IMAGE
+                image_tag = config.image.image if config.image and config.image.image else DEFAULT_IMAGE
+                container_manager = ContainerManager()
+                if not container_manager.image_exists(image_tag):
+                    container_manager.pull_image(image_tag)
+
+                # Create runner (setup happens in constructor)
                 runner = SandboxRunner(
                     project_dir,
                     config,
@@ -130,9 +139,17 @@ class Subcommand(ABC):
             Subcommands should create their own SandboxRunner instance.
             Setup happens automatically in the constructor:
                 from llm_sandbox.config import load_config
+                from llm_sandbox.container import ContainerManager, DEFAULT_IMAGE
                 from llm_sandbox.runner import SandboxRunner
 
                 config = load_config(project_dir)
+
+                # Pull image if needed
+                image_tag = config.image.image if config.image and config.image.image else DEFAULT_IMAGE
+                container_manager = ContainerManager()
+                if not container_manager.image_exists(image_tag):
+                    container_manager.pull_image(image_tag)
+
                 runner = SandboxRunner(
                     project_dir,
                     config,
