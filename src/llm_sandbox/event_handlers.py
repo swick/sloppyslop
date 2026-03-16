@@ -40,12 +40,14 @@ from llm_sandbox.runner import (
 )
 
 
-def wire_up_container_events(container_manager, output: OutputService) -> None:
-    """Wire up container manager event handlers.
+def create_image_pull_callback(output: OutputService):
+    """Create a callback for image pull progress.
 
     Args:
-        container_manager: ContainerManager instance
         output: OutputService for formatting output
+
+    Returns:
+        Callback function for ImagePullProgress events
     """
     def handle_image_pull(event: ImagePullProgress):
         if event.state == ImagePullState.STARTED:
@@ -57,6 +59,18 @@ def wire_up_container_events(container_manager, output: OutputService) -> None:
         elif event.state == ImagePullState.FAILED:
             output.error(f"Failed to pull image: {event.error}")
 
+    return handle_image_pull
+
+
+def create_image_build_callback(output: OutputService):
+    """Create a callback for image build progress.
+
+    Args:
+        output: OutputService for formatting output
+
+    Returns:
+        Callback function for ImageBuildProgress events
+    """
     def handle_image_build(event: ImageBuildProgress):
         if event.state == ImageBuildState.STARTED:
             output.info(f"Building image: {event.tag}")
@@ -67,8 +81,7 @@ def wire_up_container_events(container_manager, output: OutputService) -> None:
         elif event.state == ImageBuildState.FAILED:
             output.error(f"Failed to build image: {event.error}")
 
-    container_manager.events.on(ImagePullProgress, handle_image_pull)
-    container_manager.events.on(ImageBuildProgress, handle_image_build)
+    return handle_image_build
 
 
 def wire_up_runner_events(runner, output: OutputService) -> None:

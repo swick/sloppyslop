@@ -63,12 +63,9 @@ def check(provider: Optional[str]):
 
         output.info("\nValidating provider...")
 
-        # Create provider with simple system prompt for validation
-        llm_provider = create_llm_provider(
-            provider_name,
-            provider_config,
-            base_system_prompt="You are a helpful AI assistant.",
-        )
+        # Create provider and set system prompt
+        llm_provider = create_llm_provider(provider_name, provider_config)
+        llm_provider.set_system_prompt("You are a helpful AI assistant.")
 
         # Validate
         result = asyncio.run(llm_provider.validate())
@@ -144,9 +141,9 @@ def build(force: bool, verbose: bool):
         output.info(f"  ls -l {e.socket_path}")
         sys.exit(1)
 
-    # Wire up event handlers for progress display
-    from llm_sandbox.event_handlers import wire_up_container_events
-    wire_up_container_events(container_manager, output)
+    # Create progress callback
+    from llm_sandbox.event_handlers import create_image_build_callback
+    build_callback = create_image_build_callback(output)
 
     try:
         # Get build config
@@ -184,8 +181,13 @@ def build(force: bool, verbose: bool):
                     return
 
         if should_build:
-            # Build image
-            image = container_manager.build_image(containerfile_path, project_dir, tag)
+            # Build image with progress callback
+            image = container_manager.build_image(
+                containerfile_path,
+                project_dir,
+                tag,
+                progress_callback=build_callback
+            )
             output.success(f"Successfully built image: {image.tag}")
             output.info(f"\nThe image will be used on the next run.")
 

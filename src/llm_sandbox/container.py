@@ -11,12 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import requests_unixsocket
 from requests_futures.sessions import FuturesSession
 
-from llm_sandbox.events import EventEmitter
 from llm_sandbox.models import ContainerInfo
 
 
@@ -50,7 +49,7 @@ class Image:
     """Image size in bytes"""
 
 
-# ContainerManager event types
+# ContainerManager callback types
 
 class ImagePullState(Enum):
     """State of an image pull operation."""
@@ -102,9 +101,6 @@ class ContainerManager:
             session=requests_unixsocket.Session()
         )
 
-        # Event emitter for progress and status updates
-        self.events = EventEmitter()
-
         self._check_podman()
 
     def _get_podman_socket_path(self) -> str:
@@ -129,6 +125,7 @@ class ContainerManager:
         containerfile_path: Path,
         context_path: Path,
         tag: str,
+        progress_callback: Optional[Callable[[ImageBuildProgress], None]] = None,
     ) -> Image:
         """
         Build container image.
@@ -137,14 +134,16 @@ class ContainerManager:
             containerfile_path: Path to Containerfile
             context_path: Build context directory
             tag: Image tag
+            progress_callback: Optional callback for progress updates
 
         Returns:
             Image object for the built image
         """
-        self.events.emit(ImageBuildProgress(
-            state=ImageBuildState.STARTED,
-            tag=tag
-        ))
+        if progress_callback:
+            progress_callback(ImageBuildProgress(
+                state=ImageBuildState.STARTED,
+                tag=tag
+            ))
 
         # Create tar archive of build context
         tar_buffer = io.BytesIO()
@@ -177,12 +176,13 @@ class ContainerManager:
                     try:
                         data = json.loads(line)
                         if 'stream' in data:
-                            # Emit progress event with build log line
-                            self.events.emit(ImageBuildProgress(
-                                state=ImageBuildState.BUILDING,
-                                tag=tag,
-                                log_line=data['stream']
-                            ))
+                            # Call progress callback with build log line
+                            if progress_callback:
+                                progress_callback(ImageBuildProgress(
+                                    state=ImageBuildState.BUILDING,
+                                    tag=tag,
+                                    log_line=data['stream']
+                                ))
                         if 'aux' in data and 'ID' in data['aux']:
                             image_id = data['aux']['ID']
                     except json.JSONDecodeError:
@@ -197,20 +197,22 @@ class ContainerManager:
             if not image:
                 raise RuntimeError(f"Image built but not found: {tag}")
 
-            self.events.emit(ImageBuildProgress(
-                state=ImageBuildState.COMPLETED,
-                tag=tag,
-                image_id=image.image_id
-            ))
+            if progress_callback:
+                progress_callback(ImageBuildProgress(
+                    state=ImageBuildState.COMPLETED,
+                    tag=tag,
+                    image_id=image.image_id
+                ))
 
             return image
 
         except Exception as e:
-            self.events.emit(ImageBuildProgress(
-                state=ImageBuildState.FAILED,
-                tag=tag,
-                error=str(e)
-            ))
+            if progress_callback:
+                progress_callback(ImageBuildProgress(
+                    state=ImageBuildState.FAILED,
+                    tag=tag,
+                    error=str(e)
+                ))
             raise RuntimeError(f"Failed to build image: {e}") from e
 
     def _get_image_id(self, tag: str) -> str:
@@ -381,12 +383,17 @@ class ContainerManager:
         except Exception:
             return False
 
-    def pull_image(self, reference: str) -> Image:
+    def pull_image(
+        self,
+        reference: str,
+        progress_callback: Optional[Callable[[ImagePullProgress], None]] = None,
+    ) -> Image:
         """
         Pull container image from registry.
 
         Args:
             reference: Image reference (e.g., "docker.io/library/python:3.11")
+            progress_callback: Optional callback for progress updates
 
         Returns:
             Image object for the pulled image
@@ -394,10 +401,11 @@ class ContainerManager:
         Raises:
             RuntimeError: If image pull fails
         """
-        self.events.emit(ImagePullProgress(
-            state=ImagePullState.STARTED,
-            reference=reference
-        ))
+        if progress_callback:
+            progress_callback(ImagePullProgress(
+                state=ImagePullState.STARTED,
+                reference=reference
+            ))
 
         try:
             response = self.session.post(
@@ -414,19 +422,21 @@ class ContainerManager:
                         data = json.loads(line)
                         if 'stream' in data:
                             progress_text = data['stream'].rstrip()
-                            self.events.emit(ImagePullProgress(
-                                state=ImagePullState.DOWNLOADING,
-                                reference=reference,
-                                message=progress_text
-                            ))
+                            if progress_callback:
+                                progress_callback(ImagePullProgress(
+                                    state=ImagePullState.DOWNLOADING,
+                                    reference=reference,
+                                    message=progress_text
+                                ))
                         elif 'id' in data:
                             # Show progress for layers
                             progress_text = f"{data.get('id', '')}: {data.get('status', '')}"
-                            self.events.emit(ImagePullProgress(
-                                state=ImagePullState.DOWNLOADING,
-                                reference=reference,
-                                message=progress_text
-                            ))
+                            if progress_callback:
+                                progress_callback(ImagePullProgress(
+                                    state=ImagePullState.DOWNLOADING,
+                                    reference=reference,
+                                    message=progress_text
+                                ))
                     except json.JSONDecodeError:
                         continue
 
@@ -435,19 +445,21 @@ class ContainerManager:
             if not image:
                 raise RuntimeError(f"Image pulled but not found: {reference}")
 
-            self.events.emit(ImagePullProgress(
-                state=ImagePullState.COMPLETED,
-                reference=reference
-            ))
+            if progress_callback:
+                progress_callback(ImagePullProgress(
+                    state=ImagePullState.COMPLETED,
+                    reference=reference
+                ))
 
             return image
 
         except Exception as e:
-            self.events.emit(ImagePullProgress(
-                state=ImagePullState.FAILED,
-                reference=reference,
-                error=str(e)
-            ))
+            if progress_callback:
+                progress_callback(ImagePullProgress(
+                    state=ImagePullState.FAILED,
+                    reference=reference,
+                    error=str(e)
+                ))
             raise RuntimeError(f"Failed to pull image: {e}") from e
 
     def get_image_created_time(self, tag: str) -> float:

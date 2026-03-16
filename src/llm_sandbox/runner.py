@@ -304,7 +304,6 @@ class SandboxRunner:
         self.container_id: Optional[str] = None
         self.worktrees_base_dir: Optional[Path] = None
         self.created_worktrees: List[str] = []  # Track worktree names
-        self.llm_provider: Optional[LLMProvider] = None
 
         # Parallel execution support
         self._agent_llm_providers: Dict[str, LLMProvider] = {}
@@ -567,24 +566,7 @@ class SandboxRunner:
         # We create a symlink: /host/path/.git -> /project/.git
         await self._setup_git_symlink()
 
-        # Step 4: Create LLM provider with system prompt
-        base_system_prompt = self._create_base_system_prompt()
-        self.llm_provider = create_llm_provider(
-            self.provider_name,
-            self.provider_config,
-            base_system_prompt,
-        )
-
         # Locks are already initialized in __init__()
-
-    def _create_base_system_prompt(self) -> str:
-        """
-        Create the base system prompt describing the container environment.
-
-        Returns:
-            Base system prompt string
-        """
-        return """"""
 
     def _create_agent_llm_provider(self, agent_id: str) -> LLMProvider:
         """
@@ -596,10 +578,7 @@ class SandboxRunner:
         Returns:
             LLM provider instance
         """
-        base_prompt = self._create_base_system_prompt()
-        provider = create_llm_provider(
-            self.provider_name, self.provider_config, base_prompt
-        )
+        provider = create_llm_provider(self.provider_name, self.provider_config)
         self._agent_llm_providers[agent_id] = provider
         return provider
 

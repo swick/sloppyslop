@@ -107,17 +107,21 @@ def extract_json_from_text(text: str) -> str:
 class LLMProvider(ABC):
     """Base class for LLM providers with async-only interface."""
 
-    def __init__(self, base_system_prompt: str):
-        """
-        Initialize LLM provider with conversation tracking.
-
-        Args:
-            base_system_prompt: Base system prompt describing the environment and capabilities
-        """
-        self.base_system_prompt = base_system_prompt
+    def __init__(self):
+        """Initialize LLM provider with conversation tracking."""
+        self.base_system_prompt = ""
         self.conversation_history: List[Dict[str, Any]] = []
         self.verbose: bool = False
         self.events = EventEmitter()
+
+    def set_system_prompt(self, prompt: str) -> None:
+        """
+        Set the base system prompt.
+
+        Args:
+            prompt: Base system prompt describing the environment and capabilities
+        """
+        self.base_system_prompt = prompt
 
     def _generate_tools_description(self, mcp_server: MCPServer) -> str:
         """Generate a description of available tools from the MCP server."""
@@ -156,20 +160,6 @@ class LLMProvider(ABC):
         This method kept for compatibility but does nothing.
         """
         # Verbose logging now handled by events in CLI layer
-        pass
-
-    @abstractmethod
-    async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
-        """
-        Generate plain text response.
-
-        Args:
-            prompt: User prompt
-            max_tokens: Maximum tokens to generate
-
-        Returns:
-            Generated text
-        """
         pass
 
     @abstractmethod
@@ -214,18 +204,17 @@ class ClaudeProvider(LLMProvider):
     Vertex AI uses asyncio.to_thread for async methods since no native async client exists.
     """
 
-    def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig], base_system_prompt: str):
+    def __init__(self, provider_config: Union[AnthropicConfig, VertexAIConfig]):
         """
         Initialize Claude provider with async client.
 
         Args:
             provider_config: Provider configuration (AnthropicConfig or VertexAIConfig)
-            base_system_prompt: Base system prompt describing the environment
 
         Raises:
             ValueError: If required configuration is missing
         """
-        super().__init__(base_system_prompt)
+        super().__init__()
         import os
 
         self.model = provider_config.model
@@ -268,25 +257,6 @@ class ClaudeProvider(LLMProvider):
 
         else:
             raise ValueError(f"Unknown provider config type: {type(provider_config)}")
-
-    async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
-        """Generate plain text response."""
-        if self.client:
-            # Anthropic async client
-            response = await self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        else:
-            # Vertex AI - use sync client with asyncio.to_thread
-            response = await asyncio.to_thread(
-                self.sync_client.messages.create,
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        return response.content[0].text.strip()
 
     async def generate_structured(
         self,
@@ -536,7 +506,6 @@ When you're done analyzing, provide your final answer in the structured JSON for
 def create_llm_provider(
     provider_name: str,
     provider_config: Union[AnthropicConfig, VertexAIConfig],
-    base_system_prompt: str,
 ) -> LLMProvider:
     """
     Create an LLM provider instance.
@@ -544,7 +513,6 @@ def create_llm_provider(
     Args:
         provider_name: Name of the provider (anthropic, vertex-ai)
         provider_config: Provider configuration
-        base_system_prompt: Base system prompt describing the environment
 
     Returns:
         LLM provider instance with async interface
@@ -553,7 +521,7 @@ def create_llm_provider(
         ValueError: If provider is not supported
     """
     if provider_name in ("anthropic", "vertex-ai"):
-        return ClaudeProvider(provider_config, base_system_prompt)
+        return ClaudeProvider(provider_config)
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider_name}. "

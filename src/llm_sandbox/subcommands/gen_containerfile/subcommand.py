@@ -7,8 +7,8 @@ import click
 
 from llm_sandbox import AgentConfig
 from llm_sandbox.config import load_config
+from llm_sandbox.container import Image
 from llm_sandbox.event_handlers import wire_up_all_events
-from llm_sandbox.image import Image
 from llm_sandbox.output import create_output_service
 from llm_sandbox.runner import SandboxRunner
 from llm_sandbox.mcp_tools import (
